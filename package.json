@@ -1,0 +1,26 @@
+{
+  "name": "emend",
+  "version": "0.1.0",
+  "description": "Detects API drift between installed and target dependency versions, locates affected call sites, and produces verified migration PRs.",
+  "type": "module",
+  "bin": {
+    "emend": "./bin/emend.mjs"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning test/*.test.ts",
+    "emend": "node bin/emend.mjs",
+    "demo": "node bin/emend.mjs demo ./emend-demo"
+  },
+  "dependencies": {
+    "typescript": "^5.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  },
+  "license": "MIT",
+  "private": true
+}

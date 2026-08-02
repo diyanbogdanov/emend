@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+emend-demo/
+fixtures/demo-repo/node_modules/
+fixtures/demo-repo/package-lock.json
