@@ -169,6 +169,65 @@ function declaredInPackage(sym: ts.Symbol, pkgDirNormalised: string): boolean {
 }
 
 /**
+ * Find the symbol whose exports represent the package's public API.
+ *
+ * Three shapes exist in the wild and all must work:
+ *
+ *  1. ES module — the source file is itself the module (modern SDKs).
+ *  2. Ambient module — the file contains `declare module 'stripe' { ... }` and
+ *     is not a module itself, so asking the checker about the *file* yields
+ *     nothing. Older CJS-first SDKs use this; `stripe@21` is exactly this case
+ *     and silently produced a zero-symbol surface.
+ *  3. `export =` — a CommonJS export assignment, where the real surface hangs
+ *     off the assigned symbol rather than off the file's exports.
+ */
+function resolveModuleSymbol(
+  source: ts.SourceFile,
+  checker: ts.TypeChecker,
+): ts.Symbol | undefined {
+  const fileSymbol = checker.getSymbolAtLocation(source);
+  if (fileSymbol && checker.getExportsOfModule(fileSymbol).length > 0) return fileSymbol;
+
+  // `export = X`
+  const exportEquals = fileSymbol?.exports?.get('export=' as ts.__String);
+  if (exportEquals) {
+    try {
+      const target =
+        exportEquals.flags & ts.SymbolFlags.Alias
+          ? checker.getAliasedSymbol(exportEquals)
+          : exportEquals;
+      if (checker.getExportsOfModule(target).length > 0) return target;
+      // An `export =` of a class/namespace exposes its members, not module exports.
+      if (target.exports && target.exports.size > 0) return target;
+    } catch {
+      /* fall through to ambient module search */
+    }
+  }
+
+  // `declare module 'name' { ... }` — pick the declaration with the most exports.
+  let best: ts.Symbol | undefined;
+  let bestCount = 0;
+  for (const statement of source.statements) {
+    if (!ts.isModuleDeclaration(statement)) continue;
+    if (!ts.isStringLiteral(statement.name)) continue;
+    const sym = checker.getSymbolAtLocation(statement.name);
+    if (!sym) continue;
+    try {
+      const count = checker.getExportsOfModule(sym).length;
+      if (count > bestCount) {
+        best = sym;
+        bestCount = count;
+      }
+    } catch {
+      /* skip unusable declaration */
+    }
+  }
+  if (best) return best;
+
+  return fileSymbol;
+}
+
+/**
  * Build the API surface for an already-extracted package directory.
  *
  * Missing transitive dependencies are expected and fine: unresolved imports
@@ -220,7 +279,7 @@ export async function extractSurface(
     };
   }
 
-  const moduleSymbol = checker.getSymbolAtLocation(source);
+  const moduleSymbol = resolveModuleSymbol(source, checker);
   if (!moduleSymbol) {
     return {
       pkg,
@@ -400,6 +459,27 @@ export async function extractSurface(
         if (!(key in byTypeMember)) byTypeMember[key] = canonical;
       }
     }
+  }
+
+  // A resolved entry that yields nothing is NOT an empty API — it means the walk
+  // failed. Real causes seen in the wild: types generated at install time
+  // (`@prisma/client` is `export * from '.prisma/client/default'`, which does not
+  // exist until `prisma generate` runs), or an entry whose surface is re-exported
+  // from a dependency that is not present in the extracted tarball.
+  //
+  // Reporting this as `analyzed` with zero findings would read as "clean", which
+  // is the single most dangerous thing this tool could say.
+  if (Object.keys(symbols).length === 0) {
+    return {
+      pkg,
+      version,
+      symbols,
+      byTypeMember,
+      aliases,
+      entry: null,
+      truncated,
+      note: `declaration entry ${path.basename(entry)} resolved but produced no symbols — types are likely generated at install time or re-exported from a package not present in the published tarball`,
+    };
   }
 
   return {
