@@ -279,16 +279,40 @@ export async function restoreSnapshots(
 }
 
 /** Install the target version of the package being migrated. */
+/**
+ * Bump a dependency, preserving how the repository chose to express its range.
+ *
+ * `npm install pkg@version` writes `^version` regardless of what was there
+ * before, so an exact pin silently becomes a caret range. That is a real change
+ * in behaviour and repositories notice: a scanned repository pins `playwright` exactly
+ * and has a test asserting the pin matches its Docker base image, which failed
+ * on `^1.62.1` for precisely this reason.
+ */
 export async function bumpDependency(
   dir: string,
   pkg: string,
   version: string,
 ): Promise<CommandResult> {
-  return runCommand(
-    'npm',
-    ['install', `${pkg}@${version}`, '--no-audit', '--no-fund', '--silent'],
-    dir,
-  );
+  const args = ['install', `${pkg}@${version}`, '--no-audit', '--no-fund', '--silent'];
+
+  try {
+    const manifest = JSON.parse(
+      await readFile(path.join(dir, 'package.json'), 'utf8'),
+    ) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const declared =
+      manifest.dependencies?.[pkg] ?? manifest.devDependencies?.[pkg] ?? '';
+    const prefix = declared.match(/^[~^]/)?.[0];
+    if (prefix) args.push(`--save-prefix=${prefix}`);
+    else if (/^\d/.test(declared)) args.push('--save-exact');
+  } catch {
+    // No readable manifest: fall back to npm's default rather than failing the
+    // bump, since the install itself is what matters.
+  }
+
+  return runCommand('npm', args, dir);
 }
 
 /** Unified diff of the workspace against its base, for the PR body. */

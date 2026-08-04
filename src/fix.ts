@@ -7,6 +7,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fetchPackageDir } from './registry.ts';
 import { extractSurface } from './surface.ts';
@@ -82,10 +83,18 @@ async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol
 async function loadSources(
   repoDir: string,
   finding: Finding,
+  extraFiles: string[] = [],
 ): Promise<Map<string, string>> {
   const sources = new Map<string, string>();
-  const files = [...new Set(finding.sites.map((s) => s.file))];
-  for (const file of files.slice(0, 6)) {
+  const callSiteFiles = [...new Set(finding.sites.map((s) => s.file))].slice(0, 6);
+  // package.json is always relevant: this is a dependency migration, and the
+  // version range being changed lives there. Repositories assert against it
+  // (Docker base image tags, engine constraints) and the agent cannot reason
+  // about those without seeing it.
+  const files = [
+    ...new Set(['package.json', ...callSiteFiles, ...extraFiles]),
+  ].slice(0, 12);
+  for (const file of files) {
     try {
       const content = await readFile(path.join(repoDir, file), 'utf8');
       sources.set(file, content.length > 60_000 ? content.slice(0, 60_000) : content);
@@ -94,6 +103,35 @@ async function loadSources(
     }
   }
   return sources;
+}
+
+/**
+ * Repository files named by compiler or test output.
+ *
+ * An upgrade can break a file that contains no call site at all. a scanned repository
+ * asserts its Dockerfile's Playwright image tag matches package.json, so bumping
+ * the dependency fails a test in a file the call-site walk never visits — and
+ * the agent, shown only call-site files, correctly declined because it could not
+ * see what was wrong. Feeding it the files the failure actually names closes
+ * that gap without guessing at what else might be relevant.
+ */
+function filesNamedInOutput(output: string, repoDir: string): string[] {
+  const found = new Set<string>();
+  // Paths with a source extension, plus extensionless files a build commonly
+  // pins versions in. `Dockerfile` has no extension and would otherwise be
+  // invisible to a path regex.
+  const pattern =
+    /(?:^|[\s('"[])((?:[\w.@-]+\/)*(?:[\w.@-]+\.(?:[cm]?tsx?|[cm]?jsx?|json|ya?ml)|Dockerfile[\w.-]*|Makefile))(?=[\s:(),'"\]]|$)/gm;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(output)) !== null) {
+    const rel = m[1];
+    if (!rel) continue;
+    if (rel.startsWith('node_modules/') || rel.includes('/node_modules/')) continue;
+    if (!existsSync(path.join(repoDir, rel))) continue;
+    found.add(rel);
+    if (found.size >= 6) break;
+  }
+  return [...found];
 }
 
 function verificationErrors(report: VerificationReport): string {
@@ -190,10 +228,26 @@ export async function fixPackage(
     ) {
       const config = llm.config;
       progress(`agent: ${config.model} via ${config.providerLabel}`);
-      const sources = await loadSources(ws.dir, {
-        ...first,
-        sites: findings.flatMap((f) => f.sites),
-      });
+      const failureOutput = verificationErrors(verification);
+      const agentFinding = { ...first, sites: findings.flatMap((f) => f.sites) };
+
+      // Two hops, which is what this class of failure needs. The output names a
+      // failing test; that test names the file it asserts against. a scanned repository's
+      // Docker contract test is exactly this shape — the output never mentions
+      // the Dockerfile, only the test that reads it.
+      const collateral = filesNamedInOutput(failureOutput, ws.dir);
+      let sources = await loadSources(ws.dir, agentFinding, collateral);
+      const referenced = filesNamedInOutput(
+        [...sources.values()].join('\n'),
+        ws.dir,
+      ).filter((f) => !sources.has(f));
+      if (referenced.length > 0) {
+        sources = await loadSources(ws.dir, agentFinding, [...collateral, ...referenced]);
+      }
+      const added = [...sources.keys()].filter(
+        (f) => !agentFinding.sites.some((s) => s.file === f),
+      );
+      if (added.length > 0) progress(`  including ${added.join(', ')}`);
       // Interleave each finding's relevance-ranked candidates rather than
       // concatenating them. Concatenation means the prompt's cutoff falls inside
       // the first finding's list, so with nine broken symbols the model never
