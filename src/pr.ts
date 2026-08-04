@@ -199,12 +199,57 @@ export async function createPullRequest(
 ): Promise<{ ok: boolean; url?: string; error?: string }> {
   const { repoDir, branch, title, body, draft = true } = options;
   try {
-    await execFileAsync('git', ['-C', repoDir, 'checkout', '-b', branch]);
+    // `-B` rather than `-b`: a previous run may have created the branch and then
+    // failed later, and re-running after fixing that is the normal case. The
+    // branch content is fully determined by the migration, so resetting it is
+    // safe and produces the same result.
+    await execFileAsync('git', ['-C', repoDir, 'checkout', '-B', branch]);
     await execFileAsync('git', ['-C', repoDir, 'add', '-A']);
-    await execFileAsync('git', ['-C', repoDir, 'commit', '-m', title]);
-    await execFileAsync('git', ['-C', repoDir, 'push', '-u', 'origin', branch]);
 
-    const args = ['pr', 'create', '--title', title, '--body', body];
+    // Nothing staged means the migration produced no committable change —
+    // report that rather than failing with git's opaque exit code 1.
+    const { stdout: staged } = await execFileAsync('git', [
+      '-C', repoDir, 'diff', '--cached', '--name-only',
+    ]);
+    if (staged.trim() === '') {
+      return { ok: false, error: 'no changes to commit — the migration produced no file edits' };
+    }
+
+    await execFileAsync('git', ['-C', repoDir, 'commit', '-m', title]);
+
+    // Push with an *explicit* lease against the SHA the remote actually has.
+    //
+    // The bare `--force-with-lease` form compares against a remote-tracking ref,
+    // which each run's fresh worktree may not have, and it then refuses with
+    // "stale info" for a branch a previous run pushed. Naming the expected SHA
+    // states the intent directly and keeps the protection: if someone else moved
+    // the branch since this check, the push is rejected. An empty value means
+    // the branch must not exist yet.
+    const { stdout: remoteRef } = await execFileAsync('git', [
+      '-C', repoDir, 'ls-remote', 'origin', `refs/heads/${branch}`,
+    ]);
+    const remoteSha = remoteRef.trim().split(/\s+/)[0] ?? '';
+    await execFileAsync('git', [
+      '-C', repoDir, 'push',
+      `--force-with-lease=refs/heads/${branch}:${remoteSha}`,
+      '-u', 'origin', branch,
+    ]);
+
+    // Reuse an open PR for this branch instead of failing on the second run.
+    const { stdout: existing } = await execFileAsync('gh', [
+      'pr', 'list', '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url // ""',
+    ], { cwd: repoDir });
+    if (existing.trim() !== '') {
+      await execFileAsync('gh', ['pr', 'edit', branch, '--title', title, '--body', body], {
+        cwd: repoDir,
+      });
+      return { ok: true, url: existing.trim() };
+    }
+
+    // `--head` is required rather than inferred: inside a git worktree `gh`
+    // cannot work out the current branch and aborts with "you must first push
+    // the current branch to a remote", even when it has just been pushed.
+    const args = ['pr', 'create', '--title', title, '--body', body, '--head', branch];
     if (draft) args.push('--draft');
     if (options.baseBranch) args.push('--base', options.baseBranch);
 

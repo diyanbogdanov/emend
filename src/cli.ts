@@ -8,7 +8,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readdir, cp, access } from 'node:fs/promises';
+import { mkdir, readdir, cp, access, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanRepo } from './analyze.ts';
@@ -301,12 +301,18 @@ async function cmdPr(args: Args): Promise<number> {
     return 1;
   }
 
+  const creating = args.flags.get('create') === true;
+
   console.log(c.dim('  re-running fix to produce a verified PR body...'));
   const result = await fixFinding(repoDir, stored.finding, {
     // Without this, `emend pr --agent` silently re-ran deterministic-only and
     // rendered "unverified / needs a human" for a migration that had just
     // verified under `emend fix --agent`.
     useAgent: args.flags.get('agent') === true,
+    // The verified edits live in the isolated workspace, never in the checkout.
+    // Opening a PR from the checkout commits nothing, so the workspace has to
+    // survive long enough to push from.
+    keepWorkspace: creating,
     onProgress: (m) => console.log(c.dim(`    ${m}`)),
   });
   store.close();
@@ -314,7 +320,7 @@ async function cmdPr(args: Args): Promise<number> {
   const title = renderPrTitle(result);
   const body = renderPrBody(result);
 
-  if (args.flags.get('create') !== true) {
+  if (!creating) {
     console.log('');
     console.log(c.bold(`  TITLE  ${title}`));
     console.log('');
@@ -337,8 +343,25 @@ async function cmdPr(args: Args): Promise<number> {
     return 1;
   }
 
+  if (result.workspaceMode !== 'worktree' || !result.workspaceDir) {
+    console.error(
+      c.red(
+        '  Refusing to open a PR: the workspace is not a git worktree, so it has\n' +
+          '  no remote to push to. This happens when the repository has no commits.',
+      ),
+    );
+    return 1;
+  }
+
   const branch = `emend/${stored.finding.pkg.replace(/[^a-z0-9]+/gi, '-')}-${stored.finding.id}`;
-  const res = await createPullRequest({ repoDir, branch, title, body, draft: true });
+  const res = await createPullRequest({
+    repoDir: result.workspaceDir,
+    branch,
+    title,
+    body,
+    draft: true,
+  });
+  await rm(result.workspaceDir, { recursive: true, force: true }).catch(() => {});
   if (!res.ok) {
     console.error(c.red(`  PR creation failed: ${res.error}`));
     return 1;
