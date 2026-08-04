@@ -118,8 +118,12 @@ function buildUserPrompt(ctx: AgentContext): string {
   });
 
   if (ctx.candidateSymbols.length > 0) {
-    parts.push(`# Symbols available in ${finding.pkg}@${finding.toVersion} (nearby candidates)`);
-    parts.push(ctx.candidateSymbols.slice(0, 60).join('\n'));
+    // Ordered by relevance to the broken symbols, so truncation drops the least
+    // likely replacements rather than an alphabetical tail.
+    parts.push(
+      `# Symbols available in ${finding.pkg}@${finding.toVersion} (most relevant first)`,
+    );
+    parts.push(ctx.candidateSymbols.slice(0, 120).join('\n'));
     parts.push('');
   }
 
@@ -229,6 +233,8 @@ export function nearbySymbols(
 ): string[] {
   const dot = changedPath.lastIndexOf('.');
   const parent = dot === -1 ? '' : changedPath.slice(0, dot);
+  const leaf = (dot === -1 ? changedPath : changedPath.slice(dot + 1)).toLowerCase();
+
   const out: string[] = [];
   for (const s of Object.values(toSymbols)) {
     if (s.deprecated) continue;
@@ -236,5 +242,25 @@ export function nearbySymbols(
     const sParent = sDot === -1 ? '' : s.path.slice(0, sDot);
     if (sParent === parent) out.push(s.path);
   }
-  return out.sort();
+
+  // Rank by name similarity to the symbol that broke, not alphabetically.
+  //
+  // The prompt can only carry a slice of this list, and the model is instructed
+  // to use nothing outside it. Sorting alphabetically buried zod 4's
+  // `partialRecord` — the exact replacement for a broken `record` call — at
+  // position ~200 of 264, past the cutoff. The model then could not name the one
+  // symbol that would have fixed the build, and spent three attempts failing.
+  const score = (candidatePath: string): number => {
+    const cDot = candidatePath.lastIndexOf('.');
+    const name = (cDot === -1 ? candidatePath : candidatePath.slice(cDot + 1)).toLowerCase();
+    if (name === leaf) return 0;
+    if (name.includes(leaf)) return 1; // record -> partialRecord, looseRecord
+    if (leaf.includes(name)) return 2;
+    return 3;
+  };
+
+  return out.sort((a, b) => {
+    const diff = score(a) - score(b);
+    return diff !== 0 ? diff : a.localeCompare(b);
+  });
 }

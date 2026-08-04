@@ -57,6 +57,18 @@ export interface TrackedRepo {
   lastScannedAt: string | null;
 }
 
+export interface PullRequestRecord {
+  repoKey: string;
+  number: number;
+  branch: string;
+  url: string;
+  findingIds: string[];
+  openedAt: string;
+  /** 'pending' until the customer's CI reports. Never assume it passed. */
+  ciStatus: string;
+  ciCheckedAt: string | null;
+}
+
 export interface Job {
   id: number;
   repoKey: string;
@@ -180,9 +192,93 @@ export class Store {
         error        TEXT
       );
 
+      -- Pull requests Emend opened, and what the customer's CI made of them.
+      --
+      -- The hosted path cannot verify a migration itself: running a repository's
+      -- tests is the code execution the scan path deliberately avoids. So the
+      -- customer's own CI is the verifier, and its verdict arrives after the PR
+      -- rather than before. Until it does, ci_status stays 'pending' and must
+      -- never be presented as passing.
+      CREATE TABLE IF NOT EXISTS pull_requests (
+        repo_key    TEXT NOT NULL,
+        number      INTEGER NOT NULL,
+        branch      TEXT NOT NULL,
+        head_sha    TEXT,
+        url         TEXT NOT NULL,
+        finding_ids TEXT NOT NULL,
+        opened_at   TEXT NOT NULL,
+        ci_status   TEXT NOT NULL DEFAULT 'pending',
+        ci_checked_at TEXT,
+        PRIMARY KEY (repo_key, number)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, id);
       CREATE INDEX IF NOT EXISTS idx_repos_install ON repos(installation_id);
+      CREATE INDEX IF NOT EXISTS idx_pr_branch ON pull_requests(branch);
     `);
+  }
+
+  recordPullRequest(pr: {
+    repoKey: string;
+    number: number;
+    branch: string;
+    url: string;
+    findingIds: string[];
+  }): void {
+    this.#db
+      .prepare(
+        `INSERT INTO pull_requests (repo_key, number, branch, url, finding_ids, opened_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(repo_key, number) DO UPDATE SET
+           finding_ids = excluded.finding_ids,
+           ci_status = 'pending',
+           ci_checked_at = NULL`,
+      )
+      .run(
+        pr.repoKey,
+        pr.number,
+        pr.branch,
+        pr.url,
+        JSON.stringify(pr.findingIds),
+        new Date().toISOString(),
+      );
+  }
+
+  /**
+   * Record a CI verdict for whichever PR is on this branch.
+   *
+   * Keyed by branch because `check_suite` identifies the head branch, not the
+   * pull request. A no-op when the branch is not one Emend opened — the App also
+   * receives check events for every other push to the repository.
+   */
+  recordCiResult(repoKey: string, branch: string, headSha: string, status: string): boolean {
+    const result = this.#db
+      .prepare(
+        `UPDATE pull_requests SET ci_status = ?, ci_checked_at = ?, head_sha = ?
+         WHERE repo_key = ? AND branch = ?`,
+      )
+      .run(status, new Date().toISOString(), headSha, repoKey, branch);
+    return result.changes > 0;
+  }
+
+  listPullRequests(repoKey?: string): PullRequestRecord[] {
+    const rows = (
+      repoKey
+        ? this.#db
+            .prepare(`SELECT * FROM pull_requests WHERE repo_key = ? ORDER BY opened_at DESC`)
+            .all(repoKey)
+        : this.#db.prepare(`SELECT * FROM pull_requests ORDER BY opened_at DESC`).all()
+    ) as Array<Record<string, string | number>>;
+    return rows.map((r) => ({
+      repoKey: String(r['repo_key']),
+      number: Number(r['number']),
+      branch: String(r['branch']),
+      url: String(r['url']),
+      findingIds: JSON.parse(String(r['finding_ids'])) as string[],
+      openedAt: String(r['opened_at']),
+      ciStatus: String(r['ci_status']),
+      ciCheckedAt: r['ci_checked_at'] ? String(r['ci_checked_at']) : null,
+    }));
   }
 
   // ---------------------------------------------------------------------------

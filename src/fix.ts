@@ -194,9 +194,22 @@ export async function fixPackage(
         ...first,
         sites: findings.flatMap((f) => f.sites),
       });
-      const candidates = [
-        ...new Set(findings.flatMap((f) => nearbySymbols(f.change.path, toSymbols))),
-      ];
+      // Interleave each finding's relevance-ranked candidates rather than
+      // concatenating them. Concatenation means the prompt's cutoff falls inside
+      // the first finding's list, so with nine broken symbols the model never
+      // sees a replacement for eight of them.
+      const ranked = findings.map((f) => nearbySymbols(f.change.path, toSymbols));
+      const candidates: string[] = [];
+      const seen = new Set<string>();
+      for (let i = 0; i < Math.max(0, ...ranked.map((r) => r.length)); i++) {
+        for (const list of ranked) {
+          const symbol = list[i];
+          if (symbol !== undefined && !seen.has(symbol)) {
+            seen.add(symbol);
+            candidates.push(symbol);
+          }
+        }
+      }
       const attempts: AgentAttempt[] = [];
       let rationale = '';
       let previousAttempt: { edits: TextEdit[]; errors: string } | undefined = {

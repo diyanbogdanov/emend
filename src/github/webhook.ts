@@ -33,6 +33,12 @@ interface WebhookPayload {
   repository?: RepoPayload;
   ref?: string;
   after?: string;
+  check_suite?: {
+    head_branch?: string | null;
+    head_sha?: string;
+    status?: string;
+    conclusion?: string | null;
+  };
 }
 
 /** `full_name` is `owner/repo`; fall back to it when `owner` is absent. */
@@ -98,6 +104,37 @@ export function handleWebhook(
       }
       store.enqueueJob(key, branch);
       return { action: 'scan queued', jobsQueued: 1 };
+    }
+
+    case 'check_suite': {
+      // The customer's CI is the verifier for hosted migrations, so its verdict
+      // is the evidence a PR is judged on. Only completed suites count: an
+      // in-progress suite has concluded nothing.
+      const suite = payload.check_suite;
+      if (!suite || suite.status !== 'completed') {
+        return { action: 'ignored: check suite not completed', jobsQueued: 0 };
+      }
+      const id = identify(payload.repository);
+      const branch = suite.head_branch;
+      if (!id || !branch) {
+        return { action: 'ignored: incomplete check suite payload', jobsQueued: 0 };
+      }
+
+      // `conclusion` is null for suites that were cancelled or skipped; treat
+      // anything that is not an explicit success as not-passing.
+      const conclusion = suite.conclusion ?? 'unknown';
+      const matched = store.recordCiResult(
+        repoKey(id.owner, id.name),
+        branch,
+        suite.head_sha ?? '',
+        conclusion,
+      );
+      return {
+        action: matched
+          ? `CI ${conclusion} recorded for ${branch}`
+          : 'ignored: not an Emend branch',
+        jobsQueued: 0,
+      };
     }
 
     default:
