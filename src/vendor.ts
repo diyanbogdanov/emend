@@ -176,9 +176,13 @@ export async function materializeRepoDeps(
       }
       // Only top-level packages contribute executables, matching npm: a nested
       // copy exists to satisfy one dependent, not to provide a command.
-      const binaries = entry.installPath.split('/node_modules/').length === 2
-        ? await linkBinaries(pkgDir, entry.name, binDir)
-        : 0;
+      // `node_modules/zod` contains no *leading* slash, so splitting on
+      // '/node_modules/' finds nothing and counts every package as nested —
+      // which linked zero binaries and left the staged tree unable to typecheck.
+      const isTopLevel =
+        entry.installPath.startsWith('node_modules/') &&
+        !entry.installPath.slice('node_modules/'.length).includes('node_modules/');
+      const binaries = isTopLevel ? await linkBinaries(pkgDir, entry.name, binDir) : 0;
       return { ok: true as const, binaries };
     } catch (err) {
       return {
