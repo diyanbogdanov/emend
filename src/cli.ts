@@ -303,6 +303,10 @@ async function cmdPr(args: Args): Promise<number> {
 
   console.log(c.dim('  re-running fix to produce a verified PR body...'));
   const result = await fixFinding(repoDir, stored.finding, {
+    // Without this, `emend pr --agent` silently re-ran deterministic-only and
+    // rendered "unverified / needs a human" for a migration that had just
+    // verified under `emend fix --agent`.
+    useAgent: args.flags.get('agent') === true,
     onProgress: (m) => console.log(c.dim(`    ${m}`)),
   });
   store.close();
@@ -470,6 +474,7 @@ ${c.bold('COMMANDS')}
 
   pr <repo>       Render the pull request for a finding. Dry run by default.
     --finding <id>  Required
+    --agent         Let the model attempt what the planner declined
     --create        Actually push a branch and open a DRAFT PR
 
   serve           Local dashboard for browsing findings.

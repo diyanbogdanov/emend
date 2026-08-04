@@ -373,237 +373,47 @@ export interface PackageFixResult {
   agent?: FixResult['agent'];
 }
 
+/**
+ * Fix a single finding.
+ *
+ * Delegates to `fixPackage` with a one-element list rather than reimplementing
+ * the pipeline. It previously did the latter, and the two copies drifted: the
+ * agent escalation in `fixPackage` learned to include package.json and the
+ * files a failure names, while this path did not, so `emend pr --agent`
+ * rendered "unverified, needs a human" for a migration that `emend fix --agent`
+ * had just verified.
+ *
+ * Note that a version bump is atomic. Fixing one finding of several still bumps
+ * the dependency, so the other findings' breakage is present and verification
+ * will fail. This is only appropriate when the package has one finding, or for
+ * rendering a single finding's evidence.
+ */
 export async function fixFinding(
   repoDir: string,
   finding: Finding,
   options: FixOptions = {},
 ): Promise<FixResult> {
-  const progress = options.onProgress ?? (() => {});
-
-  progress(`planning ${finding.change.path}`);
-  const toSymbols = await targetSymbols(finding);
-  const plan = planFinding(finding, toSymbols);
+  const pkgResult = await fixPackage(repoDir, [finding], options);
+  const plan = pkgResult.plans[0] ?? null;
 
   const deterministicReason =
     finding.change.kind === 'deprecated'
       ? 'symbol is deprecated but still present; no mechanical replacement is derivable from the type surface alone'
-      : 'no unambiguous replacement symbol with a matching signature was found — Emend will not guess';
+      : 'no unambiguous replacement symbol with a matching signature was found \u2014 Emend will not guess';
 
-  // Resolve the agent up front so we can decline cheaply, before paying for a
-  // workspace, when there is nothing that could possibly produce a fix.
-  const llm = options.useAgent ? resolveLlmConfig() : null;
-  if (!plan && (!llm || !llm.ok)) {
-    return {
-      finding,
-      plan: null,
-      unplannableReason:
-        llm && !llm.ok
-          ? `${deterministicReason}. Agent unavailable: ${llm.reason}`
-          : `${deterministicReason}. Re-run with --agent to let a model attempt it.`,
-      verification: null,
-      diff: '',
-      appliedEdits: 0,
-      failedEdits: [],
-      bump: null,
-      workspaceDir: null,
-      workspaceMode: null,
-    };
-  }
-
-  progress(`preparing isolated workspace`);
-  let ws: Workspace | null = null;
-  try {
-    ws = await prepareWorkspace(repoDir);
-    progress(`  workspace: ${ws.dir} (${ws.mode})`);
-
-    progress('running baseline verification (before any change)');
-    const baseline = await runPhase(ws.dir);
-    progress(
-      `  baseline: typecheck=${describe(baseline.typecheck)} test=${describe(baseline.test)}`,
-    );
-
-    let verification: VerificationReport;
-    let appliedCount = 0;
-    let failedEdits: Array<{ file: string; line: number; reason: string }> = [];
-    let bump: CommandResult | null = null;
-    let agentRecord: FixResult['agent'];
-
-    if (plan) {
-      progress(`applying ${plan.edits.length} deterministic edit(s), bumping to ${plan.toVersion}`);
-      const applied = await applyPlan(ws, plan);
-      bump = applied.bump;
-      appliedCount = applied.edits.applied.length;
-      failedEdits = applied.edits.failed.map((f) => ({
-        file: f.edit.file,
-        line: f.edit.line,
-        reason: f.reason,
-      }));
-
-      progress('running post-change verification');
-      const post = await runPhase(ws.dir);
-      progress(`  post: typecheck=${describe(post.typecheck)} test=${describe(post.test)}`);
-      verification = compare(baseline, post);
-    } else {
-      // Agent path. The model proposes; deterministic code applies and judges.
-      const config = llm && llm.ok ? llm.config : null;
-      if (!config) throw new Error('agent requested but no configuration resolved');
-
-      progress(`agent: ${config.model} via ${config.providerLabel}`);
-      const sources = await loadSources(ws.dir, finding);
-      const candidates = nearbySymbols(finding.change.path, toSymbols);
-      const attempts: AgentAttempt[] = [];
-
-      // The dependency bump happens once, before any attempt: the model needs to
-      // be verified against the NEW version, which is the whole point.
-      progress(`  bumping ${finding.pkg} to ${finding.toVersion}`);
-      bump = await bumpDependency(ws.dir, finding.pkg, finding.toVersion);
-
-      let best: VerificationReport | null = null;
-      let previousAttempt: { edits: TextEdit[]; errors: string } | undefined;
-      let rationale = '';
-
-      for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
-        progress(`  attempt ${attempt}/${config.maxRetries}: requesting edits`);
-        const proposal = await proposeEdits(config, {
-          finding,
-          changes: [{ change: finding.change, sites: finding.sites }],
-          sources,
-          candidateSymbols: candidates,
-          ...(previousAttempt ? { previousAttempt } : {}),
-        });
-
-        if (!proposal.ok) {
-          attempts.push({
-            attempt,
-            edits: [],
-            rationale: '',
-            modelConfidence: 'low',
-            outcome: 'provider-error',
-            error: proposal.error ?? 'unknown',
-          });
-          progress(`    provider error: ${proposal.error}`);
-          break;
-        }
-        if (proposal.edits.length === 0) {
-          attempts.push({
-            attempt,
-            edits: [],
-            rationale: proposal.rationale,
-            modelConfidence: proposal.modelConfidence,
-            outcome: 'declined',
-          });
-          progress(`    model declined: ${proposal.rationale.slice(0, 160)}`);
-          break;
-        }
-
-        rationale = proposal.rationale;
-        const editResult = await applyTextEdits(ws.dir, proposal.edits);
-        progress(
-          `    ${editResult.applied.length} edit(s) applied, ${editResult.failed.length} rejected`,
-        );
-
-        if (editResult.applied.length === 0) {
-          const why = editResult.failed.map((f) => f.reason).join('; ');
-          attempts.push({
-            attempt,
-            edits: proposal.edits,
-            rationale: proposal.rationale,
-            modelConfidence: proposal.modelConfidence,
-            outcome: 'all-edits-rejected',
-            error: why,
-          });
-          previousAttempt = { edits: proposal.edits, errors: `Your edits were rejected: ${why}` };
-          await restoreSnapshots(ws.dir, editResult.snapshots);
-          continue;
-        }
-
-        const post = await runPhase(ws.dir);
-        const report = compare(baseline, post);
-        progress(`    verification: ${report.outcome}`);
-
-        attempts.push({
-          attempt,
-          edits: proposal.edits,
-          rationale: proposal.rationale,
-          modelConfidence: proposal.modelConfidence,
-          outcome: report.outcome,
-        });
-
-        best = report;
-        appliedCount = editResult.applied.length;
-        failedEdits = editResult.failed.map((f) => ({
-          file: f.edit.file,
-          line: 0,
-          reason: f.reason,
-        }));
-
-        if (report.outcome === 'verified' || report.outcome === 'typecheck-only') break;
-
-        // Failed: roll back and feed the compiler its own complaint.
-        if (attempt < config.maxRetries) {
-          await restoreSnapshots(ws.dir, editResult.snapshots);
-          previousAttempt = { edits: proposal.edits, errors: verificationErrors(report) };
-        }
-      }
-
-      verification =
-        best ??
-        compare(baseline, {
-          typecheck: {
-            command: 'agent',
-            ok: false,
-            exitCode: null,
-            stdout: '',
-            stderr: '',
-            skipped: true,
-            skipReason: 'agent produced no applicable edits',
-          },
-          test: {
-            command: 'agent',
-            ok: false,
-            exitCode: null,
-            stdout: '',
-            stderr: '',
-            skipped: true,
-            skipReason: 'agent produced no applicable edits',
-          },
-        });
-
-      agentRecord = {
-        model: config.model,
-        provider: config.providerLabel,
-        attempts,
-        rationale,
-      };
-    }
-
-    const diff = await workspaceDiff(ws);
-
-    const result: FixResult = {
-      finding,
-      plan,
-      ...(plan ? {} : { unplannableReason: deterministicReason }),
-      verification,
-      diff,
-      appliedEdits: appliedCount,
-      failedEdits,
-      bump,
-      workspaceDir: ws.dir,
-      workspaceMode: ws.mode,
-      ...(agentRecord ? { agent: agentRecord } : {}),
-    };
-
-    if (!options.keepWorkspace) {
-      await ws.cleanup();
-      result.workspaceDir = null;
-    }
-    return result;
-  } catch (err) {
-    if (ws && !options.keepWorkspace) {
-      await ws.cleanup().catch(() => {});
-    }
-    throw err;
-  }
+  return {
+    finding,
+    plan,
+    ...(plan ? {} : { unplannableReason: deterministicReason }),
+    verification: pkgResult.verification,
+    diff: pkgResult.diff,
+    appliedEdits: pkgResult.appliedEdits,
+    failedEdits: pkgResult.failedEdits,
+    bump: pkgResult.bump,
+    workspaceDir: pkgResult.workspaceDir,
+    workspaceMode: pkgResult.workspaceMode,
+    ...(pkgResult.agent ? { agent: pkgResult.agent } : {}),
+  };
 }
 
 function describe(r: CommandResult): string {
