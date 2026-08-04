@@ -153,6 +153,53 @@ function walkDir(dir: string, exts: string[]): string[] {
   return out;
 }
 
+/** Directory -> the package name declared there, or null. Paths repeat heavily. */
+const packageNameCache = new Map<string, string | null>();
+
+/**
+ * Which package declares this file, by finding its nearest `package.json`.
+ *
+ * The obvious implementation — look for `/node_modules/` in the path and take
+ * the next segment — is wrong whenever a package is reached through a symlink,
+ * because TypeScript reports the resolved real path. That silently discarded
+ * *every* type-based call site in two important cases: dependencies Emend stages
+ * itself from its tarball cache, and any repository using pnpm, whose entire
+ * `node_modules` is symlinks. Both looked like "this code doesn't use the API".
+ *
+ * Reading the manifest is authoritative regardless of how the file was reached.
+ */
+function owningPackage(declarationFile: string): string | null {
+  let dir = path.dirname(path.resolve(declarationFile));
+  // Deep enough for nested node_modules, bounded so a pathological path cannot
+  // walk to the filesystem root one stat at a time.
+  for (let depth = 0; depth < 16; depth++) {
+    const cached = packageNameCache.get(dir);
+    if (cached !== undefined) return cached;
+
+    const manifest = path.join(dir, 'package.json');
+    if (ts.sys.fileExists(manifest)) {
+      let name: unknown;
+      try {
+        name = (JSON.parse(ts.sys.readFile(manifest) ?? '{}') as { name?: unknown }).name;
+      } catch {
+        name = undefined;
+      }
+      // Packages ship nameless `package.json` files inside subdirectories purely
+      // to set `"type": "module"`. Those are not package boundaries; keep going.
+      if (typeof name === 'string' && name.length > 0) {
+        packageNameCache.set(dir, name);
+        return name;
+      }
+    }
+
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  packageNameCache.set(dir, null);
+  return null;
+}
+
 export function findCallSites(
   repoDir: string,
   surfaces: Map<string, ApiSurface>,
@@ -308,15 +355,7 @@ export function findCallSites(
           const decls = sym?.declarations;
           if (sym && decls && decls.length > 0) {
             for (const d of decls) {
-              const file = d.getSourceFile().fileName.replace(/\\/g, '/');
-              const marker = '/node_modules/';
-              const idx = file.lastIndexOf(marker);
-              if (idx === -1) continue;
-              const after = file.slice(idx + marker.length);
-              const segs = after.split('/');
-              const owningPkg = after.startsWith('@')
-                ? `${segs[0]}/${segs[1]}`
-                : segs[0];
+              const owningPkg = owningPackage(d.getSourceFile().fileName);
               if (!owningPkg || !surfaces.has(owningPkg)) continue;
               const surface = surfaces.get(owningPkg);
               if (!surface) continue;

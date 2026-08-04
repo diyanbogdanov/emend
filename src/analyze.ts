@@ -17,6 +17,7 @@ import {
 import { extractSurface } from './surface.ts';
 import { diffSurfaces, consumerImpacting } from './diff.ts';
 import { findCallSites } from './callsites.ts';
+import { materializeRepoDeps } from './vendor.ts';
 import type {
   ApiSurface,
   Finding,
@@ -42,6 +43,15 @@ export interface ScanOptions {
    * Hosted scans pass `github.com/<owner>/<repo>`.
    */
   repoKey?: string;
+  /**
+   * Stage dependencies from the registry cache when `node_modules` is absent.
+   *
+   * Off by default because it writes into the repository directory, which is
+   * unwelcome in someone's working checkout. Hosted scans operate on a
+   * throwaway extraction and always enable it — without it they resolve types
+   * poorly and find roughly half the call sites the CLI does.
+   */
+  vendorDeps?: boolean;
 }
 
 export function findingId(
@@ -93,6 +103,22 @@ export async function scanRepo(
 
   const repo = await readRepo(repoDir);
   const warnings = [...repo.warnings];
+
+  // Stage dependencies before building the TypeScript program. Type-based call
+  // site matching resolves `octokit.rest.repos.get` through the checker, which
+  // needs the real declarations on disk; without them it silently falls back to
+  // import-based matching alone and misses most nested-resource usage.
+  if (options.vendorDeps) {
+    const staged = await materializeRepoDeps(repoDir, repo.dependencies, progress);
+    if (staged.failed.length > 0) {
+      warnings.push(
+        `${staged.failed.length} dependency package(s) could not be staged (${staged.failed
+          .slice(0, 5)
+          .map((f) => f.pkg)
+          .join(', ')}${staged.failed.length > 5 ? ', …' : ''}) — call sites in code that imports them may be missed`,
+      );
+    }
+  }
 
   let deps = repo.dependencies.filter((d) => d.installed !== null);
   if (options.includeDev === false) deps = deps.filter((d) => !d.dev);

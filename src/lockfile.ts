@@ -25,15 +25,36 @@ export type VersionSource = 'node_modules' | 'lockfile' | 'range';
 export interface LockfileResult {
   /** Package name -> resolved version, for top-level installs only. */
   versions: Map<string, string>;
+  /**
+   * Every entry in the lockfile, keyed by its install path relative to the
+   * repository root (`node_modules/a`, `node_modules/a/node_modules/b`).
+   *
+   * The nested paths matter. They are how npm expresses two packages needing
+   * incompatible versions of a third, and flattening them would silently give
+   * one of those packages the wrong version's types.
+   */
+  tree: Map<string, LockEntry>;
   /** Which lockfile was read, for reporting. */
   kind: 'package-lock.json' | null;
   /** A lockfile we found but cannot parse, for an honest warning. */
   unsupported: string | null;
 }
 
+export interface LockEntry {
+  /** Package name, derived from the install path. */
+  name: string;
+  version: string;
+  /** Install path relative to the repository root. */
+  installPath: string;
+  dev: boolean;
+}
+
 interface NpmLockV3 {
   lockfileVersion?: number;
-  packages?: Record<string, { version?: string; link?: boolean }>;
+  packages?: Record<
+    string,
+    { version?: string; link?: boolean; dev?: boolean; resolved?: string }
+  >;
   dependencies?: Record<string, { version?: string }>;
 }
 
@@ -46,7 +67,12 @@ const UNSUPPORTED_LOCKFILES = ['pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.l
  * which the caller reports as lower-fidelity rather than treating as authoritative.
  */
 export async function readLockfile(repoDir: string): Promise<LockfileResult> {
-  const empty: LockfileResult = { versions: new Map(), kind: null, unsupported: null };
+  const empty: LockfileResult = {
+    versions: new Map(),
+    tree: new Map(),
+    kind: null,
+    unsupported: null,
+  };
 
   let raw: string;
   try {
@@ -71,28 +97,59 @@ export async function readLockfile(repoDir: string): Promise<LockfileResult> {
   }
 
   const versions = new Map<string, string>();
+  const tree = new Map<string, LockEntry>();
 
   // lockfileVersion 2 and 3: a flat `packages` map keyed by install path.
   for (const [installPath, entry] of Object.entries(lock.packages ?? {})) {
     if (installPath === '') continue; // the root project itself
     if (entry?.link) continue; // workspace symlink, no registry version
     if (!entry?.version) continue;
+    // Entries without a registry tarball (git, file, http) cannot be fetched.
+    if (entry.resolved && !/^https?:\/\//.test(entry.resolved)) continue;
 
-    // Only top-level installs. A nested `node_modules/a/node_modules/b` is a
-    // deduplication artefact and is NOT what the repo's own imports resolve to.
-    const name = topLevelName(installPath);
-    if (name) versions.set(name, entry.version);
+    const name = nameFromInstallPath(installPath);
+    if (name) {
+      tree.set(installPath, {
+        name,
+        version: entry.version,
+        installPath,
+        dev: entry.dev === true,
+      });
+    }
+
+    // `versions` stays top-level only: it answers "what does this repo's own
+    // code resolve when it imports X", and a nested entry answers that question
+    // for some dependency, not for the repo.
+    const top = topLevelName(installPath);
+    if (top) versions.set(top, entry.version);
   }
 
   // lockfileVersion 1: a nested `dependencies` tree. Its top level is what the
   // root resolves, so nested entries are ignored for the same reason as above.
   if (versions.size === 0) {
     for (const [name, entry] of Object.entries(lock.dependencies ?? {})) {
-      if (entry?.version) versions.set(name, entry.version);
+      if (!entry?.version) continue;
+      versions.set(name, entry.version);
+      const installPath = `node_modules/${name}`;
+      tree.set(installPath, { name, version: entry.version, installPath, dev: false });
     }
   }
 
-  return { versions, kind: 'package-lock.json', unsupported: null };
+  return { versions, tree, kind: 'package-lock.json', unsupported: null };
+}
+
+/** Package name from any install path, however deeply nested. */
+function nameFromInstallPath(installPath: string): string | null {
+  const marker = 'node_modules/';
+  const last = installPath.lastIndexOf(marker);
+  if (last === -1) return null;
+  const rest = installPath.slice(last + marker.length);
+  if (rest === '' || rest.includes('/node_modules/')) return null;
+  if (rest.startsWith('@')) {
+    const parts = rest.split('/');
+    return parts.length === 2 ? rest : null;
+  }
+  return rest.includes('/') ? null : rest;
 }
 
 /**
