@@ -47,6 +47,56 @@ export interface StoredRun {
   diff: string | null;
 }
 
+export interface TrackedRepo {
+  repoKey: string;
+  installationId: number;
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  addedAt: string;
+  lastScannedAt: string | null;
+}
+
+export interface Job {
+  id: number;
+  repoKey: string;
+  ref: string;
+  kind: string;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  attempts: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
+}
+
+function toTrackedRepo(r: Record<string, string | number>): TrackedRepo {
+  return {
+    repoKey: String(r['repo_key']),
+    installationId: Number(r['installation_id']),
+    owner: String(r['owner']),
+    name: String(r['name']),
+    defaultBranch: String(r['default_branch']),
+    addedAt: String(r['added_at']),
+    lastScannedAt: r['last_scanned_at'] ? String(r['last_scanned_at']) : null,
+  };
+}
+
+function toJob(r: Record<string, string | number>): Job {
+  return {
+    id: Number(r['id']),
+    repoKey: String(r['repo_key']),
+    ref: String(r['ref']),
+    kind: String(r['kind']),
+    status: String(r['status']) as Job['status'],
+    attempts: Number(r['attempts']),
+    createdAt: String(r['created_at']),
+    startedAt: r['started_at'] ? String(r['started_at']) : null,
+    finishedAt: r['finished_at'] ? String(r['finished_at']) : null,
+    error: r['error'] ? String(r['error']) : null,
+  };
+}
+
 export class Store {
   #db: DatabaseSync;
 
@@ -95,7 +145,189 @@ export class Store {
 
       CREATE INDEX IF NOT EXISTS idx_findings_repo ON findings(repo_dir, status);
       CREATE INDEX IF NOT EXISTS idx_runs_finding ON runs(finding_id);
+
+      -- Hosted service. A local CLI install simply leaves these empty.
+      CREATE TABLE IF NOT EXISTS installations (
+        installation_id INTEGER PRIMARY KEY,
+        account         TEXT NOT NULL,
+        created_at      TEXT NOT NULL,
+        suspended_at    TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS repos (
+        repo_key        TEXT PRIMARY KEY,
+        installation_id INTEGER NOT NULL,
+        owner           TEXT NOT NULL,
+        name            TEXT NOT NULL,
+        default_branch  TEXT NOT NULL,
+        added_at        TEXT NOT NULL,
+        last_scanned_at TEXT,
+        removed_at      TEXT
+      );
+
+      -- The job queue. SQLite is the broker: at design-partner scale a separate
+      -- queue service would be infrastructure without a corresponding problem.
+      CREATE TABLE IF NOT EXISTS jobs (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_key     TEXT NOT NULL,
+        ref          TEXT NOT NULL,
+        kind         TEXT NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'queued',
+        attempts     INTEGER NOT NULL DEFAULT 0,
+        created_at   TEXT NOT NULL,
+        started_at   TEXT,
+        finished_at  TEXT,
+        error        TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, id);
+      CREATE INDEX IF NOT EXISTS idx_repos_install ON repos(installation_id);
     `);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Hosted service: installations, repositories, and the job queue.
+  // ---------------------------------------------------------------------------
+
+  upsertInstallation(installationId: number, account: string): void {
+    this.#db
+      .prepare(
+        `INSERT INTO installations (installation_id, account, created_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(installation_id) DO UPDATE SET account = excluded.account, suspended_at = NULL`,
+      )
+      .run(installationId, account, new Date().toISOString());
+  }
+
+  suspendInstallation(installationId: number): void {
+    this.#db
+      .prepare(`UPDATE installations SET suspended_at = ? WHERE installation_id = ?`)
+      .run(new Date().toISOString(), installationId);
+  }
+
+  upsertRepo(repo: {
+    repoKey: string;
+    installationId: number;
+    owner: string;
+    name: string;
+    defaultBranch: string;
+  }): void {
+    this.#db
+      .prepare(
+        `INSERT INTO repos (repo_key, installation_id, owner, name, default_branch, added_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(repo_key) DO UPDATE SET
+           installation_id = excluded.installation_id,
+           default_branch = excluded.default_branch,
+           removed_at = NULL`,
+      )
+      .run(
+        repo.repoKey,
+        repo.installationId,
+        repo.owner,
+        repo.name,
+        repo.defaultBranch,
+        new Date().toISOString(),
+      );
+  }
+
+  removeRepo(repoKey: string): void {
+    this.#db
+      .prepare(`UPDATE repos SET removed_at = ? WHERE repo_key = ?`)
+      .run(new Date().toISOString(), repoKey);
+  }
+
+  getRepo(repoKey: string): TrackedRepo | null {
+    const row = this.#db
+      .prepare(`SELECT * FROM repos WHERE repo_key = ? AND removed_at IS NULL`)
+      .get(repoKey) as Record<string, string | number> | undefined;
+    return row ? toTrackedRepo(row) : null;
+  }
+
+  listRepos(installationId?: number): TrackedRepo[] {
+    const rows = (
+      installationId === undefined
+        ? this.#db
+            .prepare(`SELECT * FROM repos WHERE removed_at IS NULL ORDER BY repo_key`)
+            .all()
+        : this.#db
+            .prepare(
+              `SELECT * FROM repos WHERE installation_id = ? AND removed_at IS NULL ORDER BY repo_key`,
+            )
+            .all(installationId)
+    ) as Array<Record<string, string | number>>;
+    return rows.map(toTrackedRepo);
+  }
+
+  markRepoScanned(repoKey: string): void {
+    this.#db
+      .prepare(`UPDATE repos SET last_scanned_at = ? WHERE repo_key = ?`)
+      .run(new Date().toISOString(), repoKey);
+  }
+
+  /**
+   * Queue a scan, collapsing duplicates.
+   *
+   * A push burst produces many events for one repository; scanning each would
+   * waste work and race on the findings table. An already-queued job for the
+   * same repository is updated to the newest ref instead of stacking.
+   */
+  enqueueJob(repoKey: string, ref: string, kind: 'scan' = 'scan'): number {
+    const pending = this.#db
+      .prepare(`SELECT id FROM jobs WHERE repo_key = ? AND kind = ? AND status = 'queued'`)
+      .get(repoKey, kind) as { id: number } | undefined;
+    if (pending) {
+      this.#db.prepare(`UPDATE jobs SET ref = ?, created_at = ? WHERE id = ?`).run(
+        ref,
+        new Date().toISOString(),
+        pending.id,
+      );
+      return pending.id;
+    }
+    const result = this.#db
+      .prepare(
+        `INSERT INTO jobs (repo_key, ref, kind, created_at) VALUES (?, ?, ?, ?)`,
+      )
+      .run(repoKey, ref, kind, new Date().toISOString());
+    return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * Claim the oldest queued job.
+   *
+   * The UPDATE ... WHERE status = 'queued' is the claim: SQLite serialises
+   * writers, so two runners cannot both take the same row.
+   */
+  claimJob(): Job | null {
+    const row = this.#db
+      .prepare(`SELECT * FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1`)
+      .get() as Record<string, string | number> | undefined;
+    if (!row) return null;
+
+    const claimed = this.#db
+      .prepare(
+        `UPDATE jobs SET status = 'running', started_at = ?, attempts = attempts + 1
+         WHERE id = ? AND status = 'queued'`,
+      )
+      .run(new Date().toISOString(), Number(row['id']));
+    if (claimed.changes === 0) return null; // another runner won the race
+
+    return toJob(row);
+  }
+
+  finishJob(id: number, error?: string): void {
+    this.#db
+      .prepare(
+        `UPDATE jobs SET status = ?, finished_at = ?, error = ? WHERE id = ?`,
+      )
+      .run(error ? 'failed' : 'done', new Date().toISOString(), error ?? null, id);
+  }
+
+  listJobs(limit = 50): Job[] {
+    const rows = this.#db
+      .prepare(`SELECT * FROM jobs ORDER BY id DESC LIMIT ?`)
+      .all(limit) as Array<Record<string, string | number>>;
+    return rows.map(toJob);
   }
 
   recordScan(report: ScanReport, repoName: string): number {

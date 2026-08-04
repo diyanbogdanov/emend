@@ -85,7 +85,9 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
     id: 'openrouter',
     label: 'OpenRouter',
     baseUrl: 'https://openrouter.ai/api/v1',
-    keyEnv: ['OPENROUTER_API_KEY', 'EMEND_LLM_API_KEY'],
+    // Both spellings are in circulation; accept either rather than failing with
+    // "no API key found" at someone holding a perfectly good key.
+    keyEnv: ['OPENROUTER_API_KEY', 'OPEN_ROUTER_API_KEY', 'EMEND_LLM_API_KEY'],
     docs: 'https://openrouter.ai/docs/quickstart',
     suggested: ['qwen/qwen3-coder', 'deepseek/deepseek-chat', 'moonshotai/kimi-k2'],
   },

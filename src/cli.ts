@@ -23,6 +23,15 @@ import type { Finding, ScanReport } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
+// Credentials live in `.env` during development. Node loads it natively, so this
+// costs no dependency. Real environment variables already set are not
+// overwritten, which keeps CI and production authoritative over a stray file.
+try {
+  process.loadEnvFile(path.resolve(process.cwd(), '.env'));
+} catch {
+  /* no .env, which is the normal case outside development */
+}
+
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 const c = {
   dim: (s: string) => (useColor ? `\x1b[2m${s}\x1b[0m` : s),

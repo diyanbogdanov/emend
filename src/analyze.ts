@@ -34,6 +34,14 @@ export interface ScanOptions {
   maxPackages?: number;
   /** Progress callback for CLI output. */
   onProgress?: (message: string) => void;
+  /**
+   * Stable identity for the repository, used to correlate findings across
+   * scans. Defaults to the directory, which is right for a local checkout but
+   * wrong for a hosted scan: those unpack into a fresh temp directory each time,
+   * so a path-based key would make every finding look new on every run.
+   * Hosted scans pass `github.com/<owner>/<repo>`.
+   */
+  repoKey?: string;
 }
 
 export function findingId(
@@ -265,7 +273,7 @@ export async function scanRepo(
     .filter((f) => f.change.severity === 'deprecation').length;
 
   return {
-    repo: repoDir,
+    repo: options.repoKey ?? repoDir,
     startedAt,
     finishedAt: new Date().toISOString(),
     packages,

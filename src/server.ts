@@ -8,6 +8,9 @@
 
 import http from 'node:http';
 import { Store } from './store.ts';
+import { resolveAppConfig, verifyWebhookSignature } from './github/app.ts';
+import { handleWebhook } from './github/webhook.ts';
+import { startRunner } from './github/runner.ts';
 
 function json(res: http.ServerResponse, body: unknown, status = 200): void {
   const payload = JSON.stringify(body);
@@ -18,11 +21,57 @@ function json(res: http.ServerResponse, body: unknown, status = 200): void {
   res.end(payload);
 }
 
+/** Read the raw request body. Signature verification needs the exact bytes. */
+function readBody(req: http.IncomingMessage, limit = 8 * 1024 * 1024): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error('payload too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 export function startServer(port: number): Promise<void> {
+  // The GitHub App is optional: `emend serve` stays a local dashboard when no
+  // App credentials are present, and only becomes a hosted service when they are.
+  const app = resolveAppConfig();
+  let stopRunner: (() => void) | undefined;
+  if (app.ok) {
+    const runnerStore = new Store();
+    stopRunner = startRunner({
+      store: runnerStore,
+      config: app.config,
+      log: (m) => console.log(`  [runner] ${m}`),
+    });
+  }
+
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', `http://localhost:${port}`);
+
+    if (url.pathname === '/webhook') {
+      void handleWebhookRequest(req, res, app);
+      return;
+    }
+
     const store = new Store();
     try {
+      if (url.pathname === '/api/repos') {
+        json(res, store.listRepos());
+        return;
+      }
+      if (url.pathname === '/api/jobs') {
+        json(res, store.listJobs());
+        return;
+      }
       if (url.pathname === '/') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(PAGE);
@@ -57,11 +106,74 @@ export function startServer(port: number): Promise<void> {
 
   return new Promise((resolve) => {
     server.listen(port, () => {
-      console.log(`\n  Emend dashboard → http://localhost:${port}\n  Ctrl-C to stop.\n`);
+      console.log(`\n  Emend dashboard → http://localhost:${port}`);
+      if (app.ok) {
+        console.log(`  GitHub App active → POST http://localhost:${port}/webhook`);
+      } else {
+        console.log(`  Local mode — ${app.reason}`);
+      }
+      console.log('  Ctrl-C to stop.\n');
       // Resolves only when the server closes, keeping the CLI process alive.
-      server.on('close', () => resolve());
+      server.on('close', () => {
+        stopRunner?.();
+        resolve();
+      });
     });
   });
+}
+
+/**
+ * The webhook endpoint.
+ *
+ * Order matters: verify the signature against the raw bytes, and only then
+ * parse. An unverified payload is never given to the handler, so a forged
+ * delivery cannot queue work or mutate tracked repositories.
+ */
+async function handleWebhookRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  app: ReturnType<typeof resolveAppConfig>,
+): Promise<void> {
+  if (req.method !== 'POST') {
+    json(res, { error: 'method not allowed' }, 405);
+    return;
+  }
+  if (!app.ok) {
+    json(res, { error: 'GitHub App is not configured' }, 503);
+    return;
+  }
+
+  let raw: Buffer;
+  try {
+    raw = await readBody(req);
+  } catch (err) {
+    json(res, { error: (err as Error).message }, 413);
+    return;
+  }
+
+  const signature = req.headers['x-hub-signature-256'];
+  const ok = verifyWebhookSignature(
+    app.config.webhookSecret,
+    raw,
+    typeof signature === 'string' ? signature : undefined,
+  );
+  if (!ok) {
+    json(res, { error: 'invalid signature' }, 401);
+    return;
+  }
+
+  const event = String(req.headers['x-github-event'] ?? '');
+  const store = new Store();
+  try {
+    const payload = JSON.parse(raw.toString('utf8')) as Parameters<typeof handleWebhook>[2];
+    const result = handleWebhook(store, event, payload);
+    console.log(`  [webhook] ${event}: ${result.action} (${result.jobsQueued} queued)`);
+    json(res, result);
+  } catch (err) {
+    json(res, { error: (err as Error).message }, 400);
+  } finally {
+    store.close();
+  }
 }
 
 const PAGE = /* html */ `<!doctype html>
