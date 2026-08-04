@@ -40,7 +40,17 @@ export interface AgentProposal {
 }
 
 export interface AgentContext {
+  /** Provides the package and version pair. Its own `change` is not special. */
   finding: Finding;
+  /**
+   * Every unresolved change in this upgrade, each with the call sites it hit.
+   *
+   * A version bump is atomic, so the model must see all of it. Describing one
+   * change while supplying every call site is worse than useless: asked to fix
+   * `ZodString.email` and shown a compiler error about `z.record`, a model will
+   * confidently edit `email()` three times and never touch the real break.
+   */
+  changes: Array<{ change: SurfaceChange; sites: CallSite[] }>;
   /** repo-relative path -> full source text. */
   sources: Map<string, string>;
   /** Symbols available in the target version, to ground replacements in reality. */
@@ -54,14 +64,15 @@ export interface AgentContext {
 
 const SYSTEM_PROMPT = `You are a precise TypeScript migration engine.
 
-You are given a single API change in a dependency, the exact lines in a codebase that use it, and the symbols available in the new version. Produce the minimal source edits that make the code correct under the new version.
+You are given the API changes in a dependency upgrade, the exact lines in a codebase that use them, and the symbols available in the new version. Produce the minimal source edits that make the code correct under the new version.
 
 Rules you must follow:
 1. Output ONLY a JSON object. No prose, no markdown fences.
 2. Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.
-3. Change only what the API change requires. Do not reformat, rename variables, add comments, or refactor.
+3. Change only what the API changes require. Do not reformat, rename variables, add comments, or refactor.
 4. Only use symbols that appear in the provided list of available symbols. Never invent an API.
 5. If you cannot determine a correct edit, return an empty "edits" array and explain why in "rationale". An empty result is far better than a wrong one.
+6. When compiler output from a failed attempt is provided, it is the authoritative statement of what is still broken. Fix the errors it reports. Do not edit call sites it does not complain about, however plausible the change looks.
 
 Respond with exactly this shape:
 {
@@ -95,12 +106,16 @@ function buildUserPrompt(ctx: AgentContext): string {
   parts.push(`# Dependency upgrade`);
   parts.push(`${finding.pkg}: ${finding.fromVersion} -> ${finding.toVersion}`);
   parts.push('');
-  parts.push('# The API change');
-  parts.push(describeChange(finding.change));
-  parts.push('');
-  parts.push('# Call sites in this codebase');
-  parts.push(describeSites(finding.sites));
-  parts.push('');
+  parts.push(
+    `# API changes to resolve (${ctx.changes.length}), each with its call sites`,
+  );
+  ctx.changes.forEach(({ change, sites }, i) => {
+    parts.push(`## ${i + 1}. ${change.path}`);
+    parts.push(describeChange(change));
+    parts.push('Call sites:');
+    parts.push(describeSites(sites));
+    parts.push('');
+  });
 
   if (ctx.candidateSymbols.length > 0) {
     parts.push(`# Symbols available in ${finding.pkg}@${finding.toVersion} (nearby candidates)`);

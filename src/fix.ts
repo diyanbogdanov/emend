@@ -207,9 +207,11 @@ export async function fixPackage(
       for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
         progress(`  attempt ${attempt}/${config.maxRetries}: requesting edits`);
         const proposal = await proposeEdits(config, {
-          // Present the whole upgrade, not one finding — the model must see every
-          // break to produce a coherent set of edits.
-          finding: { ...first, sites: findings.flatMap((f) => f.sites) },
+          // Present the whole upgrade, not one finding — a version bump is
+          // atomic and the model must see every break to produce a coherent set
+          // of edits.
+          finding: first,
+          changes: findings.map((f) => ({ change: f.change, sites: f.sites })),
           sources,
           candidateSymbols: candidates,
           ...(previousAttempt ? { previousAttempt } : {}),
@@ -397,6 +399,7 @@ export async function fixFinding(
         progress(`  attempt ${attempt}/${config.maxRetries}: requesting edits`);
         const proposal = await proposeEdits(config, {
           finding,
+          changes: [{ change: finding.change, sites: finding.sites }],
           sources,
           candidateSymbols: candidates,
           ...(previousAttempt ? { previousAttempt } : {}),
