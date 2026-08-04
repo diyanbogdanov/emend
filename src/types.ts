@@ -165,6 +165,12 @@ export interface InstalledDependency {
   /** The range declared in package.json, e.g. "^3.22.0". */
   declared: string;
   dev: boolean;
+  /**
+   * Where `installed` came from. `range` means it was inferred from the declared
+   * semver range and may name a version that was never published — callers must
+   * not present it as a fact read from the repository.
+   */
+  source: 'node_modules' | 'lockfile' | 'range' | 'none';
 }
 
 export type PackageStatus = 'analyzed' | 'unanalyzable' | 'up-to-date' | 'error';

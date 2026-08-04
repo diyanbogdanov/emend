@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import ts from 'typescript';
 import type { ApiSurface, ApiSymbol, SymbolKind } from './types.ts';
+import { materializeTypeDeps } from './registry.ts';
 
 /** Bounds on the walk. Deep SDK surfaces would otherwise expand without limit. */
 const MAX_DEPTH = 4;
@@ -159,13 +160,27 @@ function isLibSymbol(sym: ts.Symbol): boolean {
   });
 }
 
-/** True when every declaration of a symbol lives inside the package directory. */
-function declaredInPackage(sym: ts.Symbol, pkgDirNormalised: string): boolean {
+/**
+ * True when a symbol is declared inside the package or its materialised type
+ * closure.
+ *
+ * The closure has to count. A facade package like `playwright` declares almost
+ * nothing itself — its types live in `playwright-core`, which Emend places in a
+ * sibling `node_modules`. Restricting the walk to the package directory alone
+ * stops it at the front door and yields a surface with no members in it, which
+ * is what "playwright: 74 symbols, 0 nested" meant.
+ *
+ * The roots are explicit rather than "some parent directory" so that widening
+ * the boundary cannot accidentally admit unrelated packages that happen to sit
+ * nearby on disk.
+ */
+function declaredInScope(sym: ts.Symbol, roots: readonly string[]): boolean {
   const decls = sym.declarations;
   if (!decls || decls.length === 0) return false;
-  return decls.some((d) =>
-    d.getSourceFile().fileName.replace(/\\/g, '/').startsWith(pkgDirNormalised),
-  );
+  return decls.some((d) => {
+    const f = d.getSourceFile().fileName.replace(/\\/g, '/');
+    return roots.some((r) => f.startsWith(r));
+  });
 }
 
 /**
@@ -253,6 +268,13 @@ export async function extractSurface(
     };
   }
 
+  // Declarations routinely re-export from a sibling package (`playwright` from
+  // `playwright-core`). Without those on disk the imported types resolve to
+  // errors and the surface comes back hollow — indistinguishable from a package
+  // that ships no types at all. Placing them where TypeScript's own resolver
+  // looks is what makes such packages analysable.
+  const typeDepRoots = await materializeTypeDeps(pkgDir);
+
   const program = ts.createProgram([entry], {
     target: ts.ScriptTarget.ESNext,
     module: ts.ModuleKind.NodeNext,
@@ -295,7 +317,9 @@ export async function extractSurface(
   const symbols: Record<string, ApiSymbol> = {};
   const byTypeMember: Record<string, string> = {};
   const aliases: Record<string, string> = {};
-  const pkgDirNormalised = path.resolve(pkgDir).replace(/\\/g, '/');
+  const walkRoots = [pkgDir, ...typeDepRoots].map((d) =>
+    path.resolve(d).replace(/\\/g, '/'),
+  );
   let truncated = false;
 
   /**
@@ -413,7 +437,7 @@ export async function extractSurface(
     // Record symbols re-exported from other packages as part of the surface, but
     // do not descend into them — their internals belong to that package, and
     // walking them is where the symbol budget goes to die.
-    if (!declaredInPackage(resolved, pkgDirNormalised)) return;
+    if (!declaredInScope(resolved, walkRoots)) return;
 
     // Recurse into the *instance* shape for classes and interfaces. This is what
     // surfaces nested resource paths like `Stripe.charges.create`, which is where
@@ -441,6 +465,29 @@ export async function extractSurface(
       }
     } catch {
       members = [];
+    }
+
+    // `export declare const X: typeof Core & Constructor<...>` — a value whose
+    // real surface is reachable only through `new X()`. Its *properties* are the
+    // static side; everything consumers call lives on the constructed instance.
+    //
+    // @octokit/rest is built exactly this way, which is why it produced a
+    // six-symbol surface: `octokit.rest.repos.get` and every other endpoint hang
+    // off the instance type and none of them are visible statically.
+    try {
+      if (memberType) {
+        for (const sig of memberType.getConstructSignatures()) {
+          const instance = sig.getReturnType();
+          members = members.concat(checker.getPropertiesOfType(instance));
+          // An intersection like `Core & Constructor<...>` is anonymous, so the
+          // instance type has no name to index members under. Consumers still
+          // spell the type by the exported binding (`const o: Octokit`), which
+          // is what the checker reports at a call site — so use that name.
+          ownerTypeName ??= instance.symbol?.getName() ?? resolved.getName();
+        }
+      }
+    } catch {
+      /* keep whatever the static walk found */
     }
 
     for (const m of members) {

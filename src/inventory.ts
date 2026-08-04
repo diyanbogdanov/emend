@@ -1,15 +1,21 @@
 /**
  * Reads what a repository actually depends on.
  *
- * The version that matters is the one resolved on disk in node_modules, not the
+ * The version that matters is the concrete one a build would resolve, not the
  * range in package.json — `"^3.22.0"` tells you nothing about whether the repo is
  * running 3.22.0 or 3.24.1, and the whole analysis is a diff against a concrete
- * version.
+ * version. Worse, a range can name a version that was never published:
+ * `"typescript": "^5.7.0"` inferred naively yields 5.7.0, which does not exist.
+ *
+ * Sources are tried in order of decreasing certainty — node_modules, then the
+ * lockfile, then the range — and which one answered is recorded on each entry so
+ * a guess is never reported as a reading.
  */
 
 import { readFile, access } from 'node:fs/promises';
 import path from 'node:path';
 import type { InstalledDependency } from './types.ts';
+import { readLockfile } from './lockfile.ts';
 
 interface RepoManifest {
   name?: string;
@@ -59,11 +65,7 @@ export async function readRepo(repoDir: string): Promise<RepoInfo> {
   }
 
   const hasNodeModules = await exists(path.join(repoDir, 'node_modules'));
-  if (!hasNodeModules) {
-    warnings.push(
-      'node_modules is missing — installed versions were inferred from package.json ranges, and call-site type resolution will be degraded. Run `npm install` in the target repo for full fidelity.',
-    );
-  }
+  const lock = await readLockfile(repoDir);
 
   const dependencies: InstalledDependency[] = [];
   const groups: Array<[Record<string, string> | undefined, boolean]> = [
@@ -76,7 +78,11 @@ export async function readRepo(repoDir: string): Promise<RepoInfo> {
       // Local and git dependencies have no registry version to diff against.
       if (/^(file:|link:|workspace:|git\+|https?:)/.test(declared)) continue;
 
+      // Precedence is by decreasing certainty: what is actually on disk, then
+      // what the lockfile says would be installed, then a guess from the range.
       let installed: string | null = null;
+      let source: InstalledDependency['source'] = 'none';
+
       if (hasNodeModules) {
         try {
           const dm = JSON.parse(
@@ -85,15 +91,39 @@ export async function readRepo(repoDir: string): Promise<RepoInfo> {
               'utf8',
             ),
           ) as { version?: string };
-          installed = dm.version ?? null;
+          if (dm.version) {
+            installed = dm.version;
+            source = 'node_modules';
+          }
         } catch {
-          installed = null;
+          /* fall through to the lockfile */
         }
       }
-      if (!installed) installed = versionFromRange(declared);
+      if (!installed) {
+        const locked = lock.versions.get(name);
+        if (locked) {
+          installed = locked;
+          source = 'lockfile';
+        }
+      }
+      if (!installed) {
+        installed = versionFromRange(declared);
+        if (installed) source = 'range';
+      }
 
-      dependencies.push({ name, declared, dev, installed });
+      dependencies.push({ name, declared, dev, installed, source });
     }
+  }
+
+  const guessed = dependencies.filter((d) => d.source === 'range');
+  if (lock.unsupported) {
+    warnings.push(
+      `found ${lock.unsupported}, which Emend cannot parse yet — versions for ${guessed.length} package(s) were inferred from package.json ranges and may name versions that were never published. Only package-lock.json is supported today.`,
+    );
+  } else if (guessed.length > 0) {
+    warnings.push(
+      `no resolved version on disk or in a lockfile for: ${guessed.map((d) => d.name).join(', ')} — inferred from the declared range, which may name a version that was never published.`,
+    );
   }
 
   const unresolved = dependencies.filter((d) => d.installed === null);
