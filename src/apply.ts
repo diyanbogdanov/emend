@@ -292,8 +292,17 @@ export async function bumpDependency(
   dir: string,
   pkg: string,
   version: string,
+  options: { ignoreScripts?: boolean } = {},
 ): Promise<CommandResult> {
   const args = ['install', `${pkg}@${version}`, '--no-audit', '--no-fund', '--silent'];
+
+  // `npm install` runs lifecycle scripts from every package in the tree. On a
+  // repository Emend does not trust that is arbitrary code execution, and it
+  // silently happened: a hosted run of a Prisma repo executed `prisma generate`
+  // through a postinstall hook, which even changed the verification result by
+  // fixing a baseline typecheck failure. Callers analysing untrusted code must
+  // pass this.
+  if (options.ignoreScripts) args.push('--ignore-scripts');
 
   try {
     const manifest = JSON.parse(

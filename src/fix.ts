@@ -32,6 +32,21 @@ export interface FixOptions {
   keepWorkspace?: boolean;
   /** Allow the LLM agent to attempt findings the deterministic planner declines. */
   useAgent?: boolean;
+  /**
+   * Treat the repository as untrusted: execute nothing from it or its
+   * dependency tree.
+   *
+   * Set by the hosted service. It suppresses the test script *and* passes
+   * --ignore-scripts to the dependency bump, because `npm install` runs
+   * lifecycle hooks from every package it touches. Both matter: a hosted run
+   * against a Prisma repository executed `prisma generate` via postinstall,
+   * which is arbitrary code execution and also corrupted the verification by
+   * repairing a baseline failure mid-run.
+   *
+   * The resulting verification is at best `typecheck-only`, which Emend already
+   * refuses to report as success.
+   */
+  untrusted?: boolean;
   onProgress?: (message: string) => void;
 }
 
@@ -191,13 +206,17 @@ export async function fixPackage(
     progress(`  workspace: ${ws.dir} (${ws.mode})`);
 
     progress('running baseline verification (before any change)');
-    const baseline = await runPhase(ws.dir);
+    const untrusted = options.untrusted === true;
+    const phaseOpts = { skipTests: untrusted };
+    const baseline = await runPhase(ws.dir, phaseOpts);
     progress(
       `  baseline: typecheck=${describe(baseline.typecheck)} test=${describe(baseline.test)}`,
     );
 
     progress(`bumping ${pkg} ${fromVersion} -> ${toVersion}`);
-    const bump = await bumpDependency(ws.dir, pkg, toVersion);
+    const bump = await bumpDependency(ws.dir, pkg, toVersion, {
+      ignoreScripts: untrusted,
+    });
 
     let appliedCount = 0;
     const failedEdits: Array<{ file: string; line: number; reason: string }> = [];
@@ -214,7 +233,7 @@ export async function fixPackage(
     }
 
     progress('running verification after deterministic edits');
-    let post = await runPhase(ws.dir);
+    let post = await runPhase(ws.dir, phaseOpts);
     let verification = compare(baseline, post);
     progress(`  ${verification.outcome}`);
 
@@ -307,7 +326,7 @@ export async function fixPackage(
           continue;
         }
 
-        post = await runPhase(ws.dir);
+        post = await runPhase(ws.dir, phaseOpts);
         const report = compare(baseline, post);
         progress(`    verification: ${report.outcome}`);
         attempts.push({ attempt, edits: proposal.edits, rationale: proposal.rationale, modelConfidence: proposal.modelConfidence, outcome: report.outcome });

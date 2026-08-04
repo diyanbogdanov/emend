@@ -132,8 +132,28 @@ export interface VerifyPhase {
   test: CommandResult;
 }
 
-export async function runPhase(dir: string): Promise<VerifyPhase> {
-  return { typecheck: await runTypecheck(dir), test: await runTests(dir) };
+export interface PhaseOptions {
+  /**
+   * Never invoke the repository's test script.
+   *
+   * Typechecking parses source; running tests executes it. The hosted service
+   * analyses repositories it does not trust, so it typechecks and leaves the
+   * tests to the customer's own CI — which is both safer and better evidence,
+   * since CI runs them in the environment they were written for.
+   */
+  skipTests?: boolean;
+}
+
+export async function runPhase(
+  dir: string,
+  options: PhaseOptions = {},
+): Promise<VerifyPhase> {
+  return {
+    typecheck: await runTypecheck(dir),
+    test: options.skipTests
+      ? skipped('npm test', 'tests are not run by the hosted analyser; your CI runs them')
+      : await runTests(dir),
+  };
 }
 
 /** A phase "passes" only when nothing that actually ran failed. */

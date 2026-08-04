@@ -43,7 +43,22 @@ export function renderPrTitle(result: FixResult): string {
   return `fix(${finding.pkg}): migrate \`${symbol}\` for ${finding.pkg}@${finding.toVersion}`;
 }
 
-export function renderPrBody(result: FixResult): string {
+export interface PrBodyOptions {
+  /**
+   * The migration was produced by the hosted analyser, which typechecks but
+   * never runs the repository's tests.
+   *
+   * This changes what the Verification section can honestly claim. Locally,
+   * "verified" means the tests passed here. Hosted, the tests have not run at
+   * all — the customer's CI will run them on this very branch, and that verdict
+   * arrives after the pull request rather than before it. Saying so is the
+   * difference between a reviewer trusting the evidence and discovering the gap
+   * themselves.
+   */
+  hosted?: boolean;
+}
+
+export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): string {
   const { finding, plan, verification } = result;
   const c = finding.change;
 
@@ -65,8 +80,26 @@ export function renderPrBody(result: FixResult): string {
 
   lines.push('## Verification');
   lines.push('');
-  lines.push(verification ? verdictBadge(verification.outcome) : '⚠️ **Unverified** — no verification was run.');
-  lines.push('');
+  if (options.hosted && verification) {
+    lines.push(
+      verification.outcome === 'typecheck-only'
+        ? '🟡 **Typechecked, tests pending** — the type contract holds. Your CI runs the tests on this branch; that result is the one that matters.'
+        : verdictBadge(verification.outcome),
+    );
+    lines.push('');
+    lines.push(
+      '_Emend analysed this repository without installing it: dependencies were ' +
+        'reconstructed from your lockfile and no install script or test was executed. ' +
+        'That is why the tests below are marked as not run — they belong to your CI, ' +
+        'which runs them in the environment they were written for._',
+    );
+    lines.push('');
+  } else {
+    lines.push(
+      verification ? verdictBadge(verification.outcome) : '⚠️ **Unverified** — no verification was run.',
+    );
+    lines.push('');
+  }
   if (verification) {
     lines.push('| Phase | Command | Result |');
     lines.push('| --- | --- | --- |');
