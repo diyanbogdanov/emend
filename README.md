@@ -126,6 +126,46 @@ Useful flags: `--only pkg,pkg`, `--all`, `--json`, `--no-dev` (scan);
 
 ---
 
+## Running it as a service
+
+`emend serve` becomes a hosted monitor when GitHub App credentials are present,
+and stays a local dashboard when they are not.
+
+```bash
+export EMEND_GITHUB_APP_ID=...
+export EMEND_GITHUB_PRIVATE_KEY="$(cat emend.private-key.pem)"   # or base64
+export EMEND_GITHUB_WEBHOOK_SECRET=...
+
+emend serve --port 8080     # POST /webhook is now live
+```
+
+Register the App with **contents:read, pull_requests:write, checks:read,
+metadata:read**, subscribed to `installation`, `installation_repositories`,
+`push`, and `check_suite`.
+
+Installing it on a repository queues a scan. Pushes to the default branch queue
+another. Each scan reconstructs `node_modules` from the lockfile, finds the
+drift, migrates what it can, and opens a **draft** pull request per package.
+
+### Why it can run untrusted repositories in-process
+
+Analysis never executes anything from the repository or its dependency tree:
+
+- Dependencies are **symlinked from a tarball cache**, not installed.
+- The dependency bump passes `--ignore-scripts`, so no lifecycle hook runs.
+- The repository's **test script is never invoked**.
+
+That is what makes a per-job container unnecessary. It is a property, not a
+convention — anything added to this path that executes repository code brings
+the isolation requirement back with it.
+
+The cost is that hosted verification is **typecheck-only**. Emend says so on the
+pull request rather than implying more, and reads the real verdict back from the
+`check_suite` webhook when your CI runs the tests on the branch. Your CI is the
+better verifier anyway: it runs them in the environment they were written for.
+
+---
+
 ## The optional LLM agent
 
 The deterministic core handles detection, localisation, rename-class migrations,
@@ -215,6 +255,8 @@ coin flip.
 ```
 src/
   registry.ts    npm metadata, tarball download + cache
+  lockfile.ts    package-lock.json -> resolved versions + install tree
+  vendor.ts      reconstruct node_modules from the lockfile, no install
   surface.ts     .d.ts → public API surface (breadth-first, canonical paths)
   diff.ts        surface × surface → classified changes
   inventory.ts   repo → installed dependency versions
@@ -226,8 +268,9 @@ src/
   fix.ts         the fix pipeline (per-package)
   pr.ts          evidence-rich PR rendering + gh integration
   store.ts       node:sqlite persistence
-  server.ts      local dashboard
+  server.ts      dashboard + webhook endpoint
   cli.ts         command surface
+  github/        App auth, webhook intake, job runner, API pull requests
   llm/           optional agent: providers, client, repair loop
 docs/
   specs/emend-mvp.md          design spec
@@ -241,6 +284,8 @@ Run `npm run typecheck` and `npm test` to verify.
 
 ## Status
 
-MVP / proof of concept. TypeScript + npm + GitHub only. See
+MVP / proof of concept. TypeScript + npm + GitHub only. Scanning, migration and
+pull requests are exercised against a real private repository; the GitHub App
+token exchange is the one link only a registered App can validate. See
 [`docs/specs/emend-mvp.md`](docs/specs/emend-mvp.md) §10 for what is deliberately
 out of scope, and its Appendix A for the product decisions still open.

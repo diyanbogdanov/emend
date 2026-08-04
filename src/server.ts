@@ -72,6 +72,11 @@ export function startServer(port: number): Promise<void> {
         json(res, store.listJobs());
         return;
       }
+      if (url.pathname === '/api/pull-requests') {
+        const repo = url.searchParams.get('repo') ?? undefined;
+        json(res, store.listPullRequests(repo));
+        return;
+      }
       if (url.pathname === '/') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(PAGE);
@@ -274,6 +279,13 @@ const PAGE = /* html */ `<!doctype html>
   .add { color: var(--ok); }
   .del { color: var(--break); }
   .empty { color: var(--muted); padding: 34px; text-align: center; border: 1px dashed var(--line); border-radius: 6px; }
+  table.fleet { margin-bottom: 26px; }
+  table.fleet td { padding: 9px 10px 9px 0; }
+  table.fleet a { color: var(--accent); text-decoration: none; }
+  table.fleet a:hover { text-decoration: underline; }
+  .ok { color: var(--ok); font-size: 11.5px; }
+  .bad { color: var(--break); font-size: 11.5px; }
+  .pend { color: var(--deprecate); font-size: 11.5px; }
   .warn {
     border-left: 3px solid var(--deprecate); background: color-mix(in srgb, var(--deprecate) 8%, transparent);
     padding: 9px 13px; margin-bottom: 8px; font-size: 12.5px; border-radius: 0 4px 4px 0;
@@ -290,6 +302,7 @@ const PAGE = /* html */ `<!doctype html>
   <select id="repo"></select>
 </header>
 <main>
+  <div id="fleet"></div>
   <div class="stats" id="stats"></div>
   <div id="warnings"></div>
   <h2>Findings</h2>
@@ -304,11 +317,56 @@ let scans = [], repo = null;
 
 async function get(p) { const r = await fetch(p); return r.json(); }
 
+// Connected repositories, the work queue, and the pull requests Emend opened.
+// Rendered only when a GitHub App is installed, so a purely local install sees
+// the dashboard it had before.
+async function renderFleet() {
+  const [tracked, jobs, prs] = await Promise.all([
+    get('/api/repos'), get('/api/jobs'), get('/api/pull-requests'),
+  ]);
+  if (tracked.length === 0) { $('fleet').innerHTML = ''; return; }
+
+  const active = jobs.filter(j => j.status === 'queued' || j.status === 'running');
+  const failed = jobs.filter(j => j.status === 'failed');
+
+  const ciBadge = (s) => {
+    if (s === 'success') return '<span class="ok">CI passed</span>';
+    if (s === 'pending') return '<span class="pend">CI pending</span>';
+    return '<span class="bad">CI ' + esc(s) + '</span>';
+  };
+
+  const rows = tracked.map(r => {
+    const mine = prs.filter(p => p.repoKey === r.repoKey);
+    const queued = active.filter(j => j.repoKey === r.repoKey).length;
+    const scan = scans.find(s => s.repoDir === r.repoKey);
+    const c = scan ? scan.counts : null;
+    return '<tr>' +
+      '<td><b>' + esc(r.owner + '/' + r.name) + '</b><br><small>' + esc(r.defaultBranch) + '</small></td>' +
+      '<td>' + (c ? c.breaking + ' breaking · ' + c.deprecation + ' deprecated' : '<small>not scanned yet</small>') + '</td>' +
+      '<td>' + (r.lastScannedAt ? '<small>' + esc(new Date(r.lastScannedAt).toLocaleString()) + '</small>' : '<small>—</small>') + '</td>' +
+      '<td>' + (queued > 0 ? '<span class="pend">' + queued + ' queued</span>' : '<small>idle</small>') + '</td>' +
+      '<td>' + (mine.length === 0 ? '<small>none</small>' : mine.map(p =>
+        '<a href="' + esc(p.url) + '" target="_blank" rel="noreferrer">#' + p.number + '</a> ' + ciBadge(p.ciStatus)
+      ).join('<br>')) + '</td>' +
+      '</tr>';
+  }).join('');
+
+  $('fleet').innerHTML =
+    '<h2>Monitored repositories</h2>' +
+    (failed.length > 0
+      ? '<div class="warn">' + failed.length + ' scan job(s) failed. Most recent: ' +
+        esc(failed[0].repoKey) + ' — ' + esc(failed[0].error ?? 'unknown') + '</div>'
+      : '') +
+    '<table class="fleet"><thead><tr><th>Repository</th><th>Findings</th><th>Last scan</th>' +
+    '<th>Queue</th><th>Emend pull requests</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
 async function boot() {
   scans = await get('/api/scans');
+  await renderFleet();
   const repos = [...new Set(scans.map(s => s.repoDir))];
   if (repos.length === 0) {
-    $('findings').innerHTML = '<div class="empty">No scans yet. Run <code>emend scan &lt;repo&gt;</code>.</div>';
+    $('findings').innerHTML = '<div class="empty">No scans yet. Connect a repository, or run <code>emend scan &lt;repo&gt;</code>.</div>';
     return;
   }
   $('repo').innerHTML = repos.map(r => '<option value="' + esc(r) + '">' + esc(r.split('/').slice(-2).join('/')) + '</option>').join('');
