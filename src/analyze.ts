@@ -31,7 +31,7 @@ export interface ScanOptions {
   only?: string[];
   /** Include devDependencies. Default true. */
   includeDev?: boolean;
-  /** Max packages to analyze before warning and stopping. */
+  /** Max packages to analyze before warning and stopping. Default 120. */
   maxPackages?: number;
   /** Progress callback for CLI output. */
   onProgress?: (message: string) => void;
@@ -99,7 +99,11 @@ export async function scanRepo(
 ): Promise<ScanReport> {
   const startedAt = new Date().toISOString();
   const progress = options.onProgress ?? (() => {});
-  const maxPackages = options.maxPackages ?? 40;
+  // Raised for workspace repositories: a private monorepo declares 60 across six
+  // manifests, and a cap of 40 would have truncated a third of them behind a
+  // warning nobody reads. Scans are roughly a second per package once the
+  // tarball cache is warm, so the ceiling can afford to be generous.
+  const maxPackages = options.maxPackages ?? 120;
 
   const repo = await readRepo(repoDir);
   const warnings = [...repo.warnings];

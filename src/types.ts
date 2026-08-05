@@ -171,6 +171,15 @@ export interface InstalledDependency {
    * not present it as a fact read from the repository.
    */
   source: 'node_modules' | 'lockfile' | 'range' | 'none';
+  /**
+   * Workspace directories whose manifest declares this dependency, relative to
+   * the repository root. `''` is the root manifest itself.
+   *
+   * A monorepo declares almost nothing at the root, so a migration has to edit
+   * the manifest that actually names the package — bumping at the root would
+   * add a dependency the repository never had.
+   */
+  declaredIn: string[];
 }
 
 export type PackageStatus = 'analyzed' | 'unanalyzable' | 'up-to-date' | 'error';
