@@ -119,9 +119,17 @@ async function linkBinaries(
  * augmentation lives in transitive packages. Types are a transitive property —
  * a direct dependency whose own type dependencies are missing is not usable.
  *
- * Nested paths are preserved rather than flattened. `node_modules/a/node_modules/b`
- * is how npm expresses two packages needing incompatible versions of a third,
- * and collapsing it would hand one of them the wrong version's declarations.
+ * Only hoisted top-level entries are staged. A nested `node_modules/a/node_modules/b`
+ * cannot be created here: `node_modules/a` is a symlink into the shared cache,
+ * so writing beneath it resolves through the link and mutates the cached copy of
+ * `a` that every other repository shares. That really happened — a staging run
+ * left `~/.emend/cache/tsx/4.21.0/package/node_modules/fsevents` behind.
+ *
+ * Nothing is lost by skipping them. npm hoists almost everything, so nested
+ * entries exist only where two packages need incompatible versions of a third,
+ * and that case is already handled correctly elsewhere: `materializeTypeDeps`
+ * resolves each package's own declared ranges into a sibling directory beside
+ * its cache entry, which is where TypeScript looks after resolving the symlink.
  *
  * Everything is a symlink into the shared tarball cache, so a warm stage costs
  * essentially nothing and packages are downloaded once across all repositories.
@@ -144,9 +152,13 @@ export async function materializeRepoDeps(
   // Without a parsable lockfile the transitive set is unknown, so fall back to
   // direct dependencies. Type resolution will be partial and the caller reports
   // the lockfile situation separately.
+  const isTopLevel = (installPath: string): boolean =>
+    installPath.startsWith('node_modules/') &&
+    !installPath.slice('node_modules/'.length).includes('node_modules/');
+
   const entries: LockEntry[] =
     lock.tree.size > 0
-      ? [...lock.tree.values()]
+      ? [...lock.tree.values()].filter((e) => isTopLevel(e.installPath))
       : fallbackDeps
           .filter((d): d is InstalledDependency & { installed: string } => d.installed !== null)
           .map((d) => ({
@@ -171,18 +183,14 @@ export async function materializeRepoDeps(
       const pkgDir = await fetchPackageDir(entry.name, entry.version);
       const target = path.join(repoDir, entry.installPath);
       await mkdir(path.dirname(target), { recursive: true });
-      if (!(await exists(target))) {
+      try {
         await symlink(pkgDir, target, 'dir');
+      } catch (err) {
+        // EEXIST means another worker created it first; the link is identical
+        // either way. Checking first and then creating is a race, not a fix.
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       }
-      // Only top-level packages contribute executables, matching npm: a nested
-      // copy exists to satisfy one dependent, not to provide a command.
-      // `node_modules/zod` contains no *leading* slash, so splitting on
-      // '/node_modules/' finds nothing and counts every package as nested —
-      // which linked zero binaries and left the staged tree unable to typecheck.
-      const isTopLevel =
-        entry.installPath.startsWith('node_modules/') &&
-        !entry.installPath.slice('node_modules/'.length).includes('node_modules/');
-      const binaries = isTopLevel ? await linkBinaries(pkgDir, entry.name, binDir) : 0;
+      const binaries = await linkBinaries(pkgDir, entry.name, binDir);
       return { ok: true as const, binaries };
     } catch (err) {
       return {

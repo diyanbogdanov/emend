@@ -8,7 +8,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, rm, writeFile, readdir, readFile, access, symlink } from 'node:fs/promises';
+import { mkdir, rm, writeFile, readdir, readFile, access, symlink, rename } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -95,10 +95,34 @@ export function resolveTargetVersion(pack: Packument): string | null {
 }
 
 /**
- * Download and extract a package version, returning the directory containing its
- * package.json. Cached; a second call for the same version does no network I/O.
+ * In-flight fetches, keyed by `pkg@version`.
+ *
+ * Staging a lockfile requests the same package from several install paths at
+ * once — an alias and its real name, or a nested copy npm chose not to dedupe.
+ * Without this, those callers each download and each extract into the same
+ * directory, and they corrupt one another. That is what made
+ * `@google-cloud/storage@7.21.0` fail to stage while succeeding in isolation.
  */
-export async function fetchPackageDir(
+const inFlight = new Map<string, Promise<string>>();
+
+/**
+ * Download and extract a package version, returning the directory containing its
+ * package.json. Cached; a second call for the same version does no network I/O,
+ * and concurrent callers share one download.
+ */
+export function fetchPackageDir(pkg: string, version: string): Promise<string> {
+  const key = `${pkg}@${version}`;
+  const running = inFlight.get(key);
+  if (running) return running;
+
+  const task = fetchPackageDirUncached(pkg, version).finally(() => {
+    inFlight.delete(key);
+  });
+  inFlight.set(key, task);
+  return task;
+}
+
+async function fetchPackageDirUncached(
   pkg: string,
   version: string,
 ): Promise<string> {
@@ -119,15 +143,35 @@ export async function fetchPackageDir(
   }
   const buf = Buffer.from(await res.arrayBuffer());
 
-  const staging = await mkdtempDir();
+  // Stage inside the cache root so the final move is a rename on the same
+  // filesystem rather than a cross-device copy.
+  const staging = await mkdtempDir(path.join(CACHE_ROOT, '.staging'));
   const tgz = path.join(staging, 'pkg.tgz');
+  const extracted = path.join(staging, 'out');
   await writeFile(tgz, buf);
-  await mkdir(dest, { recursive: true });
+  await mkdir(extracted, { recursive: true });
 
   try {
     // System tar handles npm's gzipped tarballs; every npm tarball extracts to
     // a top-level `package/` directory.
-    await execFileAsync('tar', ['-xzf', tgz, '-C', dest]);
+    await execFileAsync('tar', ['-xzf', tgz, '-C', extracted]);
+
+    // Publish the finished tree in one atomic step. A half-extracted directory
+    // must never be visible under `dest`, because another process sharing this
+    // cache would take it for a complete package.
+    await mkdir(path.dirname(dest), { recursive: true });
+    try {
+      await rename(extracted, dest);
+    } catch {
+      // `dest` already exists. Either another worker finished first — in which
+      // case its copy is complete and preferable — or an earlier run left a
+      // half-written directory behind. Replace only in the latter case, so the
+      // cache heals itself rather than failing every scan from then on.
+      if (!(await exists(path.join(pkgRoot, 'package.json')))) {
+        await rm(dest, { recursive: true, force: true });
+        await rename(extracted, dest);
+      }
+    }
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
@@ -379,8 +423,8 @@ async function linkTree(from: string, to: string): Promise<void> {
   await symlink(from, to, 'dir');
 }
 
-async function mkdtempDir(): Promise<string> {
-  const dir = path.join(tmpdir(), `emend-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+async function mkdtempDir(root: string = tmpdir()): Promise<string> {
+  const dir = path.join(root, `emend-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   await mkdir(dir, { recursive: true });
   return dir;
 }

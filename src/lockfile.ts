@@ -41,7 +41,13 @@ export interface LockfileResult {
 }
 
 export interface LockEntry {
-  /** Package name, derived from the install path. */
+  /**
+   * The name to fetch from the registry.
+   *
+   * Not always the same as the directory it installs into: an aliased
+   * dependency installs at `node_modules/string-width-cjs` but is published as
+   * `string-width`.
+   */
   name: string;
   version: string;
   /** Install path relative to the repository root. */
@@ -53,7 +59,14 @@ interface NpmLockV3 {
   lockfileVersion?: number;
   packages?: Record<
     string,
-    { version?: string; link?: boolean; dev?: boolean; resolved?: string }
+    {
+      version?: string;
+      link?: boolean;
+      dev?: boolean;
+      resolved?: string;
+      /** Present for aliased installs: the real published package name. */
+      name?: string;
+    }
   >;
   dependencies?: Record<string, { version?: string }>;
 }
@@ -107,7 +120,12 @@ export async function readLockfile(repoDir: string): Promise<LockfileResult> {
     // Entries without a registry tarball (git, file, http) cannot be fetched.
     if (entry.resolved && !/^https?:\/\//.test(entry.resolved)) continue;
 
-    const name = nameFromInstallPath(installPath);
+    // An aliased dependency (`"string-width-cjs": "npm:string-width@^4"`) is
+    // installed under the alias but published under its real name, which the
+    // lockfile records in `name`. Deriving the name from the path instead asks
+    // the registry for `string-width-cjs`, which does not exist — so the alias
+    // silently failed to stage and every call site importing it was missed.
+    const name = entry.name ?? nameFromInstallPath(installPath);
     if (name) {
       tree.set(installPath, {
         name,
