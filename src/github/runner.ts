@@ -14,7 +14,7 @@ import path from 'node:path';
 import type { Store } from '../store.ts';
 import { scanRepo } from '../analyze.ts';
 import { fixPackage, type FixResult } from '../fix.ts';
-import { renderPrBody, renderPrTitle } from '../pr.ts';
+import { renderPrBody, renderPrTitle, branchSlug } from '../pr.ts';
 import { openPullRequest, type FileChange } from './pr.ts';
 import type { Finding, ScanReport } from '../types.ts';
 import {
@@ -34,6 +34,17 @@ export interface RunnerOptions {
   openPullRequests?: boolean;
   /** Let the model attempt migrations the deterministic planner declines. */
   useAgent?: boolean;
+  /**
+   * Most pull requests to open per run.
+   *
+   * A first scan of a repository that has drifted for a year finds drift in
+   * every package at once. Opening one pull request per package would put
+   * double digits of review on a team the first time they install the tool,
+   * which is how a useful tool gets uninstalled. Dependabot caps this at five
+   * for the same reason; the rest are still recorded as findings and get
+   * proposed on later runs as earlier ones merge.
+   */
+  maxPullRequests?: number;
 }
 
 export interface ProposeOptions {
@@ -45,6 +56,7 @@ export interface ProposeOptions {
   workdir: string;
   report: ScanReport;
   useAgent: boolean;
+  maxPullRequests: number;
 }
 
 /**
@@ -69,8 +81,13 @@ export async function proposeMigrations(opts: ProposeOptions): Promise<number> {
   if (byPackage.size === 0) return 0;
 
   let opened = 0;
+  let skippedForLimit = 0;
   const workspaces: Array<string | null> = [];
   for (const [pkgName, findings] of byPackage) {
+    if (opened >= opts.maxPullRequests) {
+      skippedForLimit++;
+      continue;
+    }
     try {
       // The workspace must survive long enough to read the edited files out of
       // it; fixPackage otherwise deletes it before they can be collected.
@@ -114,7 +131,7 @@ export async function proposeMigrations(opts: ProposeOptions): Promise<number> {
         ...(result.agent ? { agent: result.agent } : {}),
       };
 
-      const branch = `emend/${pkgName.replace(/[^a-z0-9]+/gi, '-')}-${first.toVersion.replace(/[^a-z0-9.]+/gi, '-')}`;
+      const branch = `emend/${branchSlug(pkgName)}-${first.toVersion}`;
       const pr = await openPullRequest({
         token,
         owner: repo.owner,
@@ -143,6 +160,15 @@ export async function proposeMigrations(opts: ProposeOptions): Promise<number> {
     } catch (err) {
       log(`  [${pkgName}] migration failed: ${(err as Error).message}`);
     }
+  }
+
+  // Silence about a cap reads as "that is everything". Say what was held back.
+  if (skippedForLimit > 0) {
+    log(
+      `  ${skippedForLimit} more package(s) have findings but were not proposed ` +
+        `(limit ${opts.maxPullRequests} per run); they remain open findings and ` +
+        `will be proposed once these merge`,
+    );
   }
 
   // Workspaces are kept only long enough to read the edits out of them.
@@ -265,6 +291,7 @@ export async function runOneJob(opts: RunnerOptions): Promise<boolean> {
           workdir,
           report,
           useAgent: opts.useAgent === true,
+          maxPullRequests: opts.maxPullRequests ?? 5,
         });
     if (opened > 0) log(`opened or updated ${opened} pull request(s) for ${job.repoKey}`);
 

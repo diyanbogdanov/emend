@@ -37,6 +37,21 @@ function cmdLine(label: string, r: CommandResult): string {
   return `| ${label} | \`${r.command}\` | ${r.ok ? 'pass' : `**FAIL** (exit ${r.exitCode})`} |`;
 }
 
+/**
+ * Branch-safe slug for a package name.
+ *
+ * A scoped package run through a naive character filter keeps the leading
+ * separator from its `@`, producing `emend/-radix-ui-react-avatar-1.2.6`. Git
+ * accepts it and it looks like a mistake in every branch listing the team sees.
+ */
+export function branchSlug(pkg: string): string {
+  return pkg
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase();
+}
+
 export function renderPrTitle(result: FixResult): string {
   const { finding } = result;
   const symbol = finding.change.path;

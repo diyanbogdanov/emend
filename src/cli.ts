@@ -15,7 +15,7 @@ import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
 import { fixFinding, fixPackage } from './fix.ts';
 import { Store } from './store.ts';
-import { renderPrBody, renderPrTitle, createPullRequest } from './pr.ts';
+import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
 import { startServer } from './server.ts';
 import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { listModels } from './llm/client.ts';
@@ -353,7 +353,7 @@ async function cmdPr(args: Args): Promise<number> {
     return 1;
   }
 
-  const branch = `emend/${stored.finding.pkg.replace(/[^a-z0-9]+/gi, '-')}-${stored.finding.id}`;
+  const branch = `emend/${branchSlug(stored.finding.pkg)}-${stored.finding.id}`;
   const res = await createPullRequest({
     repoDir: result.workspaceDir,
     branch,

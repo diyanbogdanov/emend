@@ -286,6 +286,7 @@ const PAGE = /* html */ `<!doctype html>
   .ok { color: var(--ok); font-size: 11.5px; }
   .bad { color: var(--break); font-size: 11.5px; }
   .pend { color: var(--deprecate); font-size: 11.5px; }
+  .muted { color: var(--muted); font-size: 11.5px; }
   .warn {
     border-left: 3px solid var(--deprecate); background: color-mix(in srgb, var(--deprecate) 8%, transparent);
     padding: 9px 13px; margin-bottom: 8px; font-size: 12.5px; border-radius: 0 4px 4px 0;
@@ -329,9 +330,14 @@ async function renderFleet() {
   const active = jobs.filter(j => j.status === 'queued' || j.status === 'running');
   const failed = jobs.filter(j => j.status === 'failed');
 
+  // 'skipped' and 'neutral' are not failures — a repo whose workflows do not
+  // match this branch reports skipped, and colouring that red says the
+  // migration broke something when nothing ran at all.
   const ciBadge = (s) => {
     if (s === 'success') return '<span class="ok">CI passed</span>';
     if (s === 'pending') return '<span class="pend">CI pending</span>';
+    if (s === 'skipped' || s === 'neutral' || s === 'stale')
+      return '<span class="muted">CI ' + esc(s) + '</span>';
     return '<span class="bad">CI ' + esc(s) + '</span>';
   };
 
