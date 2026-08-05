@@ -16,7 +16,7 @@ exactly this workload.
 
 | Resource | Minimum | Why |
 | --- | --- | --- |
-| RAM | 2 GB (4 GB comfortable) | `ts.createProgram` over a few hundred files plus staged declarations. A 512 MB instance will OOM on a real repository. |
+| RAM | **8 GB** | A package's whole type surface is held in memory while it is analysed. Most are trivial (zod: 189 MB) but `googleapis` needs ~3 GB on its own, and analysis runs four packages at a time. 2 GB was the recommendation while surfaces were truncated at 25,000 symbols; they are not any more. |
 | vCPU | 2 | Typechecking is the bottleneck; scans are seconds, not minutes. |
 | Disk | 20 GB | SQLite is tiny. The tarball cache is the consumer, and it is shared across every repository — the second repo using zod costs nothing. |
 | Egress | modest | npm tarballs in, GitHub API out. Cache hits make this fall off sharply after the first few repositories. |
@@ -38,8 +38,14 @@ that matters right now.
 
 ### Instance
 
-`t4g.small` — 2 vCPU, 2 GB, ARM/Graviton. ARM is both cheaper and fully
-supported; Node, `tar` and the TypeScript compiler all run natively.
+`t4g.large` — 2 vCPU, 8 GB, ARM/Graviton (~$49/mo). ARM is both cheaper and
+fully supported; Node, `tar` and the TypeScript compiler all run natively.
+
+`t4g.small` (2 GB) was the earlier recommendation and is no longer enough:
+symbol-walk limits were removed so that no real package is analysed only
+partially, and the memory that used to be saved by truncating is now spent. At
+$49/mo an AWS Activate Founders grant of $1,000 covers roughly 20 months rather
+than six years — still long enough to learn whether anyone wants this.
 
 Add 2 GB of swap. It costs nothing and turns an OOM kill during an unusually
 large scan into a slow scan:
@@ -50,8 +56,9 @@ sudo mkswap /swapfile && sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
-If you see the runner die mid-scan with no error, that is the OOM killer — move
-to `t4g.medium` (4 GB, ~$24/mo) rather than fighting it.
+If you see the runner die mid-scan with no error, that is the OOM killer. The
+launcher already sizes V8's heap to three quarters of physical memory, so the
+answer is a bigger instance rather than a flag.
 
 ### Storage
 
@@ -116,8 +123,8 @@ the value that must never change again; everything else here can be rebuilt.
 
 ## Alternatives, and when they win
 
-**Hetzner CX22** — €4.51/mo for 2 vCPU, 4 GB, 40 GB. Genuinely cheaper than AWS
-before credits and better specced, and the right answer if the Activate
+**Hetzner CX32** — €10.59/mo for 4 vCPU, 8 GB, 80 GB. Substantially cheaper than
+the equivalent AWS instance before credits, and the right answer if the Activate
 application is rejected. Same systemd and Caddy setup; only the provider changes.
 
 **Fly.io** — least work: a Dockerfile, `fly launch`, TLS handled. Realistically

@@ -17,7 +17,14 @@ import path from 'node:path';
 import ts from 'typescript';
 import type { ApiSurface, CallSite } from './types.ts';
 
-const MAX_FILES = 3000;
+/**
+ * Source files admitted to the TypeScript program.
+ *
+ * Bounded only so a runaway directory walk cannot exhaust memory. The largest
+ * repository scanned so far has 562 TypeScript files, so this is far from
+ * binding; a repository that trips it gets a warning saying results are partial.
+ */
+const MAX_FILES = 100_000;
 
 export interface CallSiteIndex {
   /** package -> canonical symbol path -> sites */

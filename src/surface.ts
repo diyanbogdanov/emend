@@ -13,9 +13,23 @@ import ts from 'typescript';
 import type { ApiSurface, ApiSymbol, SymbolKind } from './types.ts';
 import { materializeTypeDeps } from './registry.ts';
 
-/** Bounds on the walk. Deep SDK surfaces would otherwise expand without limit. */
-const MAX_DEPTH = 4;
-const MAX_SYMBOLS = 25000;
+/**
+ * Bounds on the walk.
+ *
+ * These are memory ceilings, not taste. The walk terminates on its own — every
+ * symbol is claimed once — so the limits exist because a surface is held
+ * entirely in memory and the signature strings dominate it. googleapis is the
+ * measured worst case at 400,630 symbols, 52s and about 3 GB of heap; the same
+ * package under the old 25,000 ceiling took 4.4s and 1.9 GB while reporting
+ * itself truncated. Every other package tried is at least two orders of
+ * magnitude smaller (zod: 2,342 symbols, 0.4s, 189 MB).
+ *
+ * Set high enough that no real package truncates, and honest when one does:
+ * `truncated` suppresses removal reporting, so a cut-short walk understates
+ * findings rather than inventing them.
+ */
+const MAX_DEPTH = 12;
+const MAX_SYMBOLS = 600_000;
 const MAX_SIGNATURE_CHARS = 4000;
 
 interface PackageJson {

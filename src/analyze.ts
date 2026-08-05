@@ -20,6 +20,7 @@ import { findCallSites } from './callsites.ts';
 import { materializeRepoDeps } from './vendor.ts';
 import type {
   ApiSurface,
+  ApiSymbol,
   Finding,
   PackageReport,
   ScanReport,
@@ -92,6 +93,15 @@ async function mapLimit<T, R>(
   });
   await Promise.all(workers);
   return results;
+}
+
+/** Same shape, same keys, no signature strings. */
+function withoutSignatures(surface: ApiSurface): ApiSurface {
+  const symbols: Record<string, ApiSymbol> = {};
+  for (const [path, sym] of Object.entries(surface.symbols)) {
+    symbols[path] = { ...sym, signature: '' };
+  }
+  return { ...surface, symbols };
 }
 
 interface Analyzed {
@@ -229,7 +239,13 @@ export async function scanRepo(
         },
         // The OLD surface is what call sites are written against — matching must
         // use the names that exist in the code today, not the ones in the upgrade.
-        surface: fromSurface,
+        // Retained only for call-site matching, which needs symbol *existence*,
+        // the alias map and the member index — never the signature text. Those
+        // strings are most of a surface's memory (googleapis alone holds about
+        // 3 GB of them), and every analysed package's surface stays live for the
+        // whole scan, so keeping them would multiply the peak by the dependency
+        // count for no benefit.
+        surface: withoutSignatures(fromSurface),
         impacting,
       };
     } catch (err) {

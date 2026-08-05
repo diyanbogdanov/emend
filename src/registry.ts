@@ -322,9 +322,9 @@ async function declarationImports(dir: string, fileCap: number): Promise<Set<str
  * transitively downloading half the registry. Raise it if you see hollow
  * surfaces; the cost is roughly linear in packages fetched.
  */
-const TYPE_DEP_DEPTH = 2;
-const TYPE_DEP_FILE_CAP = 400;
-const TYPE_DEP_TOTAL_CAP = 24;
+const TYPE_DEP_DEPTH = 6;
+const TYPE_DEP_FILE_CAP = 4000;
+const TYPE_DEP_TOTAL_CAP = 500;
 
 interface DepManifest {
   dependencies?: Record<string, string>;
