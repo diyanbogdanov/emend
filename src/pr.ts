@@ -52,6 +52,18 @@ export function branchSlug(pkg: string): string {
     .toLowerCase();
 }
 
+/** Added lines that trade a type check for a compile. */
+function countTypeEscapes(diff: string): number {
+  let count = 0;
+  for (const line of diff.split('\n')) {
+    if (!line.startsWith('+') || line.startsWith('+++')) continue;
+    if (/(:\s*any\b|\bas\s+any\b|as\s+unknown\s+as\b|@ts-ignore|@ts-expect-error)/.test(line)) {
+      count++;
+    }
+  }
+  return count;
+}
+
 export function renderPrTitle(result: FixResult): string {
   const { finding } = result;
   const symbol = finding.change.path;
@@ -218,6 +230,22 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
     }
   }
   lines.push('');
+
+  // Verification cannot see this: `any` compiles exactly as well as a correct
+  // type, so a migration that silences errors rather than resolving them passes
+  // every gate. Counting it is the only way a reviewer finds out.
+  const weakened = countTypeEscapes(result.diff);
+  if (weakened > 0) {
+    lines.push('## Type safety');
+    lines.push('');
+    lines.push(
+      `⚠️ This change adds **${weakened}** type escape(s) — \`any\`, \`as any\`, ` +
+        '`as unknown as`, `@ts-ignore` or `@ts-expect-error`. They compile, and ' +
+        'verification therefore cannot object to them, but each one removes ' +
+        'checking the project previously had. Worth reading those lines closely.',
+    );
+    lines.push('');
+  }
 
   lines.push('## Risks not covered');
   lines.push('');

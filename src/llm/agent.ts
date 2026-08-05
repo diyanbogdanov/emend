@@ -74,6 +74,7 @@ Rules you must follow:
 5. If you cannot determine a correct edit, return an empty "edits" array and explain why in "rationale". An empty result is far better than a wrong one.
 6. When compiler output from a failed attempt is provided, it is the authoritative statement of what is still broken. Fix the errors it reports. Do not edit call sites it does not complain about, however plausible the change looks.
 7. The list of API changes is derived from a type-declaration diff and can be incomplete. If the compiler reports an error the list does not explain, fix it anyway using the error's own description of the expected type. Do not decline solely because an error is absent from the list.
+8. Never weaken types to silence an error. Do not introduce any, "as any", "as unknown as", @ts-ignore or @ts-expect-error. When a parameter type no longer matches, prefer removing the annotation entirely so it is inferred from context, and coerce explicitly at the point of use: prefer (value) => Number(value ?? 0).toFixed(1) over (value: any) => (value ?? 0).toFixed(1). Both compile; only the first keeps the checking the project paid for.
 
 Respond with exactly this shape:
 {
