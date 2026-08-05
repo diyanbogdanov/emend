@@ -190,8 +190,11 @@ export function compare(baseline: VerifyPhase, post: VerifyPhase): VerificationR
       'Baseline passed and the post-change run failed: this migration introduces a regression. The plan was rejected.';
   } else if (post.test.skipped && !post.typecheck.skipped) {
     outcome = 'typecheck-only';
+    // Why the tests did not run matters to a reader deciding whether to trust
+    // this. "No test script" and "we declined to run your tests" are different
+    // claims, and asserting the first when the second is true is simply false.
     summary =
-      'Typecheck passes after the change, but the repository has no test script — behaviour is NOT verified, only types.';
+      `Typecheck passes after the change, but the tests did not run (${post.test.skipReason ?? 'reason not recorded'}) — behaviour is NOT verified, only types.`;
   } else {
     outcome = 'verified';
     summary = 'Baseline passed and the post-change run passed: typecheck and tests are green.';

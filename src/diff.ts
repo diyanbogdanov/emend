@@ -118,7 +118,17 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
 
   if (!unanalyzable) {
     for (const [path, before] of Object.entries(from.symbols)) {
-      const after = to.symbols[path];
+      // A path absent from `symbols` may still be reachable through an alias.
+      //
+      // The surface walk claims each symbol under the first path that reaches
+      // it and records other spellings in `aliases`. So when a package converts
+      // a direct export into an aliased re-export — `export { Root }` becoming
+      // `export { Avatar as Root }`, which @radix-ui/react-avatar did between
+      // 1.1.11 and 1.2.6 — `Avatar` claims the symbol and `Root` moves to
+      // `aliases`. Consulting only `symbols` then reports `Root` as removed,
+      // with high confidence, about a package that still exports it. That
+      // produced a pull request for a migration nobody needed.
+      const after = to.symbols[path] ?? to.symbols[to.aliases[path] ?? ''];
 
       if (!after) {
         if (suppressRemovals) continue;

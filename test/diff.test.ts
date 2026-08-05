@@ -125,3 +125,35 @@ test('within one major, a signature change is still reported', () => {
   const impacting = consumerImpacting(diffSurfaces(from, to));
   assert.deepEqual(impacting.map((c) => c.path), ['kept']);
 });
+
+test('a symbol re-exported under an alias is not reported as removed', () => {
+  // @radix-ui/react-avatar 1.1.11 exported `Root` directly; 1.2.6 exports
+  // `Avatar as Root`. The surface walk claims the shared symbol under `Avatar`
+  // and records `Root` in `aliases`, so checking only `symbols` sees `Root`
+  // vanish. That produced three high-confidence "removed" findings, and a pull
+  // request, for a package that still exports all three names.
+  const from = surface('1.1.11', [
+    sym('Avatar', 'React.ForwardRefExoticComponent<any>'),
+    sym('Root', 'React.ForwardRefExoticComponent<any>'),
+  ]);
+  const to = surface(
+    '1.2.6',
+    [sym('Avatar', 'React.ForwardRefExoticComponent<any>')],
+    { aliases: { Root: 'Avatar' } },
+  );
+
+  const removed = diffSurfaces(from, to).changes.filter((c) => c.kind === 'removed');
+  assert.deepEqual(removed, [], 'an aliased re-export is still exported');
+  assert.equal(consumerImpacting(diffSurfaces(from, to)).length, 0);
+});
+
+test('a symbol absent from both symbols and aliases is still a removal', () => {
+  // The alias check must not become a blanket amnesty: a genuine deletion has
+  // to keep reporting, or the fix above would trade false alarms for silence.
+  const from = surface('1.0.0', [sym('gone', '() => void'), sym('kept', '() => void')]);
+  const to = surface('2.0.0', [sym('kept', '() => void')], { aliases: { other: 'kept' } });
+
+  const removed = diffSurfaces(from, to).changes.filter((c) => c.kind === 'removed');
+  assert.equal(removed.length, 1);
+  assert.equal(removed[0]?.path, 'gone');
+});

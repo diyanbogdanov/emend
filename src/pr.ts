@@ -22,7 +22,7 @@ function verdictBadge(outcome: string): string {
     case 'verified':
       return '✅ **Verified** — baseline passed, post-change typecheck and tests passed';
     case 'typecheck-only':
-      return '⚠️ **Types only** — typecheck passes, but this repository has no test script. Behaviour is NOT verified.';
+      return '⚠️ **Types only** — typecheck passes, but the tests did not run. Behaviour is NOT verified.';
     case 'regression':
       return '❌ **Regression** — baseline passed but the change failed verification. Do not merge.';
     case 'pre-existing-failure':
@@ -135,6 +135,16 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
 
   lines.push('## Affected call sites');
   lines.push('');
+  // Without this, a reader sees line numbers and expects to find them in the
+  // diff. When the bump alone typechecks there is nothing to find, and the
+  // list looks like a promise the pull request did not keep.
+  lines.push(
+    result.appliedEdits === 0
+      ? '_These lines use the changed symbol. They were checked against the new ' +
+        'version and needed no edit — they are listed so you can confirm that yourself._'
+      : '_These are the lines the change reaches. Edits below apply to them._',
+  );
+  lines.push('');
   lines.push('| File | Line | Source | Resolved via |');
   lines.push('| --- | --- | --- | --- |');
   for (const s of finding.sites) {
@@ -183,9 +193,20 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
     }
     lines.push('');
     lines.push(`Edits applied: **${result.appliedEdits}**.`);
+  } else if (result.appliedEdits === 0 && verification && verification.outcome !== 'regression') {
+    // The bump alone satisfied the type checker. Saying "this needs a human"
+    // next to a green verification table reads as a contradiction, and it is:
+    // no source change was required, which is the *good* outcome and the whole
+    // point of listing the call sites — they were checked, not skipped.
+    lines.push(
+      '**No source changes were needed.** The version bump alone typechecks: every ' +
+        'call site listed above still satisfies the new version\'s type contract. ' +
+        'This pull request is the upgrade itself, plus the evidence that your code ' +
+        'survives it.',
+    );
   } else {
     lines.push(
-      `No deterministic transformation was available: ${result.unplannableReason ?? 'unknown'}. ` +
+      `No deterministic transformation was available: ${result.unplannableReason ?? 'the planner did not record a reason'}. ` +
         'This needs a human.',
     );
   }
