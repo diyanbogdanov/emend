@@ -193,3 +193,65 @@ Expected. Prisma generates its client during install and the published tarball
 is a stub, so the baseline typecheck fails on missing model types. Emend refuses
 to attribute that to a migration it did not cause. Generating the client would
 mean executing repository code, which the hosted path deliberately does not do.
+
+---
+
+## Making the App public
+
+The App you registered is private: only a private organisation can install it. Going public
+lets any account install it, which is what you need before design partners
+outside your own org can try it.
+
+### The setting
+
+App settings → **Advanced** → *Make this GitHub App public*. Or under **Basic
+information**, change *Where can this GitHub App be installed?* to **Any
+account**.
+
+### What GitHub requires before it will let you
+
+A public App must have a **homepage URL**, and GitHub expects a description and
+a logo — an App with none of those looks abandoned in the install dialog, which
+is the exact moment someone decides whether to trust it with their source code.
+
+If you collect any user data, a **privacy policy URL** is required. Emend reads
+repository contents, so say plainly what is stored (findings, file paths, and
+code snippets from call sites) and what is not (no full source retention beyond
+the scan, tokens never written to disk).
+
+**Verification** — the blue badge — is separate and optional. It requires
+verifying the organization that owns the App, including a domain you control.
+Worth doing before you approach anyone you don't already know; not worth
+blocking on for friendly teams.
+
+### What changes operationally
+
+**Rate limits are per installation**, not per App: 5,000 requests/hour each,
+scaling with repository count. So more installations means more total budget,
+not less — the limit is not the constraint. What *is* a constraint is your own
+scan throughput, since the runner is a single process draining one queue.
+
+**Anyone can install it.** Every installation queues a scan per repository
+immediately, which is real CPU, disk and npm bandwidth spent on someone you have
+never met. Two mitigations worth having before going public:
+
+- An allowlist of account logins in `handleWebhook`, rejecting installations
+  from anyone else with a clear message. Crude, but it means "public" only means
+  "you don't need me to add you to the App", not "anyone can consume my compute".
+- A cap on repositories per installation, so one account installing on 400 repos
+  does not monopolise the queue.
+
+Neither exists yet. They are worth adding the day before you make it public, not
+the day after.
+
+**Deliveries retry.** GitHub retries a failed webhook, so a restart mid-delivery
+is recoverable — but a permanently failing endpoint gets deliveries disabled
+after enough failures. The `installation created` 502s in your delivery log
+happened for exactly this reason: nothing was listening yet.
+
+### The uninstall path matters
+
+`installation` with action `deleted` already stops tracking every repository for
+that account. What it does not do is delete their stored findings and scan
+history. Before public launch that is a question you want an answer to, because
+someone will ask it.
