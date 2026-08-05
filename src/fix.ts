@@ -436,6 +436,11 @@ export async function fixPackage(
       let rationale = '';
       let bestFailureSize = failureSize(verification);
       let previousSize = bestFailureSize;
+      // The errors belonging to whatever is currently on disk. After a rollback
+      // the failed attempt's errors describe a state that no longer exists, and
+      // showing those alongside the restored sources asks the model to fix
+      // problems that are not there while hiding the one that is.
+      let bestErrors = verificationErrors(verification);
       let previousAttempt: { edits: TextEdit[]; errors: string } | undefined = {
         edits: [],
         errors: verificationErrors(verification),
@@ -503,6 +508,7 @@ export async function fixPackage(
           const size = failureSize(report);
           if (size < bestFailureSize) {
             bestFailureSize = size;
+            bestErrors = verificationErrors(report);
             progress(`    kept (${size} error(s) remain, was ${previousSize})`);
             // The files on disk are no longer the ones the model was shown.
             sources = await loadSources(ws.dir, agentFinding, [...collateral, ...referenced]);
@@ -512,7 +518,8 @@ export async function fixPackage(
             appliedCount -= editResult.applied.length;
           }
           previousSize = size;
-          previousAttempt = { edits: proposal.edits, errors: verificationErrors(report) };
+          // Always the errors of the state on disk, kept or restored.
+          previousAttempt = { edits: proposal.edits, errors: bestErrors };
         }
       }
 
