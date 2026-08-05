@@ -144,7 +144,10 @@ function buildUserPrompt(ctx: AgentContext): string {
     parts.push('```');
     parts.push('The compiler/test output was:');
     parts.push('```');
-    parts.push(ctx.previousAttempt.errors.slice(0, 6000));
+        // The compiler output is the most reliable thing in this prompt: it states
+    // exactly what is still wrong, in a form that cannot be misremembered.
+    // Truncating it hides failures the model is then blamed for not fixing.
+    parts.push(ctx.previousAttempt.errors.slice(0, 40_000));
     parts.push('```');
     parts.push(
       'Correct the edits. Note the source shown above is the ORIGINAL, unmodified file — your new edits apply to that, not to your previous attempt.',

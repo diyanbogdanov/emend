@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fetchPackageDir } from './registry.ts';
 import { extractSurface } from './surface.ts';
 import { planFinding } from './plan.ts';
+import { findWorkspaces } from './workspaces.ts';
 import {
   prepareWorkspace,
   applyPlan,
@@ -108,7 +109,7 @@ async function loadSources(
   // about those without seeing it.
   const files = [
     ...new Set(['package.json', ...callSiteFiles, ...extraFiles]),
-  ].slice(0, 12);
+  ].slice(0, 24);
   for (const file of files) {
     try {
       const content = await readFile(path.join(repoDir, file), 'utf8');
@@ -121,6 +122,15 @@ async function loadSources(
 }
 
 /**
+ * Most files pulled in because a failure named them.
+ *
+ * A wide upgrade breaks many files at once — recharts 2 to 3 produces fourteen
+ * errors across ten files in a private monorepo — and a model shown two of them
+ * cannot produce a coherent migration.
+ */
+const MAX_COLLATERAL_FILES = 16;
+
+/**
  * Repository files named by compiler or test output.
  *
  * An upgrade can break a file that contains no call site at all. a scanned repository
@@ -130,24 +140,38 @@ async function loadSources(
  * see what was wrong. Feeding it the files the failure actually names closes
  * that gap without guessing at what else might be relevant.
  */
-function filesNamedInOutput(output: string, repoDir: string): string[] {
+async function filesNamedInOutput(output: string, repoDir: string): Promise<string[]> {
   const found = new Set<string>();
-  // Paths with a source extension, plus extensionless files a build commonly
-  // pins versions in. `Dockerfile` has no extension and would otherwise be
-  // invisible to a path regex.
+
+  // A workspace repository's compiler prints paths relative to the *workspace*,
+  // not the repository root: `@acme/web typecheck: src/components/X.tsx(40,11)`
+  // means packages/web/src/components/X.tsx. Resolving only against the root
+  // finds none of them, so the model was handed a failure it had no files for
+  // and correctly declined to guess.
+  const bases = ['', ...(await findWorkspaces(repoDir))];
+
+  // Route-group and dynamic-segment directories — `(dashboard)`, `[promptId]` —
+  // are ordinary in Next.js apps and were excluded by the path character class.
   const pattern =
-    /(?:^|[\s('"[])((?:[\w.@-]+\/)*(?:[\w.@-]+\.(?:[cm]?tsx?|[cm]?jsx?|json|ya?ml)|Dockerfile[\w.-]*|Makefile))(?=[\s:(),'"\]]|$)/gm;
+    /(?:^|[\s'"])((?:[\w.@()\[\]+-]+\/)*(?:[\w.@()\[\]+-]+\.(?:[cm]?tsx?|[cm]?jsx?|json|ya?ml)|Dockerfile[\w.-]*|Makefile))(?=[\s:(,'"]|$)/gm;
+
   let m: RegExpExecArray | null;
   while ((m = pattern.exec(output)) !== null) {
     const rel = m[1];
     if (!rel) continue;
     if (rel.startsWith('node_modules/') || rel.includes('/node_modules/')) continue;
-    if (!existsSync(path.join(repoDir, rel))) continue;
-    found.add(rel);
-    if (found.size >= 6) break;
+    for (const base of bases) {
+      const candidate = base ? `${base}/${rel}` : rel;
+      if (existsSync(path.join(repoDir, candidate))) {
+        found.add(candidate);
+        break;
+      }
+    }
+    if (found.size >= MAX_COLLATERAL_FILES) break;
   }
   return [...found];
 }
+
 
 function verificationErrors(report: VerificationReport): string {
   const parts: string[] = [];
@@ -157,8 +181,13 @@ function verificationErrors(report: VerificationReport): string {
   ] as const) {
     if (r.skipped || r.ok) continue;
     parts.push(`--- ${label} (${r.command}) ---`);
-    if (r.stdout.trim()) parts.push(r.stdout.trim().slice(-3000));
-    if (r.stderr.trim()) parts.push(r.stderr.trim().slice(-3000));
+    // Generous, because this text is the specification the model works from and
+    // it is also where the list of broken files comes from. recharts 2 to 3
+    // emits fourteen errors averaging 400 characters; a 3000-character tail
+    // showed two of the ten affected files, and the model — correctly — refused
+    // to migrate a failure it could only partly see.
+    if (r.stdout.trim()) parts.push(r.stdout.trim().slice(-40_000));
+    if (r.stderr.trim()) parts.push(r.stderr.trim().slice(-40_000));
   }
   return parts.join('\n') || 'verification failed with no captured output';
 }
@@ -259,11 +288,10 @@ export async function fixPackage(
       // failing test; that test names the file it asserts against. a scanned repository's
       // Docker contract test is exactly this shape — the output never mentions
       // the Dockerfile, only the test that reads it.
-      const collateral = filesNamedInOutput(failureOutput, ws.dir);
+      const collateral = await filesNamedInOutput(failureOutput, ws.dir);
       let sources = await loadSources(ws.dir, agentFinding, collateral);
-      const referenced = filesNamedInOutput(
-        [...sources.values()].join('\n'),
-        ws.dir,
+      const referenced = (
+        await filesNamedInOutput([...sources.values()].join('\n'), ws.dir)
       ).filter((f) => !sources.has(f));
       if (referenced.length > 0) {
         sources = await loadSources(ws.dir, agentFinding, [...collateral, ...referenced]);
