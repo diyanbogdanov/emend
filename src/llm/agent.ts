@@ -73,6 +73,7 @@ Rules you must follow:
 4. Only use symbols that appear in the provided list of available symbols. Never invent an API.
 5. If you cannot determine a correct edit, return an empty "edits" array and explain why in "rationale". An empty result is far better than a wrong one.
 6. When compiler output from a failed attempt is provided, it is the authoritative statement of what is still broken. Fix the errors it reports. Do not edit call sites it does not complain about, however plausible the change looks.
+7. The list of API changes is derived from a type-declaration diff and can be incomplete. If the compiler reports an error the list does not explain, fix it anyway using the error's own description of the expected type. Do not decline solely because an error is absent from the list.
 
 Respond with exactly this shape:
 {
@@ -108,6 +109,10 @@ function buildUserPrompt(ctx: AgentContext): string {
   parts.push('');
   parts.push(
     `# API changes to resolve (${ctx.changes.length}), each with its call sites`,
+  );
+  parts.push(
+    '_Derived from a declaration diff, and possibly incomplete. Entries with no ' +
+      'call sites listed were added because the compiler named them._',
   );
   ctx.changes.forEach(({ change, sites }, i) => {
     parts.push(`## ${i + 1}. ${change.path}`);

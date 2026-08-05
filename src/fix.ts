@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fetchPackageDir } from './registry.ts';
 import { extractSurface } from './surface.ts';
+import { diffSurfaces } from './diff.ts';
 import { planFinding } from './plan.ts';
 import { findWorkspaces } from './workspaces.ts';
 import {
@@ -26,7 +27,15 @@ import {
 import { runPhase, compare } from './verify.ts';
 import { resolveLlmConfig } from './llm/providers.ts';
 import { proposeEdits, nearbySymbols, type TextEdit } from './llm/agent.ts';
-import type { ApiSymbol, CommandResult, Finding, MigrationPlan, VerificationReport } from './types.ts';
+import type {
+  ApiSymbol,
+  CallSite,
+  CommandResult,
+  Finding,
+  MigrationPlan,
+  SurfaceChange,
+  VerificationReport,
+} from './types.ts';
 
 export interface FixOptions {
   /** Leave the workspace on disk for inspection. */
@@ -93,6 +102,56 @@ async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol
   const toDir = await fetchPackageDir(finding.pkg, finding.toVersion);
   const toSurface = await extractSurface(toDir, finding.pkg, finding.toVersion);
   return toSurface.symbols;
+}
+
+/**
+ * API changes the compiler is complaining about, whether or not they became
+ * findings.
+ *
+ * Reporting is deliberately conservative: on a major upgrade, a signature change
+ * is only surfaced when a required parameter appeared, because anything looser
+ * buried real findings under an internal rewrite — removing that gate turned one
+ * repository's 153 call sites into 4,052.
+ *
+ * But a filter that is right for a dashboard is wrong for the model. recharts 2
+ * to 3 changed `Tooltip` from `typeof Tooltip` to
+ * `(outsideProps: TooltipProps<ValueType, NameType>) => any`; that was in the
+ * diff, filtered from findings, and every compiler error was about it. The model
+ * was handed "Cell is deprecated", saw fourteen errors about Tooltip, and
+ * declined — correctly, because it had been given the wrong contract.
+ *
+ * Selecting by what the compiler actually named keeps the reporting filter
+ * intact while giving the model the part of the diff that explains its errors.
+ */
+async function changesNamedInErrors(
+  finding: Finding,
+  errors: string,
+): Promise<Array<{ change: SurfaceChange; sites: CallSite[] }>> {
+  if (!errors.trim()) return [];
+  try {
+    const [fromDir, toDir] = await Promise.all([
+      fetchPackageDir(finding.pkg, finding.fromVersion),
+      fetchPackageDir(finding.pkg, finding.toVersion),
+    ]);
+    const [fromSurface, toSurface] = await Promise.all([
+      extractSurface(fromDir, finding.pkg, finding.fromVersion),
+      extractSurface(toDir, finding.pkg, finding.toVersion),
+    ]);
+
+    const out: Array<{ change: SurfaceChange; sites: CallSite[] }> = [];
+    for (const change of diffSurfaces(fromSurface, toSurface).changes) {
+      if (change.kind === 'added') continue;
+      const leaf = change.path.split('.').at(-1) ?? '';
+      // Word-boundary match: `Cell` must not be found inside `CellProps`.
+      if (leaf.length < 3) continue;
+      if (!new RegExp(`\\b${leaf.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(errors)) continue;
+      out.push({ change, sites: [] });
+      if (out.length >= 25) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 /** Collect the sources the agent needs to reason about, capped to stay in context. */
@@ -172,6 +231,19 @@ async function filesNamedInOutput(output: string, repoDir: string): Promise<stri
   return [...found];
 }
 
+
+/**
+ * How badly the post-change run failed, as a count of reported errors.
+ *
+ * Crude on purpose: it only has to order two attempts, not describe them.
+ */
+function failureSize(report: VerificationReport): number {
+  const text = verificationErrors(report);
+  const compiler = text.match(/error TS\d+/g)?.length ?? 0;
+  if (compiler > 0) return compiler;
+  const failing = text.match(/^\s*(FAIL|✕|✗|×)/gm)?.length ?? 0;
+  return failing > 0 ? failing : 1;
+}
 
 function verificationErrors(report: VerificationReport): string {
   const parts: string[] = [];
@@ -318,6 +390,8 @@ export async function fixPackage(
       }
       const attempts: AgentAttempt[] = [];
       let rationale = '';
+      let bestFailureSize = failureSize(verification);
+      let previousSize = bestFailureSize;
       let previousAttempt: { edits: TextEdit[]; errors: string } | undefined = {
         edits: [],
         errors: verificationErrors(verification),
@@ -325,12 +399,19 @@ export async function fixPackage(
 
       for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
         progress(`  attempt ${attempt}/${config.maxRetries}: requesting edits`);
+        // Recomputed each attempt: the compiler names different symbols as
+        // earlier errors are fixed, so the contract shown should follow it.
+        const errorsNow = previousAttempt?.errors ?? failureOutput;
+        const explaining = await changesNamedInErrors(first, errorsNow);
+        const detected = findings.map((f) => ({ change: f.change, sites: f.sites }));
+        const known = new Set(detected.map((c) => c.change.path));
+
         const proposal = await proposeEdits(config, {
           // Present the whole upgrade, not one finding — a version bump is
           // atomic and the model must see every break to produce a coherent set
           // of edits.
           finding: first,
-          changes: findings.map((f) => ({ change: f.change, sites: f.sites })),
+          changes: [...detected, ...explaining.filter((c) => !known.has(c.change.path))],
           sources,
           candidateSymbols: candidates,
           ...(previousAttempt ? { previousAttempt } : {}),
@@ -369,8 +450,24 @@ export async function fixPackage(
         if (report.outcome === 'verified' || report.outcome === 'typecheck-only') break;
 
         if (attempt < config.maxRetries) {
-          await restoreSnapshots(ws.dir, editResult.snapshots);
-          appliedCount -= editResult.applied.length;
+          // Keep progress. Reverting every failed attempt made the retries three
+          // independent one-shots: an attempt that fixed ten of fourteen errors
+          // was discarded, and the next one started from fourteen again. A wide
+          // migration cannot converge that way. Edits are kept when they reduce
+          // the failure and rolled back when they do not, so the loop climbs
+          // instead of restarting.
+          const size = failureSize(report);
+          if (size < bestFailureSize) {
+            bestFailureSize = size;
+            progress(`    kept (${size} error(s) remain, was ${previousSize})`);
+            // The files on disk are no longer the ones the model was shown.
+            sources = await loadSources(ws.dir, agentFinding, [...collateral, ...referenced]);
+          } else {
+            progress(`    rolled back (${size} error(s), no improvement on ${bestFailureSize})`);
+            await restoreSnapshots(ws.dir, editResult.snapshots);
+            appliedCount -= editResult.applied.length;
+          }
+          previousSize = size;
           previousAttempt = { edits: proposal.edits, errors: verificationErrors(report) };
         }
       }
