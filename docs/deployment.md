@@ -32,9 +32,9 @@ accelerator referral needed. Eligibility is bootstrapped/self-funded, under ten
 years old, fewer than ten employees, under $1M revenue or funding, pre-Series B.
 Credits are $1,000–$5,000 depending on what they approve.
 
-At `t4g.small` (~$12/mo), even the $1,000 tier is several years of runway. That
-is long enough to find out whether anyone wants this, which is the only question
-that matters right now.
+At `t4g.large` (~$49/mo, see sizing above), the $1,000 tier is roughly 20 months
+of runway. That is long enough to find out whether anyone wants this, which is
+the only question that matters right now.
 
 ### Instance
 
