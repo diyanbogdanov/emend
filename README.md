@@ -139,9 +139,20 @@ export EMEND_GITHUB_WEBHOOK_SECRET=...
 emend serve --port 8080     # POST /webhook is now live
 ```
 
-Register the App with **contents:read, pull_requests:write, checks:read,
-metadata:read**, subscribed to `installation`, `installation_repositories`,
-`push`, and `check_suite`.
+Register the App with these repository permissions:
+
+| Permission | Level | Why |
+| --- | --- | --- |
+| Contents | **Read and write** | Read the source tarball; create the branch and commit |
+| Pull requests | **Read and write** | Open and update the draft PR |
+| Checks | Read-only | Receive `check_suite` so CI results come back |
+| Metadata | Read-only | Mandatory for every App |
+
+Subscribe to `installation`, `installation repositories`, `push`, and
+`check suite`.
+
+Contents must be **write**, not read. Commits are built through the Git Data
+API — blobs, a tree, a commit, a ref — and every one of those writes.
 
 Installing it on a repository queues a scan. Pushes to the default branch queue
 another. Each scan reconstructs `node_modules` from the lockfile, finds the
