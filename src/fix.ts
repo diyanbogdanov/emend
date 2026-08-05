@@ -113,6 +113,8 @@ async function tightenAny(
   phaseOpts: { skipTests: boolean },
   baseline: Awaited<ReturnType<typeof runPhase>>,
   progress: (message: string) => void,
+  /** Asks the model to repair what removing the annotations exposed. */
+  tighten?: (errors: string) => Promise<number | null>,
 ): Promise<VerificationReport | null> {
   const { stdout } = await execFileAsync('git', [
     '-C', dir, 'diff', '--name-only', '--', '.', ':(exclude)**/node_modules/**',
@@ -152,6 +154,26 @@ async function tightenAny(
   if (report.outcome === 'verified' || report.outcome === 'typecheck-only') {
     progress(`  tightening kept: all ${total} were unnecessary`);
     return report;
+  }
+
+  // Stripping alone recovers little, because an annotation is often hiding
+  // something: `(v: any) => new Date(v as string)` compiles only while `v` is
+  // `any`, and once inferred the cast is illegal. A regex cannot turn that into
+  // `String(v)`, but the model can, and the compiler has just said exactly what
+  // is wrong. So ask — with the annotations already removed and re-adding them
+  // ruled out.
+  if (tighten) {
+    const repaired = await tighten(verificationErrors(report));
+    if (repaired) {
+      const after = await check();
+      if (after.outcome === 'verified' || after.outcome === 'typecheck-only') {
+        progress(`  tightening kept: all ${total} removed, ${repaired} follow-up edit(s)`);
+        return after;
+      }
+      // The follow-up did not work; fall through to the per-file pass from the
+      // stripped-but-unrepaired state.
+      await write(candidates.keys(), true);
+    }
   }
 
   // One load-bearing annotation should not cost the other fifteen. Restore
@@ -648,7 +670,37 @@ export async function fixPackage(
 
       // The migration is green. Now find out how much of its `any` was real.
       if (verification.outcome === 'verified' || verification.outcome === 'typecheck-only') {
-        const tightened = await tightenAny(ws.dir, phaseOpts, baseline, progress);
+        const tightened = await tightenAny(
+          ws.dir,
+          phaseOpts,
+          baseline,
+          progress,
+          async (errors) => {
+            const workspace = ws;
+            if (!workspace) return null;
+            const sourcesNow = await loadSources(workspace.dir, agentFinding, [
+              ...collateral,
+              ...referenced,
+            ]);
+            const proposal = await proposeEdits(config, {
+              finding: first,
+              changes: findings.map((f) => ({ change: f.change, sites: f.sites })),
+              sources: sourcesNow,
+              candidateSymbols: candidates,
+              previousAttempt: {
+                edits: [],
+                errors:
+                  'The `any` annotations were removed so the parameters are inferred from ' +
+                  'context. Do NOT add them back and do NOT introduce casts. Fix these ' +
+                  'errors by coercing at the point of use instead — String(x), Number(x), ' +
+                  'or a narrowing check.\n\n' + errors,
+              },
+            });
+            if (!proposal.ok || proposal.edits.length === 0) return null;
+            const applied = await applyTextEdits(workspace.dir, proposal.edits);
+            return applied.applied.length > 0 ? applied.applied.length : null;
+          },
+        );
         if (tightened) verification = tightened;
       }
     }
