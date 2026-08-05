@@ -154,6 +154,40 @@ async function changesNamedInErrors(
   }
 }
 
+/**
+ * Symbols from the new version that the compiler's own error text mentions.
+ *
+ * A type error names the types it is about — `Formatter`, `ValueType`,
+ * `TooltipPayloadEntry` — and those are usually exported, sometimes under a
+ * different name (`ValueType` ships as `TooltipValueType`). Matching them here
+ * puts the vocabulary of the error into the model's list of usable symbols,
+ * which is the difference between annotating the real constraint and reaching
+ * for `any`.
+ */
+function symbolsNamedInErrors(
+  errors: string,
+  toSymbols: Record<string, ApiSymbol>,
+): string[] {
+  if (!errors.trim()) return [];
+  const mentioned = new Set(errors.match(/\b[A-Z][A-Za-z0-9_]{3,}\b/g) ?? []);
+  if (mentioned.size === 0) return [];
+
+  const hits: string[] = [];
+  for (const symbol of Object.values(toSymbols)) {
+    if (symbol.deprecated) continue;
+    const leaf = symbol.path.split('.').at(-1) ?? '';
+    if (leaf.length < 4) continue;
+    for (const token of mentioned) {
+      if (leaf === token || leaf.includes(token)) {
+        hits.push(symbol.path);
+        break;
+      }
+    }
+    if (hits.length >= 40) break;
+  }
+  return hits;
+}
+
 /** Collect the sources the agent needs to reason about, capped to stay in context. */
 async function loadSources(
   repoDir: string,
@@ -376,7 +410,17 @@ export async function fixPackage(
       // concatenating them. Concatenation means the prompt's cutoff falls inside
       // the first finding's list, so with nine broken symbols the model never
       // sees a replacement for eight of them.
-      const ranked = findings.map((f) => nearbySymbols(f.change.path, toSymbols));
+      // Symbols the compiler itself named come first. The candidate list is
+      // ranked by name similarity to the *findings*, so migrating `Cell` ranked
+      // `TooltipValueType` near the bottom and the cutoff removed it — even
+      // though recharts exports it publicly and it is exactly the type the
+      // errors are about. The model, told to use only listed symbols, then had
+      // no way to name the constraint and widened to `any` instead.
+      const namedByCompiler = symbolsNamedInErrors(failureOutput, toSymbols);
+      const ranked = [
+        namedByCompiler,
+        ...findings.map((f) => nearbySymbols(f.change.path, toSymbols)),
+      ];
       const candidates: string[] = [];
       const seen = new Set<string>();
       for (let i = 0; i < Math.max(0, ...ranked.map((r) => r.length)); i++) {
