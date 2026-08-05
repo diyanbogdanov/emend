@@ -300,7 +300,21 @@ export async function createPullRequest(
     // failed later, and re-running after fixing that is the normal case. The
     // branch content is fully determined by the migration, so resetting it is
     // safe and produces the same result.
-    await execFileAsync('git', ['-C', repoDir, 'checkout', '-B', branch]);
+    try {
+      await execFileAsync('git', ['-C', repoDir, 'checkout', '-B', branch]);
+    } catch (err) {
+      // git refuses to move a branch that another worktree has checked out. The
+      // holder is one of Emend's own kept workspaces — `--keep` leaves them on
+      // disk deliberately — so a kept workspace from an earlier run silently
+      // blocks every later run of the same finding.
+      const message = (err as Error).message;
+      const holder = message.match(/worktree at '([^']+)'/)?.[1];
+      if (!holder || !/emend-ws-/.test(holder)) throw err;
+      await execFileAsync('git', [
+        '-C', repoDir, 'worktree', 'remove', '--force', holder,
+      ]).catch(() => execFileAsync('git', ['-C', repoDir, 'worktree', 'prune']));
+      await execFileAsync('git', ['-C', repoDir, 'checkout', '-B', branch]);
+    }
     await execFileAsync('git', ['-C', repoDir, 'add', '-A']);
 
     // Nothing staged means the migration produced no committable change —
