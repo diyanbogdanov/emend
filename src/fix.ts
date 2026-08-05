@@ -118,8 +118,8 @@ async function tightenAny(
     '-C', dir, 'diff', '--name-only', '--', '.', ':(exclude)**/node_modules/**',
   ]).catch(() => ({ stdout: '' }));
 
-  const originals = new Map<string, string>();
-  let removed = 0;
+  // file -> [original, stripped, count]
+  const candidates = new Map<string, [string, string, number]>();
   for (const rel of stdout.split('\n').map((l: string) => l.trim()).filter(Boolean)) {
     if (!/\.[cm]?tsx?$/.test(rel)) continue;
     const file = path.join(dir, rel);
@@ -129,25 +129,67 @@ async function tightenAny(
     } catch {
       continue;
     }
-    const { text, removed: n } = stripParameterAny(before);
-    if (n === 0) continue;
-    originals.set(file, before);
-    await writeFile(file, text, 'utf8');
-    removed += n;
+    const { text, removed } = stripParameterAny(before);
+    if (removed > 0) candidates.set(file, [before, text, removed]);
   }
-  if (removed === 0) return null;
+  if (candidates.size === 0) return null;
 
-  progress(`  tightening: removed ${removed} parameter \`any\` annotation(s), re-verifying`);
-  const post = await runPhase(dir, phaseOpts);
-  const report = compare(baseline, post);
+  const total = [...candidates.values()].reduce((n, [, , c]) => n + c, 0);
+
+  const write = async (files: Iterable<string>, stripped: boolean): Promise<void> => {
+    for (const file of files) {
+      const entry = candidates.get(file);
+      if (entry) await writeFile(file, stripped ? entry[1] : entry[0], 'utf8');
+    }
+  };
+  const check = async (): Promise<VerificationReport> =>
+    compare(baseline, await runPhase(dir, phaseOpts));
+
+  // Whole set first: one verification, and usually the answer.
+  progress(`  tightening: removing ${total} parameter \`any\` annotation(s), re-verifying`);
+  await write(candidates.keys(), true);
+  let report = await check();
   if (report.outcome === 'verified' || report.outcome === 'typecheck-only') {
-    progress(`  tightening kept: ${removed} \`any\` annotation(s) were unnecessary`);
+    progress(`  tightening kept: all ${total} were unnecessary`);
     return report;
   }
 
-  progress('  tightening reverted: the annotations were load-bearing');
-  for (const [file, before] of originals) await writeFile(file, before, 'utf8');
-  return null;
+  // One load-bearing annotation should not cost the other fifteen. Restore
+  // everything, then re-strip file by file and keep whatever still verifies.
+  // Each file costs a verification, so this is bounded rather than exhaustive.
+  const perFileBudget = 10;
+  const files = [...candidates.keys()].slice(0, perFileBudget);
+  const skipped = candidates.size - files.length;
+  progress(
+    `  tightening: whole set was load-bearing, retrying file by file` +
+      (skipped > 0 ? ` (${skipped} file(s) beyond the budget keep theirs)` : ''),
+  );
+  await write(candidates.keys(), false);
+
+  const keptFiles: string[] = [];
+  let keptCount = 0;
+  let best: VerificationReport | null = null;
+  for (const file of files) {
+    await write([file], true);
+    const trial = await check();
+    if (trial.outcome === 'verified' || trial.outcome === 'typecheck-only') {
+      keptFiles.push(file);
+      keptCount += candidates.get(file)?.[2] ?? 0;
+      best = trial;
+    } else {
+      await write([file], false);
+    }
+  }
+
+  if (keptFiles.length === 0) {
+    progress('  tightening reverted: every annotation was load-bearing');
+    return null;
+  }
+  progress(
+    `  tightening kept: ${keptCount} of ${total} annotation(s) removed across ` +
+      `${keptFiles.length} file(s); the rest were load-bearing`,
+  );
+  return best;
 }
 
 async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol>> {
