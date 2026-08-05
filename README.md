@@ -154,6 +154,9 @@ Subscribe to `installation`, `installation repositories`, `push`, and
 Contents must be **write**, not read. Commits are built through the Git Data
 API — blobs, a tree, a commit, a ref — and every one of those writes.
 
+Step-by-step registration, including tunnelling webhooks to a local server and
+verifying the loop end to end: [`docs/github-app-setup.md`](docs/github-app-setup.md).
+
 Installing it on a repository queues a scan. Pushes to the default branch queue
 another. Each scan reconstructs `node_modules` from the lockfile, finds the
 drift, migrates what it can, and opens a **draft** pull request per package.
