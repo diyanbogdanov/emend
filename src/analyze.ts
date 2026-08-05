@@ -31,7 +31,14 @@ export interface ScanOptions {
   only?: string[];
   /** Include devDependencies. Default true. */
   includeDev?: boolean;
-  /** Max packages to analyze before warning and stopping. Default 120. */
+  /**
+   * Stop after this many packages. Unlimited by default.
+   *
+   * A cap trades findings for latency, and that is the wrong trade for this
+   * product: a package that was not analysed is reported as such, but a warning
+   * is weaker evidence than a finding and readers discount it. Callers that
+   * genuinely need a bound — an interactive command, a smoke test — can set one.
+   */
   maxPackages?: number;
   /** Progress callback for CLI output. */
   onProgress?: (message: string) => void;
@@ -99,11 +106,7 @@ export async function scanRepo(
 ): Promise<ScanReport> {
   const startedAt = new Date().toISOString();
   const progress = options.onProgress ?? (() => {});
-  // Raised for workspace repositories: a private monorepo declares 60 across six
-  // manifests, and a cap of 40 would have truncated a third of them behind a
-  // warning nobody reads. Scans are roughly a second per package once the
-  // tarball cache is warm, so the ceiling can afford to be generous.
-  const maxPackages = options.maxPackages ?? 120;
+  const maxPackages = options.maxPackages ?? Number.POSITIVE_INFINITY;
 
   const repo = await readRepo(repoDir);
   const warnings = [...repo.warnings];
@@ -132,7 +135,7 @@ export async function scanRepo(
   }
   if (deps.length > maxPackages) {
     warnings.push(
-      `${deps.length} dependencies present; analyzing the first ${maxPackages}. Remaining packages were NOT analyzed and are not known to be clean. Use --only to target specific packages.`,
+      `${deps.length} dependencies present; analyzing the first ${maxPackages} because a limit was set explicitly. The rest were NOT analyzed and are not known to be clean.`,
     );
     deps = deps.slice(0, maxPackages);
   }
