@@ -13,6 +13,7 @@ import { tmpdir, platform } from 'node:os';
 import path from 'node:path';
 import type { CommandResult, MigrationPlan, PlannedEdit } from './types.ts';
 import { runCommand } from './verify.ts';
+import { findWorkspaces } from './workspaces.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -51,26 +52,48 @@ async function gitHead(repoDir: string): Promise<string | null> {
  * even for a large tree. Reinstalling from scratch instead would add minutes per
  * run for no benefit — we bump only the one package under migration afterwards.
  */
+/**
+ * Copy an installed dependency tree into the workspace.
+ *
+ * A workspace repository does not keep one `node_modules` — it keeps one per
+ * package. a private monorepo has two entries at the root and fifteen, twenty-six,
+ * five, four, four and six across its six workspaces, so copying only the root
+ * produced a workspace whose baseline failed to typecheck for want of almost
+ * every dependency. Emend then correctly reported "pre-existing failure" about a
+ * repository that was perfectly healthy.
+ *
+ * `cp -R` preserves symlinks rather than following them, which matters: bun and
+ * pnpm fill per-workspace directories with links into a shared store, and
+ * dereferencing them would multiply the copy by the number of workspaces.
+ */
 async function copyNodeModules(from: string, to: string): Promise<boolean> {
-  const src = path.join(from, 'node_modules');
-  if (!(await exists(src))) return false;
-  const dst = path.join(to, 'node_modules');
-  const attempts =
-    platform() === 'darwin'
-      ? [
-          ['-c', '-R', src, dst],
-          ['-R', src, dst],
-        ]
-      : [['-R', src, dst]];
-  for (const args of attempts) {
-    try {
-      await execFileAsync('cp', args, { maxBuffer: 64 * 1024 * 1024 });
-      return true;
-    } catch {
-      /* try next strategy */
+  const roots = await findWorkspaces(from);
+  let copiedAny = false;
+
+  for (const workspace of roots) {
+    const src = path.join(from, workspace, 'node_modules');
+    if (!(await exists(src))) continue;
+    const dst = path.join(to, workspace, 'node_modules');
+    await mkdir(path.dirname(dst), { recursive: true });
+
+    const attempts =
+      platform() === 'darwin'
+        ? [
+            ['-c', '-R', src, dst],
+            ['-R', src, dst],
+          ]
+        : [['-R', src, dst]];
+    for (const args of attempts) {
+      try {
+        await execFileAsync('cp', args, { maxBuffer: 64 * 1024 * 1024 });
+        copiedAny = true;
+        break;
+      } catch {
+        /* try next strategy */
+      }
     }
   }
-  return false;
+  return copiedAny;
 }
 
 export async function prepareWorkspace(repoDir: string): Promise<Workspace> {
@@ -279,49 +302,116 @@ export async function restoreSnapshots(
 }
 
 /** Install the target version of the package being migrated. */
+export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
+
+/** Which package manager owns this repository, by the lockfile it left behind. */
+export async function detectPackageManager(dir: string): Promise<PackageManager> {
+  for (const [file, manager] of [
+    ['bun.lock', 'bun'],
+    ['bun.lockb', 'bun'],
+    ['pnpm-lock.yaml', 'pnpm'],
+    ['yarn.lock', 'yarn'],
+  ] as const) {
+    if (await exists(path.join(dir, file))) return manager;
+  }
+  return 'npm';
+}
+
 /**
- * Bump a dependency, preserving how the repository chose to express its range.
+ * The workspace whose manifest declares this package.
  *
- * `npm install pkg@version` writes `^version` regardless of what was there
- * before, so an exact pin silently becomes a caret range. That is a real change
- * in behaviour and repositories notice: a scanned repository pins `playwright` exactly
- * and has a test asserting the pin matches its Docker base image, which failed
- * on `^1.62.1` for precisely this reason.
+ * A monorepo root usually declares nothing. Bumping there would add a
+ * dependency the repository never had and leave the workspace that actually
+ * uses it untouched — a change that installs cleanly and fixes nothing.
+ */
+async function declaringWorkspace(dir: string, pkg: string): Promise<string> {
+  for (const workspace of await findWorkspaces(dir)) {
+    try {
+      const manifest = JSON.parse(
+        await readFile(path.join(dir, workspace, 'package.json'), 'utf8'),
+      ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+      if (manifest.dependencies?.[pkg] ?? manifest.devDependencies?.[pkg]) return workspace;
+    } catch {
+      /* unreadable manifest: try the next workspace */
+    }
+  }
+  return '';
+}
+
+/**
+ * Bump a dependency in the manifest that declares it, using the repository's own
+ * package manager, preserving how it chose to express the range.
+ *
+ * Three things this gets wrong if done naively, all of which produce a pull
+ * request that looks plausible and is not:
+ *
+ *  - Running `npm install` in a bun or pnpm repository writes a
+ *    `package-lock.json` alongside the real lockfile. The diff then contains a
+ *    file the project does not use and the lockfile it does use is unchanged.
+ *  - Running at the root of a workspace repository edits the root manifest,
+ *    which does not declare the package.
+ *  - Every manager defaults to a caret range, so an exact pin silently widens.
+ *    a scanned repository pins `playwright` exactly and has a test asserting the pin
+ *    matches its Docker base image; that test failed on `^1.62.1` alone.
  */
 export async function bumpDependency(
   dir: string,
   pkg: string,
   version: string,
-  options: { ignoreScripts?: boolean } = {},
+  options: { ignoreScripts?: boolean; manager?: PackageManager; workspace?: string } = {},
 ): Promise<CommandResult> {
-  const args = ['install', `${pkg}@${version}`, '--no-audit', '--no-fund', '--silent'];
+  const manager = options.manager ?? (await detectPackageManager(dir));
+  const workspace = options.workspace ?? (await declaringWorkspace(dir, pkg));
+  const cwd = path.join(dir, workspace);
 
-  // `npm install` runs lifecycle scripts from every package in the tree. On a
-  // repository Emend does not trust that is arbitrary code execution, and it
-  // silently happened: a hosted run of a Prisma repo executed `prisma generate`
-  // through a postinstall hook, which even changed the verification result by
-  // fixing a baseline typecheck failure. Callers analysing untrusted code must
-  // pass this.
-  if (options.ignoreScripts) args.push('--ignore-scripts');
-
+  let exact = false;
+  let prefix: string | undefined;
   try {
     const manifest = JSON.parse(
-      await readFile(path.join(dir, 'package.json'), 'utf8'),
-    ) as {
-      dependencies?: Record<string, string>;
-      devDependencies?: Record<string, string>;
-    };
-    const declared =
-      manifest.dependencies?.[pkg] ?? manifest.devDependencies?.[pkg] ?? '';
-    const prefix = declared.match(/^[~^]/)?.[0];
-    if (prefix) args.push(`--save-prefix=${prefix}`);
-    else if (/^\d/.test(declared)) args.push('--save-exact');
+      await readFile(path.join(cwd, 'package.json'), 'utf8'),
+    ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    const declared = manifest.dependencies?.[pkg] ?? manifest.devDependencies?.[pkg] ?? '';
+    prefix = declared.match(/^[~^]/)?.[0];
+    exact = !prefix && /^\d/.test(declared);
   } catch {
-    // No readable manifest: fall back to npm's default rather than failing the
-    // bump, since the install itself is what matters.
+    /* no readable manifest: accept the manager's default range style */
   }
 
-  return runCommand('npm', args, dir);
+  // Lifecycle scripts are arbitrary code from a repository Emend does not
+  // trust. A hosted run against a Prisma repository executed `prisma generate`
+  // through a postinstall hook, which also corrupted the verification by
+  // repairing a baseline failure mid-run.
+  const ignore = options.ignoreScripts === true;
+
+  // bun, pnpm and yarn all record exactly the spec they are handed, so the
+  // range operator belongs in the spec rather than in a flag. Passing a bare
+  // version turns `^2.15.0` into a hard pin — a real change to how the project
+  // takes updates, made silently while migrating something unrelated.
+  const spec = `${pkg}@${prefix ?? ''}${version}`;
+
+  if (manager === 'bun') {
+    const args = ['add', spec];
+    if (exact) args.push('--exact');
+    if (ignore) args.push('--ignore-scripts');
+    return runCommand('bun', args, cwd);
+  }
+  if (manager === 'pnpm') {
+    const args = ['add', spec];
+    if (exact) args.push('--save-exact');
+    if (ignore) args.push('--ignore-scripts');
+    return runCommand('pnpm', args, cwd);
+  }
+  if (manager === 'yarn') {
+    const args = ['add', spec];
+    if (exact) args.push('--exact');
+    return runCommand('yarn', args, cwd);
+  }
+
+  const args = ['install', `${pkg}@${version}`, '--no-audit', '--no-fund', '--silent'];
+  if (prefix) args.push(`--save-prefix=${prefix}`);
+  else if (exact) args.push('--save-exact');
+  if (ignore) args.push('--ignore-scripts');
+  return runCommand('npm', args, cwd);
 }
 
 /** Unified diff of the workspace against its base, for the PR body. */

@@ -199,6 +199,11 @@ export async function fixPackage(
   progress(`  ${planned.length} deterministic, ${unplanned.length} needing an agent or a human`);
 
   const llm = options.useAgent ? resolveLlmConfig() : null;
+  // Asking for the agent and silently not getting one is the worst of both:
+  // the run looks like the model tried and failed, when it never ran at all.
+  if (llm && !llm.ok) {
+    progress(`agent requested but unavailable: ${llm.reason}`);
+  }
 
   let ws: Workspace | null = null;
   try {
