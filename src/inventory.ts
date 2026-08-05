@@ -118,7 +118,7 @@ export async function readRepo(repoDir: string): Promise<RepoInfo> {
   const guessed = dependencies.filter((d) => d.source === 'range');
   if (lock.unsupported) {
     warnings.push(
-      `found ${lock.unsupported}, which Emend cannot parse yet — versions for ${guessed.length} package(s) were inferred from package.json ranges and may name versions that were never published. Only package-lock.json is supported today.`,
+      `found ${lock.unsupported}, which Emend could not read — versions for ${guessed.length} package(s) were inferred from package.json ranges and may name versions that were never published. package-lock.json, pnpm-lock.yaml and yarn.lock are supported.`,
     );
   } else if (guessed.length > 0) {
     warnings.push(

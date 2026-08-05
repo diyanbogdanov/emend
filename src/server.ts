@@ -77,6 +77,25 @@ export function startServer(port: number): Promise<void> {
         json(res, store.listPullRequests(repo));
         return;
       }
+      // Findings are a point-in-time snapshot, so improving the analyser does
+      // not retroactively improve stored scans. In the hosted flow the next push
+      // corrects that; on a quiet repository it never does, and the dashboard
+      // keeps showing conclusions the current code would not draw.
+      if (url.pathname === '/api/rescan' && req.method === 'POST') {
+        const repoKey = url.searchParams.get('repo');
+        if (!repoKey) {
+          json(res, { error: 'repo is required' }, 400);
+          return;
+        }
+        const tracked = store.getRepo(repoKey);
+        if (!tracked) {
+          json(res, { error: 'not a tracked repository' }, 404);
+          return;
+        }
+        const id = store.enqueueJob(repoKey, tracked.defaultBranch);
+        json(res, { queued: true, jobId: id });
+        return;
+      }
       if (url.pathname === '/') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(PAGE);
@@ -287,6 +306,12 @@ const PAGE = /* html */ `<!doctype html>
   .bad { color: var(--break); font-size: 11.5px; }
   .pend { color: var(--deprecate); font-size: 11.5px; }
   .muted { color: var(--muted); font-size: 11.5px; }
+  button.rescan {
+    font: inherit; font-size: 11.5px; color: var(--muted); cursor: pointer;
+    background: none; border: 1px solid var(--line); border-radius: 4px; padding: 2px 9px;
+  }
+  button.rescan:hover:enabled { color: var(--ink); border-color: var(--muted); }
+  button.rescan:disabled { opacity: .55; cursor: default; }
   .warn {
     border-left: 3px solid var(--deprecate); background: color-mix(in srgb, var(--deprecate) 8%, transparent);
     padding: 9px 13px; margin-bottom: 8px; font-size: 12.5px; border-radius: 0 4px 4px 0;
@@ -350,7 +375,9 @@ async function renderFleet() {
       '<td><b>' + esc(r.owner + '/' + r.name) + '</b><br><small>' + esc(r.defaultBranch) + '</small></td>' +
       '<td>' + (c ? c.breaking + ' breaking · ' + c.deprecation + ' deprecated' : '<small>not scanned yet</small>') + '</td>' +
       '<td>' + (r.lastScannedAt ? '<small>' + esc(new Date(r.lastScannedAt).toLocaleString()) + '</small>' : '<small>—</small>') + '</td>' +
-      '<td>' + (queued > 0 ? '<span class="pend">' + queued + ' queued</span>' : '<small>idle</small>') + '</td>' +
+      '<td>' + (queued > 0
+        ? '<span class="pend">' + queued + ' queued</span>'
+        : '<button class="rescan" data-repo="' + esc(r.repoKey) + '">Rescan</button>') + '</td>' +
       '<td>' + (mine.length === 0 ? '<small>none</small>' : mine.map(p =>
         '<a href="' + esc(p.url) + '" target="_blank" rel="noreferrer">#' + p.number + '</a> ' + ciBadge(p.ciStatus)
       ).join('<br>')) + '</td>' +
@@ -365,6 +392,15 @@ async function renderFleet() {
       : '') +
     '<table class="fleet"><thead><tr><th>Repository</th><th>Findings</th><th>Last scan</th>' +
     '<th>Queue</th><th>Emend pull requests</th></tr></thead><tbody>' + rows + '</tbody></table>';
+
+  for (const btn of document.querySelectorAll('.rescan')) {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = 'queued';
+      await fetch('/api/rescan?repo=' + encodeURIComponent(btn.dataset.repo), { method: 'POST' });
+      setTimeout(boot, 1200);
+    };
+  }
 }
 
 async function boot() {
