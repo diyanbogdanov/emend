@@ -296,6 +296,12 @@ fixtures/demo-repo/           demo template with real drift
 
 Run `npm run typecheck` and `npm test` to verify.
 
+`npm run audit:removals` cross-examines every reported removal across 18 real
+SDK upgrades, resolving each path the way a consumer would rather than trusting
+Emend's own index. It exists because the one bug class that matters most here —
+a confident finding that is simply wrong — is invisible to unit tests and was
+caught only when someone read a pull request and asked why the diff was empty.
+
 ---
 
 ## Status
