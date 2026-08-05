@@ -6,8 +6,11 @@
  * its pre-existing failures attributed to the migration.
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
+
 import path from 'node:path';
 import { fetchPackageDir } from './registry.ts';
 import { extractSurface } from './surface.ts';
@@ -36,6 +39,8 @@ import type {
   SurfaceChange,
   VerificationReport,
 } from './types.ts';
+
+const execFileAsync = promisify(execFile);
 
 export interface FixOptions {
   /** Leave the workspace on disk for inspection. */
@@ -98,6 +103,53 @@ export interface FixResult {
  * so recomputing is cheaper and less error-prone than persisting a large
  * denormalised blob alongside every finding.
  */
+/**
+ * Strip parameter `any` across the workspace and keep it if everything still
+ * verifies. One extra verification buys back the checking wholesale; if it
+ * fails, the annotations are restored and the working migration stands.
+ */
+async function tightenAny(
+  dir: string,
+  phaseOpts: { skipTests: boolean },
+  baseline: Awaited<ReturnType<typeof runPhase>>,
+  progress: (message: string) => void,
+): Promise<VerificationReport | null> {
+  const { stdout } = await execFileAsync('git', [
+    '-C', dir, 'diff', '--name-only', '--', '.', ':(exclude)**/node_modules/**',
+  ]).catch(() => ({ stdout: '' }));
+
+  const originals = new Map<string, string>();
+  let removed = 0;
+  for (const rel of stdout.split('\n').map((l: string) => l.trim()).filter(Boolean)) {
+    if (!/\.[cm]?tsx?$/.test(rel)) continue;
+    const file = path.join(dir, rel);
+    let before: string;
+    try {
+      before = await readFile(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const { text, removed: n } = stripParameterAny(before);
+    if (n === 0) continue;
+    originals.set(file, before);
+    await writeFile(file, text, 'utf8');
+    removed += n;
+  }
+  if (removed === 0) return null;
+
+  progress(`  tightening: removed ${removed} parameter \`any\` annotation(s), re-verifying`);
+  const post = await runPhase(dir, phaseOpts);
+  const report = compare(baseline, post);
+  if (report.outcome === 'verified' || report.outcome === 'typecheck-only') {
+    progress(`  tightening kept: ${removed} \`any\` annotation(s) were unnecessary`);
+    return report;
+  }
+
+  progress('  tightening reverted: the annotations were load-bearing');
+  for (const [file, before] of originals) await writeFile(file, before, 'utf8');
+  return null;
+}
+
 async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol>> {
   const toDir = await fetchPackageDir(finding.pkg, finding.toVersion);
   const toSurface = await extractSurface(toDir, finding.pkg, finding.toVersion);
@@ -186,6 +238,33 @@ function symbolsNamedInErrors(
     if (hits.length >= 40) break;
   }
   return hits;
+}
+
+/**
+ * Remove `any` annotations that were never needed.
+ *
+ * A migration that reaches green with `(value: any)` has satisfied every gate
+ * the pipeline has, because `any` compiles exactly as well as a correct type.
+ * Asking the model not to do it does not work — told to prefer the stronger
+ * form and given the exported type to use, it produced twelve `any`
+ * annotations anyway. The model optimises for what is measured, so this
+ * measures it.
+ *
+ * Deleting a parameter annotation does not weaken anything: TypeScript infers
+ * the parameter from the contextual type, which is the real contract. So
+ * `(value: any) => …` becomes `(value) => …` and the compiler decides whether
+ * that was load-bearing. Anything that still compiles was `any` for no reason.
+ *
+ * Scoped to parameter positions on purpose. Removing `const x: any = …` changes
+ * what is inferred rather than recovering it.
+ */
+export function stripParameterAny(source: string): { text: string; removed: number } {
+  let removed = 0;
+  const text = source.replace(/([(,]\s*\.{0,3}\w+\??)\s*:\s*any\b(?!\[)/g, (_m, keep: string) => {
+    removed++;
+    return keep;
+  });
+  return { text, removed };
 }
 
 /** Collect the sources the agent needs to reason about, capped to stay in context. */
@@ -524,6 +603,12 @@ export async function fixPackage(
       }
 
       agentRecord = { model: config.model, provider: config.providerLabel, attempts, rationale };
+
+      // The migration is green. Now find out how much of its `any` was real.
+      if (verification.outcome === 'verified' || verification.outcome === 'typecheck-only') {
+        const tightened = await tightenAny(ws.dir, phaseOpts, baseline, progress);
+        if (tightened) verification = tightened;
+      }
     }
 
     const diff = await workspaceDiff(ws);
