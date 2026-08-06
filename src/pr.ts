@@ -53,7 +53,7 @@ export function branchSlug(pkg: string): string {
 }
 
 /** Added lines that trade a type check for a compile. */
-function countTypeEscapes(diff: string): number {
+export function countTypeEscapes(diff: string): number {
   let count = 0;
   for (const line of diff.split('\n')) {
     if (!line.startsWith('+') || line.startsWith('+++')) continue;

@@ -112,6 +112,10 @@ export interface FixResult {
     provider: string;
     attempts: AgentAttempt[];
     rationale: string;
+    /** Outstanding errors when the agent was handed the migration. */
+    initialErrors: number;
+    /** Outstanding errors when it stopped. Zero once the build passes. */
+    finalErrors: number;
   };
 }
 
@@ -707,7 +711,11 @@ export async function fixPackage(
       }
       const attempts: AgentAttempt[] = [];
       let rationale = '';
-      let bestFailureSize = failureSize(verification);
+      // What the agent was handed, before it changed anything. Kept so a run
+      // that took fourteen errors to two is distinguishable from one that took
+      // fourteen to fourteen — both fail, and they are not the same result.
+      const initialErrors = failureSize(verification);
+      let bestFailureSize = initialErrors;
       let previousSize = bestFailureSize;
       // The errors belonging to whatever is currently on disk. After a rollback
       // the failed attempt's errors describe a state that no longer exists, and
@@ -855,7 +863,14 @@ export async function fixPackage(
         }
       }
 
-      agentRecord = { model: config.model, provider: config.providerLabel, attempts, rationale };
+      agentRecord = {
+        model: config.model,
+        provider: config.providerLabel,
+        attempts,
+        rationale,
+        initialErrors,
+        finalErrors: verificationPassed(verification.outcome) ? 0 : failureSize(verification),
+      };
 
       // The migration is green. Now find out how much of its `any` was real.
       if (verificationPassed(verification.outcome)) {

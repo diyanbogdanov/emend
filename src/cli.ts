@@ -20,6 +20,15 @@ import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { listModels } from './llm/client.ts';
+import {
+  loadCases,
+  materialiseCase,
+  runCase,
+  scoreCase,
+  summarise,
+  renderSummary,
+  type CaseOutcome,
+} from './eval.ts';
 import type { Finding, ScanReport } from './types.ts';
 
 const execFileAsync = promisify(execFile);
@@ -456,6 +465,61 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+/**
+ * Measure the agent against a corpus, so changing it is a decision.
+ *
+ * Each case costs a full install, migration and verification, so the corpus is
+ * named explicitly rather than discovered: a sweep should be something you chose
+ * to pay for. `--model` may be repeated to compare, which is the point.
+ */
+async function cmdEval(args: Args): Promise<number> {
+  const casesFlag = args.flags.get('cases');
+  const cases = await loadCases(typeof casesFlag === 'string' ? casesFlag : undefined);
+  if (cases.length === 0) {
+    console.error(c.red('  no cases — pass --cases <file.json>'));
+    return 1;
+  }
+  const modelFlag = args.flags.get('model');
+  const models = typeof modelFlag === 'string' ? modelFlag.split(',') : [''];
+
+  console.log('');
+  console.log(c.bold(`  Emend eval — ${cases.length} case(s) x ${models.length} model(s)`));
+  console.log('');
+
+  const outcomes: CaseOutcome[] = [];
+  for (const model of models) {
+    for (const evalCase of cases) {
+      const label = model || 'deterministic';
+      process.stdout.write(`  ${label} · ${evalCase.id} … `);
+      const dir = await materialiseCase(evalCase);
+      try {
+        if (model) process.env['EMEND_LLM_MODEL'] = model;
+        const outcome = await runCase(evalCase, dir, label, { useAgent: Boolean(model) });
+        outcomes.push(outcome);
+        const score = scoreCase(evalCase, outcome);
+        console.log(
+          score.clean
+            ? c.green('clean')
+            : score.passed
+              ? c.yellow(`passed (${score.penalties.length} penalty)`)
+              : c.red(outcome.verdict),
+        );
+      } finally {
+        if (evalCase.repo.kind !== 'local') {
+          await rm(dir, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+    }
+  }
+
+  console.log('');
+  console.log(renderSummary(summarise(cases, outcomes)));
+  console.log('');
+  // Never a non-zero exit for a bad score: this reports, it does not police, and
+  // a sweep that "fails" is indistinguishable from one that crashed.
+  return 0;
+}
+
 async function cmdDemo(args: Args): Promise<number> {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const template = path.resolve(here, '..', 'fixtures', 'demo-repo');
@@ -534,6 +598,12 @@ ${c.bold('COMMANDS')}
 
   demo [dir]      Scaffold a demo repository with real dependency drift.
 
+  eval            Measure the agent against a corpus. Reports pass rate, clean
+                  rate, edit ratio and error reduction per model, so an agent
+                  change is a decision rather than a hope.
+    --cases <f>     JSON corpus. Defaults to the demo repository alone.
+    --model <a,b>   Compare models. Omit to measure the deterministic path.
+
 ${c.bold('EXAMPLE')}
   emend demo ./emend-demo
   emend scan ./emend-demo --only zod
@@ -574,6 +644,9 @@ async function main(): Promise<void> {
         break;
       case 'demo':
         process.exitCode = await cmdDemo(args);
+        break;
+      case 'eval':
+        process.exitCode = await cmdEval(args);
         break;
       default:
         usage();
