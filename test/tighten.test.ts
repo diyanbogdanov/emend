@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripParameterAny } from '../src/fix.ts';
+import {
+  buildTighteningPrompt,
+  TIGHTENING_SYSTEM_PROMPT,
+  type AgentContext,
+} from '../src/llm/agent.ts';
 
 test('removes a parameter any so the contextual type is inferred instead', () => {
   // recharts 3 widened the Tooltip formatter parameter. `(value: any)` compiles
@@ -34,4 +39,72 @@ test('handles rest and optional parameters, and leaves other annotations', () =>
 test('does not touch any[] , which is a different type', () => {
   const { removed } = stripParameterAny('function f(xs: any[]) {}');
   assert.equal(removed, 0);
+});
+
+function tighteningContext(sources: Map<string, string>): AgentContext {
+  return {
+    finding: {
+      id: 'f1',
+      pkg: 'recharts',
+      fromVersion: '2.15.0',
+      toVersion: '3.10.1',
+      change: {
+        path: 'Tooltip.formatter',
+        kind: 'signature-changed',
+        severity: 'breaking',
+        confidence: 'medium',
+        before: '(value: TValue, ...) => ReactNode',
+        after: '(value: ValueType | undefined, ...) => ReactNode',
+      },
+      sites: [],
+      confidence: 'medium',
+    },
+    changes: [],
+    sources,
+    candidateSymbols: [],
+    tightening: { errors: "error TS2339: Property 'toFixed' does not exist on type 'ValueType'." },
+  };
+}
+
+test('the tightening prompt describes the sources as already stripped', () => {
+  // The bug this replaces: tightening reused `previousAttempt`, which appends
+  // "the source shown above is the ORIGINAL, unmodified file". By that point the
+  // annotations are gone from disk, so a model trusting it copies `find` strings
+  // like `(value: any)` that no longer exist. Every edit is then rejected as
+  // absent and the step reports nothing — indistinguishable from a model that
+  // simply declined.
+  const prompt = buildTighteningPrompt(
+    tighteningContext(new Map([['src/Chart.tsx', 'formatter={(value) => value.toFixed(1)}']])),
+    "error TS2339: Property 'toFixed' does not exist on type 'ValueType'.",
+  );
+  assert.match(prompt, /CURRENT state, annotations already removed/);
+  assert.doesNotMatch(prompt, /ORIGINAL, unmodified/);
+});
+
+test('the tightening prompt carries the compiler output and the source', () => {
+  const prompt = buildTighteningPrompt(
+    tighteningContext(new Map([['src/Chart.tsx', 'const marker = 42;']])),
+    'error TS18048: my-unique-error',
+  );
+  assert.match(prompt, /my-unique-error/);
+  assert.match(prompt, /const marker = 42;/);
+  assert.match(prompt, /src\/Chart\.tsx/);
+});
+
+test('tightening is instructed to narrow rather than re-annotate', () => {
+  assert.match(TIGHTENING_SYSTEM_PROMPT, /NEVER re-add a parameter type annotation/);
+  assert.match(TIGHTENING_SYSTEM_PROMPT, /typeof value === 'number'/);
+  assert.match(TIGHTENING_SYSTEM_PROMPT, /NEVER use a type assertion/);
+  // Body edits are forbidden by the migration prompt and required by this one.
+  assert.match(TIGHTENING_SYSTEM_PROMPT, /Editing the function BODY is exactly what this task requires/);
+});
+
+test('tightening rules out both disguises of blanket coercion', () => {
+  // Measured, not assumed. With only a soft "prefer narrowing", the model
+  // returned `Number(value ?? 0).toFixed(1)` — compiles, and silently renders a
+  // real string as "0". Naming that as unacceptable produced a `typeof` guard,
+  // but with `Number(value)` in the else branch, which renders "NaN" instead.
+  // Both sentences below bought a measured behaviour change; neither is decoration.
+  assert.match(TIGHTENING_SYSTEM_PROMPT, /Blanket coercion such as .* is NOT acceptable/);
+  assert.match(TIGHTENING_SYSTEM_PROMPT, /Do not funnel it back through/);
 });

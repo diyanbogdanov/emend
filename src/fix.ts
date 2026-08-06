@@ -172,6 +172,7 @@ async function tightenAny(
       }
       // The follow-up did not work; fall through to the per-file pass from the
       // stripped-but-unrepaired state.
+      progress('  tightening: repair did not verify, falling back to file by file');
       await write(candidates.keys(), true);
     }
   }
@@ -687,18 +688,26 @@ export async function fixPackage(
               changes: findings.map((f) => ({ change: f.change, sites: f.sites })),
               sources: sourcesNow,
               candidateSymbols: candidates,
-              previousAttempt: {
-                edits: [],
-                errors:
-                  'The `any` annotations were removed so the parameters are inferred from ' +
-                  'context. Do NOT add them back and do NOT introduce casts. Fix these ' +
-                  'errors by coercing at the point of use instead — String(x), Number(x), ' +
-                  'or a narrowing check.\n\n' + errors,
-              },
+              tightening: { errors },
             });
-            if (!proposal.ok || proposal.edits.length === 0) return null;
+            // Each of these used to return null indistinguishably, so a repair
+            // that proposed nothing looked exactly like one whose edits all
+            // failed to apply — and the run reported neither.
+            if (!proposal.ok) {
+              progress(`    tightening repair unavailable: ${proposal.error ?? 'unknown error'}`);
+              return null;
+            }
+            if (proposal.edits.length === 0) {
+              progress(`    tightening repair proposed no edits: ${proposal.rationale || 'no rationale given'}`);
+              return null;
+            }
             const applied = await applyTextEdits(workspace.dir, proposal.edits);
-            return applied.applied.length > 0 ? applied.applied.length : null;
+            if (applied.applied.length === 0) {
+              progress(`    tightening repair: none of ${proposal.edits.length} edit(s) matched the source`);
+              return null;
+            }
+            progress(`    tightening repair: applied ${applied.applied.length} of ${proposal.edits.length} edit(s)`);
+            return applied.applied.length;
           },
         );
         if (tightened) verification = tightened;

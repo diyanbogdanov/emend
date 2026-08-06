@@ -60,7 +60,33 @@ export interface AgentContext {
     edits: TextEdit[];
     errors: string;
   };
+  /**
+   * Set when this is a tightening repair rather than a migration.
+   *
+   * These two tasks want opposite things, and sharing a prompt made the model
+   * fail at both. Migration says "change only what the API requires" and "prefer
+   * naming the type"; tightening needs the body rewritten and the annotation
+   * left off. Worse, routing tightening through `previousAttempt` appended
+   * "the source shown above is the ORIGINAL, unmodified file" — false at that
+   * point, because the annotations are already stripped on disk. A model that
+   * believed it would copy `find` strings that no longer exist, every edit would
+   * be rejected as absent, and the step would report nothing at all.
+   */
+  tightening?: { errors: string };
 }
+
+/**
+ * The output contract, shared by every prompt.
+ *
+ * Kept in one constant because `proposeEdits` parses one shape and one shape
+ * only: a prompt that drifted here would produce edits the parser silently drops.
+ */
+const RESPONSE_SHAPE = `Respond with exactly this shape:
+{
+  "edits": [{"file": "src/x.ts", "find": "<exact unique substring>", "replace": "<replacement>", "reason": "<short why>"}],
+  "rationale": "<one or two sentences on the overall change>",
+  "confidence": "high" | "medium" | "low"
+}`;
 
 const SYSTEM_PROMPT = `You are a precise TypeScript migration engine.
 
@@ -76,12 +102,42 @@ Rules you must follow:
 7. The list of API changes is derived from a type-declaration diff and can be incomplete. If the compiler reports an error the list does not explain, fix it anyway using the error's own description of the expected type. Do not decline solely because an error is absent from the list.
 8. Prefer the strongest type that compiles, in this order. First, name the constraint with a type the package exports — the error text usually names it and it is usually in the available-symbols list, sometimes under a different export name; prefer (value: TooltipValueType | undefined) => Number(value ?? 0).toFixed(1). Second, omit the annotation and let it be inferred from context. Only if neither compiles, use any or a cast, and say so in that edit's "reason". Never use @ts-ignore or @ts-expect-error. Getting to green matters more than getting there elegantly, but try the stronger forms first.
 
-Respond with exactly this shape:
-{
-  "edits": [{"file": "src/x.ts", "find": "<exact unique substring>", "replace": "<replacement>", "reason": "<short why>"}],
-  "rationale": "<one or two sentences on the overall change>",
-  "confidence": "high" | "medium" | "low"
-}`;
+${RESPONSE_SHAPE}`;
+
+/**
+ * The follow-up task: the migration is green and the `any` annotations have been
+ * stripped, so the parameters now infer their real types. Whatever the compiler
+ * reports next is code that only ever compiled because `any` disabled checking.
+ *
+ * A separate prompt rather than a flag on the migration one. The two tasks
+ * genuinely disagree — migration forbids touching the body and prefers naming a
+ * type, tightening requires the body to change and forbids naming a type — and
+ * a model handed both sets of rules at once satisfies the wrong one.
+ */
+export const TIGHTENING_SYSTEM_PROMPT = `You are a precise TypeScript engine performing a follow-up cleanup task.
+
+A dependency migration has already been completed and verified. The \`: any\` annotations on its function parameters were then removed, so those parameters now infer their real types from context. That exposed the errors you are given: code that compiled only because \`any\` had switched checking off.
+
+Your job is to make that code correct at the point of use, leaving the parameters inferred.
+
+Rules you must follow:
+1. Output ONLY a JSON object. No prose, no markdown fences.
+2. Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.
+3. The source files you are shown are the CURRENT state, with the annotations ALREADY REMOVED. Copy "find" strings from what you are shown, never from what the code looked like before.
+4. NEVER re-add a parameter type annotation — not \`: any\`, and not a named type either. The parameter must stay inferred. Re-adding one undoes the entire point of this task.
+5. NEVER use a type assertion (\`as X\`), \`@ts-ignore\`, or \`@ts-expect-error\`.
+6. Editing the function BODY is exactly what this task requires. It is not a refactor and it is not out of scope. Change as much of the body as the fix needs, and nothing beyond that.
+7. Fix each error by handling the real inferred type in the function body. Choose the form by what the compiler says the type actually is:
+   a. The type is a union with more than one non-undefined member (for example \`ValueType\`, which is \`number | string | ReadonlyArray<number | string>\`) — you MUST narrow with a runtime check, and every branch must still produce a sensible result:
+      \`typeof value === 'number' ? value.toFixed(1) : String(value ?? '')\`
+      The branch that is NOT the numeric one must pass its value through, typically with \`String(...)\`. Do not funnel it back through \`Number(...)\`: \`Number('n/a')\` is \`NaN\`, so a label that was meant to read "n/a" reaches the user as "NaN". A \`typeof\` check whose else branch is \`Number(value)\` is the same silent bug wearing a disguise.
+   b. Only \`undefined\` is the problem and the remaining type is already what you need — guard it:
+      \`value?.toFixed(1) ?? ''\`
+   Blanket coercion such as \`Number(value ?? 0)\` is NOT acceptable in case (a). It compiles, so nothing will object to it, but it renders a real string value as "0" — a silent behaviour change that no test catches and no reviewer sees. Narrowing keeps that case rendering correctly. Only reach for a coercion when the union has exactly one non-undefined member.
+8. The compiler output is the authoritative statement of what is broken. Fix what it reports, and do not edit code it does not complain about.
+9. If an error cannot be fixed without breaking one of these rules, leave it alone. A partial edit set is fine and expected — a file still failing simply keeps its original annotations.
+
+${RESPONSE_SHAPE}`;
 
 function describeChange(change: SurfaceChange): string {
   const lines = [
@@ -165,6 +221,49 @@ function buildUserPrompt(ctx: AgentContext): string {
   return parts.join('\n');
 }
 
+/**
+ * The tightening prompt: compiler output and the current sources, nothing else.
+ *
+ * The API diff and the candidate symbol list are deliberately omitted. Both exist
+ * to help the model choose a replacement symbol, and choosing a symbol is not
+ * this task — every remaining error is about a value's real type, which the
+ * compiler has already named. Sending them costs context and invites the model
+ * to "fix" call sites the compiler is happy with.
+ */
+export function buildTighteningPrompt(ctx: AgentContext, errors: string): string {
+  const { finding } = ctx;
+  const parts: string[] = [];
+
+  parts.push('# What just happened');
+  parts.push(
+    `${finding.pkg}: ${finding.fromVersion} -> ${finding.toVersion} migrated and verified. ` +
+      'The `any` parameter annotations were then removed, and these errors appeared.',
+  );
+  parts.push('');
+
+  parts.push('# Compiler output (authoritative)');
+  parts.push('```');
+  // Never truncated below the migration path's allowance: a repair judged on
+  // errors it was not shown is the failure mode this whole step exists to avoid.
+  parts.push(errors.slice(0, 40_000));
+  parts.push('```');
+  parts.push('');
+
+  parts.push('# Source files — CURRENT state, annotations already removed');
+  for (const [file, content] of ctx.sources) {
+    parts.push(`## ${file}`);
+    parts.push('```typescript');
+    parts.push(content);
+    parts.push('```');
+    parts.push('');
+  }
+
+  parts.push(
+    'Produce the JSON now. Fix the bodies; leave the parameters inferred.',
+  );
+  return parts.join('\n');
+}
+
 function isTextEdit(value: unknown): value is TextEdit {
   if (typeof value !== 'object' || value === null) return false;
   const e = value as Record<string, unknown>;
@@ -180,10 +279,16 @@ export async function proposeEdits(
   config: LlmConfig,
   ctx: AgentContext,
 ): Promise<AgentProposal> {
-  const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: buildUserPrompt(ctx) },
-  ];
+  const { tightening } = ctx;
+  const messages: ChatMessage[] = tightening
+    ? [
+        { role: 'system', content: TIGHTENING_SYSTEM_PROMPT },
+        { role: 'user', content: buildTighteningPrompt(ctx, tightening.errors) },
+      ]
+    : [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: buildUserPrompt(ctx) },
+      ];
 
   const res = await chat(config, messages, { jsonMode: true });
   if (!res.ok) {
