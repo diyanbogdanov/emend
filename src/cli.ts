@@ -503,32 +503,49 @@ async function cmdEval(args: Args): Promise<number> {
   }
   const modelFlag = args.flags.get('model');
   const models = typeof modelFlag === 'string' ? modelFlag.split(',') : [''];
+  // Two runs of the same recharts migration under the same model gave opposite
+  // results — one removed `Cell` and rendered `$NaN`, the other narrowed
+  // correctly and left `Cell` behind. One run is an anecdote, so repeating is
+  // how the difference between a change and noise becomes visible.
+  const repeatFlag = args.flags.get('repeat');
+  const repeat = typeof repeatFlag === 'string' ? Math.max(1, Number(repeatFlag) || 1) : 1;
 
   console.log('');
-  console.log(c.bold(`  Emend eval — ${cases.length} case(s) x ${models.length} model(s)`));
+  console.log(
+    c.bold(
+      `  Emend eval — ${cases.length} case(s) x ${models.length} model(s)` +
+        (repeat > 1 ? ` x ${repeat} run(s)` : ''),
+    ),
+  );
   console.log('');
 
   const outcomes: CaseOutcome[] = [];
   for (const model of models) {
     for (const evalCase of cases) {
-      const label = model || 'deterministic';
-      process.stdout.write(`  ${label} · ${evalCase.id} … `);
-      const dir = await materialiseCase(evalCase);
-      try {
-        if (model) process.env['EMEND_LLM_MODEL'] = model;
-        const outcome = await runCase(evalCase, dir, label, { useAgent: Boolean(model) });
-        outcomes.push(outcome);
-        const score = scoreCase(evalCase, outcome);
-        console.log(
-          score.clean
-            ? c.green('clean')
-            : score.passed
-              ? c.yellow(`passed (${score.penalties.length} penalty)`)
-              : c.red(outcome.verdict),
+      for (let run = 1; run <= repeat; run++) {
+        const label = model || 'deterministic';
+        process.stdout.write(
+          `  ${label} · ${evalCase.id}${repeat > 1 ? ` · run ${run}/${repeat}` : ''} … `,
         );
-      } finally {
-        if (evalCase.repo.kind !== 'local') {
-          await rm(dir, { recursive: true, force: true }).catch(() => {});
+        // Materialised per run, never reused: a second run starting from the
+        // first one's migrated files would measure something else entirely.
+        const dir = await materialiseCase(evalCase);
+        try {
+          if (model) process.env['EMEND_LLM_MODEL'] = model;
+          const outcome = await runCase(evalCase, dir, label, { useAgent: Boolean(model) });
+          outcomes.push(outcome);
+          const score = scoreCase(evalCase, outcome);
+          console.log(
+            score.clean
+              ? c.green('clean')
+              : score.passed
+                ? c.yellow(`passed — ${score.penalties[0] ?? ''}`)
+                : c.red(outcome.verdict),
+          );
+        } finally {
+          if (evalCase.repo.kind !== 'local') {
+            await rm(dir, { recursive: true, force: true }).catch(() => {});
+          }
         }
       }
     }
@@ -623,8 +640,10 @@ ${c.bold('COMMANDS')}
   eval            Measure the agent against a corpus. Reports pass rate, clean
                   rate, edit ratio and error reduction per model, so an agent
                   change is a decision rather than a hope.
-    --cases <f>     JSON corpus. Defaults to the demo repository alone.
+    --cases <f>     JSON corpus. Defaults to the built-in zod and recharts cases.
     --model <a,b>   Compare models. Omit to measure the deterministic path.
+    --repeat <n>    Run each case n times. Migrations vary between runs, so a
+                    single run is an anecdote rather than a measurement.
 
 ${c.bold('EXAMPLE')}
   emend demo ./emend-demo

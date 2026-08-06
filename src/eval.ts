@@ -149,8 +149,10 @@ export function scoreCase(evalCase: EvalCase, outcome: CaseOutcome): CaseScore {
 
 export interface ModelSummary {
   model: string;
-  /** Cases this model was actually run on. */
+  /** Distinct cases this model was run on, however many times each ran. */
   casesRun: number;
+  /** Total runs behind these rates. Repeats are how variance becomes visible. */
+  runs: number;
   /** Cases in the corpus, so a partial run is visibly partial. */
   casesTotal: number;
   passRate: number;
@@ -208,7 +210,8 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
       const failed = scores.filter((s) => !s.passed);
       return {
         model,
-        casesRun: scores.length,
+        casesRun: new Set(scores.map((s) => s.caseId)).size,
+        runs: scores.length,
         casesTotal: cases.length,
         passRate: scores.filter((s) => s.passed).length / scores.length,
         cleanRate: scores.filter((s) => s.clean).length / scores.length,
@@ -405,13 +408,13 @@ export async function materialiseCase(evalCase: EvalCase): Promise<string> {
 export function renderSummary(rows: ModelSummary[]): string {
   if (rows.length === 0) return 'No results.';
   const lines = [
-    '| Model | Cases | Pass | Clean | Edit ratio | Withheld | Err. reduced (failed) | Escapes | Depr. gaps |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| Model | Cases | Runs | Pass | Clean | Edit ratio | Withheld | Err. reduced (failed) | Escapes | Depr. gaps |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
   ];
   const pct = (n: number): string => `${Math.round(n * 100)}%`;
   for (const r of rows) {
     lines.push(
-      `| \`${r.model}\` | ${r.casesRun}/${r.casesTotal} | ${pct(r.passRate)} | ${pct(r.cleanRate)} | ` +
+      `| \`${r.model}\` | ${r.casesRun}/${r.casesTotal} | ${r.runs} | ${pct(r.passRate)} | ${pct(r.cleanRate)} | ` +
         `${r.meanEditRatio.toFixed(1)}x | ${r.totalEditsWithheld} | ${pct(r.meanErrorReduction)} | ${r.totalTypeEscapes} | ${r.totalDeprecationGaps} |`,
     );
   }

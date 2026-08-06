@@ -165,6 +165,29 @@ test('withheld edits are reported, because they are how the gate is judged', () 
   assert.equal(rows.find((r) => r.model === 'gated')?.totalEditsWithheld, 4);
 });
 
+test('repeated runs of one case count as one case and many runs', () => {
+  // Two live runs of the same recharts migration under the same model gave
+  // opposite results: one removed `Cell` and rendered `$NaN`, the other narrowed
+  // correctly and left `Cell` behind. A single run is not a measurement, so the
+  // harness repeats — and a row that said "3/1 cases" would be nonsense while a
+  // row that said "1 case, 67% clean" is the actual finding.
+  const rows = summarise(
+    [zodCase],
+    [
+      outcome({ model: 'noisy', editsApplied: 2 }),
+      outcome({ model: 'noisy', editsApplied: 2 }),
+      outcome({ model: 'noisy', editsApplied: 6 }),
+    ],
+  );
+  const noisy = rows.find((r) => r.model === 'noisy');
+  assert.equal(noisy?.casesRun, 1, 'one distinct case, however many times it ran');
+  assert.equal(noisy?.runs, 3);
+  assert.ok(
+    noisy!.cleanRate > 0.66 && noisy!.cleanRate < 0.67,
+    `two clean of three runs; got ${noisy?.cleanRate}`,
+  );
+});
+
 test('a model that was never run on a case is not silently scored as failing', () => {
   // Otherwise a cheap partial run makes a model look worse than one that was
   // given the full corpus, and the comparison is meaningless.
