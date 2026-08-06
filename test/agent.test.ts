@@ -6,6 +6,9 @@ import {
   selectEvidencedEdits,
   parseDiagnostics,
   buildUserPrompt,
+  MIGRATION_SYSTEM_PROMPT,
+  TIGHTENING_SYSTEM_PROMPT,
+  NARROWING_RULE,
   type TextEdit,
 } from '../src/llm/agent.ts';
 import type { CallSite, Finding, SurfaceChange } from '../src/types.ts';
@@ -318,6 +321,28 @@ test('the six-edit over-edit is reduced to the two edits the compiler asked for'
     'only the two edits a diagnostic points at may survive',
   );
   assert.equal(dropped.length, 3, 'all three deprecation rewrites must be withheld');
+});
+
+// ---------------------------------------------------------------------------
+// The narrowing rule belongs to every prompt that can hit a union
+// ---------------------------------------------------------------------------
+
+test('the migration prompt carries the same narrowing rule as tightening', () => {
+  // #1 disclosed this as a known gap: the narrowing rules lived only in the
+  // tightening prompt, so a migration that had to handle a union wrote
+  // `Number(value)` unguided. The recharts case reproduced it on the first run —
+  // `formatRevenue(Number(value))` where the value is `ValueType | undefined`,
+  // rendering `$NaN` for a missing one while typechecking and passing every
+  // test. Nothing downstream can catch that, because it is not a type error.
+  //
+  // Asserted on both prompts against one shared constant, because two copies of
+  // a rule this specific drift, and the copy that drifts is the one nobody is
+  // looking at.
+  assert.ok(MIGRATION_SYSTEM_PROMPT.includes(NARROWING_RULE));
+  assert.ok(TIGHTENING_SYSTEM_PROMPT.includes(NARROWING_RULE));
+  // The two failure modes it exists to name.
+  assert.match(NARROWING_RULE, /NaN/);
+  assert.match(NARROWING_RULE, /typeof/);
 });
 
 // ---------------------------------------------------------------------------

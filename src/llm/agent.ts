@@ -137,7 +137,25 @@ const RESPONSE_SHAPE = `Respond with exactly this shape:
   "confidence": "high" | "medium" | "low"
 }`;
 
-const SYSTEM_PROMPT = `You are a precise TypeScript migration engine.
+/**
+ * How to handle a value whose type is a union, in any prompt that can meet one.
+ *
+ * Shared rather than repeated. #1 disclosed the gap this closes — the rule lived
+ * only in the tightening prompt, so a migration that had to narrow a union wrote
+ * `Number(value)` unguided, and the recharts case reproduces it: the tooltip
+ * formatter takes `ValueType | undefined`, so a missing value renders `$NaN`
+ * while typechecking and passing every test. Two copies of a rule this specific
+ * drift, and the copy that drifts is the one nobody is reading.
+ */
+export const NARROWING_RULE = `Handle the real type. Choose the form by what the compiler says the type actually is:
+   a. The type is a union with more than one non-undefined member (for example \`ValueType\`, which is \`number | string | ReadonlyArray<number | string>\`) — you MUST narrow with a runtime check, and every branch must still produce a sensible result:
+      \`typeof value === 'number' ? value.toFixed(1) : String(value ?? '')\`
+      The branch that is NOT the numeric one must pass its value through, typically with \`String(...)\`. Do not funnel it back through \`Number(...)\`: \`Number('n/a')\` is \`NaN\`, so a label that was meant to read "n/a" reaches the user as "NaN". A \`typeof\` check whose else branch is \`Number(value)\` is the same silent bug wearing a disguise.
+   b. Only \`undefined\` is the problem and the remaining type is already what you need — guard it:
+      \`value?.toFixed(1) ?? \'\'\`
+   Blanket coercion such as \`Number(value ?? 0)\` or \`Number(value)\` is NOT acceptable in case (a). It compiles, so nothing will object to it, but it renders a real string as "0" and a missing value as "NaN" — a silent behaviour change no test catches and no reviewer sees. Only reach for a coercion when the union has exactly one non-undefined member.`;
+
+export const MIGRATION_SYSTEM_PROMPT = `You are a precise TypeScript migration engine.
 
 You are given the API changes in a dependency upgrade, the exact lines in a codebase that use them, and the symbols available in the new version. Produce the minimal source edits that make the code correct under the new version.
 
@@ -150,6 +168,7 @@ Rules you must follow:
 6. When compiler output from a failed attempt is provided, it is the authoritative statement of what is still broken. Fix the errors it reports. Do not edit call sites it does not complain about, however plausible the change looks.
 7. The list of API changes is derived from a type-declaration diff and can be incomplete. If the compiler reports an error the list does not explain, fix it anyway using the error's own description of the expected type. Do not decline solely because an error is absent from the list.
 8. Prefer the strongest type that compiles, in this order. First, name the constraint with a type the package exports — the error text usually names it and it is usually in the available-symbols list, sometimes under a different export name; prefer (value: TooltipValueType | undefined) => Number(value ?? 0).toFixed(1). Second, omit the annotation and let it be inferred from context. Only if neither compiles, use any or a cast, and say so in that edit's "reason". Never use @ts-ignore or @ts-expect-error. Getting to green matters more than getting there elegantly, but try the stronger forms first.
+9. ${NARROWING_RULE}
 
 ${RESPONSE_SHAPE}`;
 
@@ -211,13 +230,7 @@ Rules you must follow:
 4. NEVER re-add a parameter type annotation — not \`: any\`, and not a named type either. The parameter must stay inferred. Re-adding one undoes the entire point of this task.
 5. NEVER use a type assertion (\`as X\`), \`@ts-ignore\`, or \`@ts-expect-error\`.
 6. Editing the function BODY is exactly what this task requires. It is not a refactor and it is not out of scope. Change as much of the body as the fix needs, and nothing beyond that.
-7. Fix each error by handling the real inferred type in the function body. Choose the form by what the compiler says the type actually is:
-   a. The type is a union with more than one non-undefined member (for example \`ValueType\`, which is \`number | string | ReadonlyArray<number | string>\`) — you MUST narrow with a runtime check, and every branch must still produce a sensible result:
-      \`typeof value === 'number' ? value.toFixed(1) : String(value ?? '')\`
-      The branch that is NOT the numeric one must pass its value through, typically with \`String(...)\`. Do not funnel it back through \`Number(...)\`: \`Number('n/a')\` is \`NaN\`, so a label that was meant to read "n/a" reaches the user as "NaN". A \`typeof\` check whose else branch is \`Number(value)\` is the same silent bug wearing a disguise.
-   b. Only \`undefined\` is the problem and the remaining type is already what you need — guard it:
-      \`value?.toFixed(1) ?? ''\`
-   Blanket coercion such as \`Number(value ?? 0)\` is NOT acceptable in case (a). It compiles, so nothing will object to it, but it renders a real string value as "0" — a silent behaviour change that no test catches and no reviewer sees. Narrowing keeps that case rendering correctly. Only reach for a coercion when the union has exactly one non-undefined member.
+7. ${NARROWING_RULE}
 8. The compiler output is the authoritative statement of what is broken. Fix what it reports, and do not edit code it does not complain about.
 9. If an error cannot be fixed without breaking one of these rules, leave it alone. A partial edit set is fine and expected — a file still failing simply keeps its original annotations.
 
@@ -379,7 +392,7 @@ export async function proposeEdits(
   config: LlmConfig,
   ctx: AgentContext,
 ): Promise<AgentProposal> {
-  return propose(config, SYSTEM_PROMPT, buildUserPrompt(ctx));
+  return propose(config, MIGRATION_SYSTEM_PROMPT, buildUserPrompt(ctx));
 }
 
 /**
