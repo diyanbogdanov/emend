@@ -203,6 +203,37 @@ export function findPinConflicts(
 }
 
 /**
+ * Deterministic edits that bring drifted pins back in line.
+ *
+ * No model is involved and none is needed: the target version is known, the
+ * location is known, and the change is a substring substitution. Only the
+ * version is replaced — the `v` prefix, the distro suffix and the surrounding
+ * YAML or Dockerfile syntax are the repository's own choices, and rewriting them
+ * would be an edit the drift did not call for.
+ *
+ * A conflict with no authority yields nothing. Reporting that three files
+ * disagree is honest; inventing a version to settle it is the guess `plan.ts`
+ * refuses to make, and that one belongs to a human.
+ */
+export function planPinRepair(
+  conflict: PinConflict,
+): Array<{ file: string; line: number; find: string; replace: string; reason: string }> {
+  const target = conflict.expected;
+  if (!target) return [];
+
+  return conflict.pins.map((pin) => ({
+    file: pin.file,
+    line: pin.line,
+    find: pin.text,
+    // Anchored to the version this pin actually carries, so a tag that happens
+    // to contain the digits elsewhere — `playwright:v1.62.1-node18` — is not
+    // rewritten in the wrong place.
+    replace: pin.text.replace(pin.version, target),
+    reason: `${conflict.subject} is ${target} per ${conflict.authority}`,
+  }));
+}
+
+/**
  * Versions that can arbitrate a disagreement.
  *
  * A dependency whose version was inferred from its declared range is explicitly

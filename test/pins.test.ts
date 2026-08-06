@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   extractPins,
   findPinConflicts,
+  planPinRepair,
   resolvedVersions,
   type VersionPin,
 } from '../src/pins.ts';
@@ -159,6 +160,60 @@ test('without a declared engine, disagreeing node versions are reported but not 
   const node = findPinConflicts(pins, new Map()).find((cf) => cf.subject === 'node');
   assert.equal(node?.expected, null, 'no authority means no target version');
   assert.equal(node?.pins.length, 3, 'every disagreeing pin is still named');
+});
+
+// ---------------------------------------------------------------------------
+// planPinRepair — the fix needs no model
+// ---------------------------------------------------------------------------
+
+test('a drifted tag is repaired by substituting the version, leaving the rest alone', () => {
+  // `v1.62.1-jammy` must become `v1.63.0-jammy`: the distro suffix and the `v`
+  // prefix are the repository's choices and rewriting them would be an edit the
+  // drift did not call for.
+  const pins = extractPins(files({ Dockerfile: DOCKERFILE }));
+  const [conflict] = findPinConflicts(pins, new Map([['playwright', '1.63.0']]));
+  const edits = planPinRepair(conflict!);
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0]?.find, 'mcr.microsoft.com/playwright:v1.62.1-jammy');
+  assert.equal(edits[0]?.replace, 'mcr.microsoft.com/playwright:v1.63.0-jammy');
+  assert.equal(edits[0]?.file, 'Dockerfile');
+  assert.equal(edits[0]?.line, 6);
+});
+
+test('every disagreeing pin gets its own edit', () => {
+  const pins = extractPins(
+    files({
+      '.nvmrc': '18\n',
+      'package.json': MANIFEST,
+      '.github/workflows/ci.yml': WORKFLOW,
+      Dockerfile: DOCKERFILE,
+    }),
+  );
+  const node = findPinConflicts(pins, new Map()).find((cf) => cf.subject === 'node');
+  const edits = planPinRepair(node!);
+  assert.deepEqual(edits.map((e) => e.file).sort(), [
+    '.github/workflows/ci.yml',
+    '.nvmrc',
+    'Dockerfile',
+  ]);
+  assert.ok(edits.every((e) => e.replace.includes('22')));
+  // The surrounding syntax is preserved in each file's own idiom.
+  assert.equal(edits.find((e) => e.file === 'Dockerfile')?.replace, 'node:22-alpine');
+  assert.equal(
+    edits.find((e) => e.file === '.github/workflows/ci.yml')?.replace,
+    "node-version: '22'",
+  );
+});
+
+test('a conflict with nothing to arbitrate produces no edits', () => {
+  // Reporting a disagreement is honest; inventing a version to resolve it is
+  // the guess the planner refuses to make. A human decides this one.
+  const pins = extractPins(
+    files({ '.nvmrc': '22\n', '.github/workflows/ci.yml': WORKFLOW, Dockerfile: DOCKERFILE }),
+  );
+  const node = findPinConflicts(pins, new Map()).find((cf) => cf.subject === 'node');
+  assert.equal(node?.expected, null);
+  assert.deepEqual(planPinRepair(node!), []);
 });
 
 test('a version guessed from a range is never used as the authority', () => {
