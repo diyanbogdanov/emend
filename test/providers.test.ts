@@ -7,6 +7,9 @@ const TOUCHED = [
   'EMEND_LLM_MODEL',
   'EMEND_LLM_BASE_URL',
   'EMEND_LLM_API_KEY',
+  'EMEND_LLM_MAX_TOKENS',
+  'EMEND_LLM_TEMPERATURE',
+  'EMEND_LLM_MAX_ATTEMPTS',
   'OPENROUTER_API_KEY',
   'OPEN_ROUTER_API_KEY',
   'GROQ_API_KEY',
@@ -71,6 +74,39 @@ test('a custom base URL still requires an explicit model', () => {
   withEnv({ EMEND_LLM_BASE_URL: 'http://localhost:9999/v1', EMEND_LLM_API_KEY: 'k' }, () => {
     const res = resolveLlmConfig({});
     assert.equal(res.ok, false);
+  });
+});
+
+test('a numeric setting that is not a number is refused, not passed on', () => {
+  // `Number('lots')` is NaN, and JSON.stringify renders NaN as null — so an
+  // unvalidated knob reaches the provider as `"max_tokens": null`, and a typo
+  // surfaces as whatever that provider does with it. Refusing here names the
+  // variable and the value instead.
+  withEnv({ OPENROUTER_API_KEY: 'test-key', EMEND_LLM_MAX_TOKENS: 'lots' }, () => {
+    const res = resolveLlmConfig({ provider: 'openrouter' });
+    assert.equal(res.ok, false);
+    assert.match(res.ok === false ? res.reason : '', /EMEND_LLM_MAX_TOKENS="lots"/);
+  });
+});
+
+test('a numeric setting below its floor is refused', () => {
+  // Zero attempts is not a configuration, it is a migration that never runs.
+  withEnv({ OPENROUTER_API_KEY: 'test-key', EMEND_LLM_MAX_ATTEMPTS: '0' }, () => {
+    const res = resolveLlmConfig({ provider: 'openrouter' });
+    assert.equal(res.ok, false);
+    assert.match(res.ok === false ? res.reason : '', /EMEND_LLM_MAX_ATTEMPTS/);
+  });
+});
+
+test('numeric settings default when unset and are carried through when valid', () => {
+  withEnv({ OPENROUTER_API_KEY: 'test-key' }, () => {
+    const res = resolveLlmConfig({ provider: 'openrouter' });
+    assert.equal(res.ok && res.config.maxTokens, 32_000);
+    assert.equal(res.ok && res.config.maxRetries, 3);
+  });
+  withEnv({ OPENROUTER_API_KEY: 'test-key', EMEND_LLM_MAX_TOKENS: '120000' }, () => {
+    const res = resolveLlmConfig({ provider: 'openrouter' });
+    assert.equal(res.ok && res.config.maxTokens, 120_000);
   });
 });
 

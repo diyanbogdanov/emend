@@ -15,7 +15,7 @@ import type { Store } from '../store.ts';
 import { scanRepo } from '../analyze.ts';
 import { fixPackage, type FixResult } from '../fix.ts';
 import { renderPrBody, renderPrTitle, branchSlug } from '../pr.ts';
-import { readyForPullRequest } from '../verify.ts';
+import { verificationPassed } from '../verify.ts';
 import { openPullRequest, type FileChange } from './pr.ts';
 import type { Finding, ScanReport } from '../types.ts';
 import {
@@ -105,7 +105,7 @@ export async function proposeMigrations(opts: ProposeOptions): Promise<number> {
       // Anything else means the types got worse, or nothing was verified at all.
       // Shares its predicate with the CLI so the two paths cannot drift on what
       // counts as proposable — they already had, and the CLI was the loose one.
-      if (!readyForPullRequest(result.verification.outcome)) {
+      if (!verificationPassed(result.verification.outcome)) {
         log(`  [${pkgName}] not proposed: ${result.verification.outcome}`);
         continue;
       }

@@ -291,55 +291,73 @@ export interface CreatePrOptions {
  * Deliberately not called by `scan` or `fix` — pushing a branch and opening a PR
  * is visible to other people, so it only happens when a human explicitly asks.
  */
+/**
+ * Commit the workspace and push it to `branch` on origin.
+ *
+ * Its own function so a test can drive the real thing. This is both the half
+ * that broke in production and the half that runs without `gh`, so a test that
+ * reimplemented it would have stayed green through the very regression it was
+ * written to catch.
+ */
+export async function commitAndPush(
+  repoDir: string,
+  branch: string,
+  message: string,
+): Promise<{ ok: boolean; error?: string }> {
+  // No local branch is created. The workspace is already on a detached HEAD,
+  // and a commit can be pushed to a remote ref without one.
+  //
+  // `git checkout -B <branch>` was the previous approach and it fails outright
+  // when any other worktree in the repository has that branch checked out:
+  //
+  //   fatal: 'emend/recharts-…' is already used by worktree at '…/the-monorepo'
+  //
+  // The holder is normally the developer's own checkout, because reviewing a
+  // pull request means checking its branch out. Reclaiming it is not an option
+  // — it may hold uncommitted work — so the update simply could not proceed on
+  // exactly the repositories where someone was paying attention.
+  await execFileAsync('git', ['-C', repoDir, 'add', '-A']);
+
+  // Nothing staged means the migration produced no committable change —
+  // report that rather than failing with git's opaque exit code 1.
+  const { stdout: staged } = await execFileAsync('git', [
+    '-C', repoDir, 'diff', '--cached', '--name-only',
+  ]);
+  if (staged.trim() === '') {
+    return { ok: false, error: 'no changes to commit — the migration produced no file edits' };
+  }
+
+  await execFileAsync('git', ['-C', repoDir, 'commit', '-m', message]);
+
+  // Push with an *explicit* lease against the SHA the remote actually has.
+  //
+  // The bare `--force-with-lease` form compares against a remote-tracking ref,
+  // which each run's fresh worktree may not have, and it then refuses with
+  // "stale info" for a branch a previous run pushed. Naming the expected SHA
+  // states the intent directly and keeps the protection: if someone else moved
+  // the branch since this check, the push is rejected. An empty value means
+  // the branch must not exist yet.
+  const { stdout: remoteRef } = await execFileAsync('git', [
+    '-C', repoDir, 'ls-remote', 'origin', `refs/heads/${branch}`,
+  ]);
+  const remoteSha = remoteRef.trim().split(/\s+/)[0] ?? '';
+  await execFileAsync('git', [
+    '-C', repoDir, 'push',
+    `--force-with-lease=refs/heads/${branch}:${remoteSha}`,
+    // Explicit source:destination, so no local branch has to exist. `-u` is
+    // gone with it: there is nothing local to set upstream on.
+    'origin', `HEAD:refs/heads/${branch}`,
+  ]);
+  return { ok: true };
+}
+
 export async function createPullRequest(
   options: CreatePrOptions,
 ): Promise<{ ok: boolean; url?: string; error?: string }> {
   const { repoDir, branch, title, body, draft = true } = options;
   try {
-    // No local branch is created. The workspace is already on a detached HEAD,
-    // and a commit can be pushed to a remote ref without one.
-    //
-    // `git checkout -B <branch>` was the previous approach and it fails outright
-    // when any other worktree in the repository has that branch checked out:
-    //
-    //   fatal: 'emend/recharts-…' is already used by worktree at '…/the-monorepo'
-    //
-    // The holder is normally the developer's own checkout, because reviewing a
-    // pull request means checking its branch out. Reclaiming it is not an option
-    // — it may hold uncommitted work — so the update simply could not proceed on
-    // exactly the repositories where someone was paying attention.
-    await execFileAsync('git', ['-C', repoDir, 'add', '-A']);
-
-    // Nothing staged means the migration produced no committable change —
-    // report that rather than failing with git's opaque exit code 1.
-    const { stdout: staged } = await execFileAsync('git', [
-      '-C', repoDir, 'diff', '--cached', '--name-only',
-    ]);
-    if (staged.trim() === '') {
-      return { ok: false, error: 'no changes to commit — the migration produced no file edits' };
-    }
-
-    await execFileAsync('git', ['-C', repoDir, 'commit', '-m', title]);
-
-    // Push with an *explicit* lease against the SHA the remote actually has.
-    //
-    // The bare `--force-with-lease` form compares against a remote-tracking ref,
-    // which each run's fresh worktree may not have, and it then refuses with
-    // "stale info" for a branch a previous run pushed. Naming the expected SHA
-    // states the intent directly and keeps the protection: if someone else moved
-    // the branch since this check, the push is rejected. An empty value means
-    // the branch must not exist yet.
-    const { stdout: remoteRef } = await execFileAsync('git', [
-      '-C', repoDir, 'ls-remote', 'origin', `refs/heads/${branch}`,
-    ]);
-    const remoteSha = remoteRef.trim().split(/\s+/)[0] ?? '';
-    await execFileAsync('git', [
-      '-C', repoDir, 'push',
-      `--force-with-lease=refs/heads/${branch}:${remoteSha}`,
-      // Explicit source:destination, so no local branch has to exist. `-u` is
-      // gone with it: there is nothing local to set upstream on.
-      'origin', `HEAD:refs/heads/${branch}`,
-    ]);
+    const pushed = await commitAndPush(repoDir, branch, title);
+    if (!pushed.ok) return pushed;
 
     // Reuse an open PR for this branch instead of failing on the second run.
     const { stdout: existing } = await execFileAsync('gh', [

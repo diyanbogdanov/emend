@@ -17,7 +17,7 @@ import { fixFinding, fixPackage } from './fix.ts';
 import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
 import { startServer } from './server.ts';
-import { readyForPullRequest } from './verify.ts';
+import { verificationPassed } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { listModels } from './llm/client.ts';
 import type { Finding, ScanReport } from './types.ts';
@@ -261,7 +261,7 @@ async function cmdFix(args: Args): Promise<number> {
       }
     }
     if (result.workspaceDir) console.log(`    ${c.dim(`workspace kept at ${result.workspaceDir}`)}`);
-    if (v.outcome === 'verified' || v.outcome === 'typecheck-only') anyVerified = true;
+    if (verificationPassed(v.outcome)) anyVerified = true;
 
     if (result.diff) {
       console.log('');
@@ -340,7 +340,7 @@ async function cmdPr(args: Args): Promise<number> {
     return 0;
   }
 
-  if (!result.verification || !readyForPullRequest(result.verification.outcome)) {
+  if (!result.verification || !verificationPassed(result.verification.outcome)) {
     console.error(
       c.red(
         `  Refusing to open a PR: verification came back "${result.verification?.outcome ?? 'none'}".\n` +
@@ -381,8 +381,14 @@ async function cmdPr(args: Args): Promise<number> {
 
 async function cmdModels(args: Args): Promise<number> {
   const providerFlag = args.flags.get('provider');
+  // The provider this listing is *for*, worked out once. Deriving it a second
+  // time to find the default let a `--provider` that has none fall through to
+  // the environment's provider, and print that one's default against a
+  // different provider's catalogue.
+  const providerId =
+    typeof providerFlag === 'string' ? providerFlag : (process.env.EMEND_LLM_PROVIDER ?? '');
   const resolved = resolveLlmConfig({
-    ...(typeof providerFlag === 'string' ? { provider: providerFlag } : {}),
+    ...(providerId ? { provider: providerId } : {}),
     // `models` only needs an endpoint, not a model choice.
     model: 'placeholder',
   });
@@ -413,9 +419,7 @@ async function cmdModels(args: Args): Promise<number> {
     return 1;
   }
 
-  const preset = typeof providerFlag === 'string' ? PROVIDERS[providerFlag] : undefined;
-  const fallback =
-    preset?.defaultModel ?? PROVIDERS[process.env.EMEND_LLM_PROVIDER ?? '']?.defaultModel;
+  const fallback = PROVIDERS[providerId]?.defaultModel;
 
   console.log('');
   for (const m of res.models) {

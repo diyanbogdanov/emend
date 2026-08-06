@@ -116,6 +116,21 @@ export interface LlmConfig {
   providerLabel: string;
   temperature: number;
   maxRetries: number;
+  /**
+   * Output budget per request.
+   *
+   * The former 8,000 dated from when that was a typical ceiling. It is not any
+   * more — GLM-5.2 allows 262,144 and DeepSeek V4 Pro 384,000 — and on a
+   * six-file migration a reasoning model spent the whole 8,000 thinking and
+   * returned an empty message with `finish_reason: length`. Nothing in Emend
+   * ever overrode this, so the default was the effective limit everywhere.
+   *
+   * A cap is not a charge: tokens are billed as generated, so headroom is close
+   * to free. 32,000 clears the largest edit set seen while staying under the
+   * smallest ceiling among candidate models (qwen3-coder, 65,536). Lower it for
+   * a local runtime that rejects large values.
+   */
+  maxTokens: number;
 }
 
 export interface LlmConfigError {
@@ -124,6 +139,28 @@ export interface LlmConfigError {
 }
 
 export type LlmConfigResult = { ok: true; config: LlmConfig } | LlmConfigError;
+
+/**
+ * Read a numeric setting from the environment, or explain why it cannot be.
+ *
+ * `Number('lots')` is `NaN`, and `JSON.stringify` renders `NaN` as `null` — so
+ * an unvalidated knob reaches the provider as `"max_tokens": null` and a typo
+ * looks like a bug in Emend. Every numeric setting goes through here, and a bad
+ * one is reported exactly the way a missing API key is.
+ */
+function numericEnv(
+  name: string,
+  fallback: number,
+  min: number,
+): { ok: true; value: number } | LlmConfigError {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return { ok: true, value: fallback };
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min) {
+    return { ok: false, reason: `${name}="${raw}" is not a number >= ${min}.` };
+  }
+  return { ok: true, value };
+}
 
 /**
  * Resolve LLM configuration from the environment.
@@ -196,6 +233,13 @@ export function resolveLlmConfig(overrides: Partial<{
     return { ok: false, reason: `no API key found. Set one of: ${keyEnv.join(', ')}` };
   }
 
+  const temperature = numericEnv('EMEND_LLM_TEMPERATURE', 0, 0);
+  if (!temperature.ok) return temperature;
+  const maxRetries = numericEnv('EMEND_LLM_MAX_ATTEMPTS', 3, 1);
+  if (!maxRetries.ok) return maxRetries;
+  const maxTokens = numericEnv('EMEND_LLM_MAX_TOKENS', 32_000, 1);
+  if (!maxTokens.ok) return maxTokens;
+
   return {
     ok: true,
     config: {
@@ -203,8 +247,9 @@ export function resolveLlmConfig(overrides: Partial<{
       apiKey: apiKey || 'not-needed',
       model,
       providerLabel: label,
-      temperature: Number(process.env.EMEND_LLM_TEMPERATURE ?? '0'),
-      maxRetries: Number(process.env.EMEND_LLM_MAX_ATTEMPTS ?? '3'),
+      temperature: temperature.value,
+      maxRetries: maxRetries.value,
+      maxTokens: maxTokens.value,
     },
   };
 }

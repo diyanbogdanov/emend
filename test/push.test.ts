@@ -5,31 +5,12 @@ import { promisify } from 'node:util';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { commitAndPush } from '../src/pr.ts';
 
 /** execFile, not exec: argument arrays, never a shell string. */
 const run = promisify(execFile);
 
 const BRANCH = 'emend/recharts-5f6f9004bebe';
-
-/**
- * The push half of `createPullRequest`, reproduced against a local bare remote.
- *
- * The full function shells out to `gh`, which needs a real GitHub. What broke in
- * production was the git half, and that is exercisable offline.
- */
-async function pushFromDetached(repoDir: string, branch: string): Promise<void> {
-  await run('git', ['-C', repoDir, 'add', '-A']);
-  await run('git', ['-C', repoDir, 'commit', '-m', 'migration']);
-  const { stdout: remoteRef } = await run('git', [
-    '-C', repoDir, 'ls-remote', 'origin', `refs/heads/${branch}`,
-  ]);
-  const remoteSha = remoteRef.trim().split(/\s+/)[0] ?? '';
-  await run('git', [
-    '-C', repoDir, 'push',
-    `--force-with-lease=refs/heads/${branch}:${remoteSha}`,
-    'origin', `HEAD:refs/heads/${branch}`,
-  ]);
-}
 
 async function fixture(): Promise<{ root: string; repo: string; cleanup: () => void }> {
   const root = mkdtempSync(path.join(tmpdir(), 'emend-push-'));
@@ -65,7 +46,8 @@ test('a branch checked out in another worktree does not block the push', async (
     await run('git', ['-C', f.repo, 'worktree', 'add', '--detach', ws, 'main']);
     writeFileSync(path.join(ws, 'a.txt'), 'migrated\n');
 
-    await pushFromDetached(ws, BRANCH);
+    const pushed = await commitAndPush(ws, BRANCH, 'migration');
+    assert.equal(pushed.ok, true, pushed.error ?? '');
 
     const { stdout } = await run('git', ['-C', f.repo, 'ls-remote', 'origin', `refs/heads/${BRANCH}`]);
     assert.match(stdout, /[0-9a-f]{40}/, 'the remote branch should have been updated');
@@ -82,6 +64,11 @@ test('the lease still refuses a branch someone else moved', async () => {
   // Dropping the local branch must not drop the protection with it: the push is
   // a force, and the only thing standing between it and someone else's commit is
   // the lease naming the SHA we expect the remote to be at.
+  //
+  // Spelled out rather than routed through `commitAndPush`, because staleness
+  // needs someone else's push to land *between* our read of the SHA and our own
+  // push — an interleaving that function has no seam for. What it asserts is
+  // that the flag form the function builds is genuinely protective.
   const f = await fixture();
   try {
     const ws = path.join(f.root, 'ws');

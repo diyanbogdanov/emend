@@ -170,9 +170,14 @@ function phaseRanAnything(phase: VerifyPhase): boolean {
 }
 
 /**
- * Whether a migration has earned a pull request.
+ * Whether an outcome means the change is good: the only states Emend acts on.
  *
- * An allowlist, not a denylist. The CLI previously refused only on `regression`,
+ * The one place this set is written down. It decides three different things —
+ * whether to stop retrying, whether to keep a tightening pass, and whether a
+ * migration has earned a pull request — and every one of them was previously
+ * spelled out by hand at its own call site.
+ *
+ * That is not a hypothetical risk. The CLI's copy refused only on `regression`,
  * which let `pre-existing-failure` and `unverified` through — states that mean
  * "we could not tell whether this works", not "this works". A broken baseline
  * (the repository's own tests already failing, or dependencies that do not match
@@ -185,7 +190,7 @@ function phaseRanAnything(phase: VerifyPhase): boolean {
  *
  * Stated as an allowlist so a future outcome fails closed rather than open.
  */
-export function readyForPullRequest(outcome: VerifyOutcome): boolean {
+export function verificationPassed(outcome: VerifyOutcome): boolean {
   return outcome === 'verified' || outcome === 'typecheck-only';
 }
 

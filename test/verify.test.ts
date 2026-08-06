@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compare, readyForPullRequest } from '../src/verify.ts';
+import { compare, verificationPassed } from '../src/verify.ts';
 import type { CommandResult } from '../src/types.ts';
 
 const pass = (command: string): CommandResult => ({
@@ -73,9 +73,9 @@ test('only a verified or typecheck-only migration may open a pull request', () =
   // `pre-existing-failure` — the repository was already broken, therefore nothing
   // was proven — sailed through and would have force-pushed onto a live PR whose
   // body implies verification. An allowlist fails closed if an outcome is added.
-  assert.equal(readyForPullRequest('verified'), true);
-  assert.equal(readyForPullRequest('typecheck-only'), true);
-  assert.equal(readyForPullRequest('regression'), false);
-  assert.equal(readyForPullRequest('pre-existing-failure'), false);
-  assert.equal(readyForPullRequest('unverified'), false);
+  assert.equal(verificationPassed('verified'), true);
+  assert.equal(verificationPassed('typecheck-only'), true);
+  assert.equal(verificationPassed('regression'), false);
+  assert.equal(verificationPassed('pre-existing-failure'), false);
+  assert.equal(verificationPassed('unverified'), false);
 });

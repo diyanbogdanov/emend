@@ -60,19 +60,27 @@ export interface AgentContext {
     edits: TextEdit[];
     errors: string;
   };
-  /**
-   * Set when this is a tightening repair rather than a migration.
-   *
-   * These two tasks want opposite things, and sharing a prompt made the model
-   * fail at both. Migration says "change only what the API requires" and "prefer
-   * naming the type"; tightening needs the body rewritten and the annotation
-   * left off. Worse, routing tightening through `previousAttempt` appended
-   * "the source shown above is the ORIGINAL, unmodified file" — false at that
-   * point, because the annotations are already stripped on disk. A model that
-   * believed it would copy `find` strings that no longer exist, every edit would
-   * be rejected as absent, and the step would report nothing at all.
-   */
-  tightening?: { errors: string };
+}
+
+/**
+ * Input for the tightening repair, which is a different task from a migration.
+ *
+ * Its own type rather than an optional mode on `AgentContext`. The two tasks
+ * want opposite things — migration says "change only what the API requires" and
+ * "prefer naming the type", tightening requires the body rewritten and the
+ * annotation left off — and the API diff and candidate symbols that a migration
+ * cannot work without are meaningless here: every remaining error is about a
+ * value's real type, which the compiler has already named. Sharing one context
+ * meant the caller assembled both, and the tightening prompt silently discarded
+ * them.
+ */
+export interface TighteningContext {
+  /** Provides the package and version pair for the prompt's preamble. */
+  finding: Finding;
+  /** repo-relative path -> source text, with the annotations already removed. */
+  sources: Map<string, string>;
+  /** Compiler output from the stripped-but-unrepaired state. */
+  errors: string;
 }
 
 /**
@@ -224,14 +232,12 @@ function buildUserPrompt(ctx: AgentContext): string {
 /**
  * The tightening prompt: compiler output and the current sources, nothing else.
  *
- * The API diff and the candidate symbol list are deliberately omitted. Both exist
- * to help the model choose a replacement symbol, and choosing a symbol is not
- * this task — every remaining error is about a value's real type, which the
- * compiler has already named. Sending them costs context and invites the model
- * to "fix" call sites the compiler is happy with.
+ * Sending the API diff and the candidate symbol list as well would cost context
+ * and invite the model to "fix" call sites the compiler is happy with, so
+ * `TighteningContext` does not carry them at all.
  */
-export function buildTighteningPrompt(ctx: AgentContext, errors: string): string {
-  const { finding } = ctx;
+export function buildTighteningPrompt(ctx: TighteningContext): string {
+  const { finding, errors } = ctx;
   const parts: string[] = [];
 
   parts.push('# What just happened');
@@ -275,20 +281,36 @@ function isTextEdit(value: unknown): value is TextEdit {
   );
 }
 
+/** Propose the edits that carry a codebase onto the new version of a dependency. */
 export async function proposeEdits(
   config: LlmConfig,
   ctx: AgentContext,
 ): Promise<AgentProposal> {
-  const { tightening } = ctx;
-  const messages: ChatMessage[] = tightening
-    ? [
-        { role: 'system', content: TIGHTENING_SYSTEM_PROMPT },
-        { role: 'user', content: buildTighteningPrompt(ctx, tightening.errors) },
-      ]
-    : [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt(ctx) },
-      ];
+  return propose(config, SYSTEM_PROMPT, buildUserPrompt(ctx));
+}
+
+/**
+ * Propose the edits that repair what removing the `any` annotations exposed.
+ *
+ * Separate from `proposeEdits` because only the prompt differs — everything
+ * after the request is one shape, parsed one way.
+ */
+export async function proposeTightening(
+  config: LlmConfig,
+  ctx: TighteningContext,
+): Promise<AgentProposal> {
+  return propose(config, TIGHTENING_SYSTEM_PROMPT, buildTighteningPrompt(ctx));
+}
+
+async function propose(
+  config: LlmConfig,
+  system: string,
+  user: string,
+): Promise<AgentProposal> {
+  const messages: ChatMessage[] = [
+    { role: 'system', content: system },
+    { role: 'user', content: user },
+  ];
 
   const res = await chat(config, messages, { jsonMode: true });
   if (!res.ok) {

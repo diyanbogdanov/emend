@@ -4,7 +4,7 @@ import { stripParameterAny } from '../src/fix.ts';
 import {
   buildTighteningPrompt,
   TIGHTENING_SYSTEM_PROMPT,
-  type AgentContext,
+  type TighteningContext,
 } from '../src/llm/agent.ts';
 
 test('removes a parameter any so the contextual type is inferred instead', () => {
@@ -41,7 +41,7 @@ test('does not touch any[] , which is a different type', () => {
   assert.equal(removed, 0);
 });
 
-function tighteningContext(sources: Map<string, string>): AgentContext {
+function tighteningContext(sources: Map<string, string>, errors: string): TighteningContext {
   return {
     finding: {
       id: 'f1',
@@ -59,10 +59,8 @@ function tighteningContext(sources: Map<string, string>): AgentContext {
       sites: [],
       confidence: 'medium',
     },
-    changes: [],
     sources,
-    candidateSymbols: [],
-    tightening: { errors: "error TS2339: Property 'toFixed' does not exist on type 'ValueType'." },
+    errors,
   };
 }
 
@@ -74,8 +72,10 @@ test('the tightening prompt describes the sources as already stripped', () => {
   // absent and the step reports nothing — indistinguishable from a model that
   // simply declined.
   const prompt = buildTighteningPrompt(
-    tighteningContext(new Map([['src/Chart.tsx', 'formatter={(value) => value.toFixed(1)}']])),
-    "error TS2339: Property 'toFixed' does not exist on type 'ValueType'.",
+    tighteningContext(
+      new Map([['src/Chart.tsx', 'formatter={(value) => value.toFixed(1)}']]),
+      "error TS2339: Property 'toFixed' does not exist on type 'ValueType'.",
+    ),
   );
   assert.match(prompt, /CURRENT state, annotations already removed/);
   assert.doesNotMatch(prompt, /ORIGINAL, unmodified/);
@@ -83,8 +83,10 @@ test('the tightening prompt describes the sources as already stripped', () => {
 
 test('the tightening prompt carries the compiler output and the source', () => {
   const prompt = buildTighteningPrompt(
-    tighteningContext(new Map([['src/Chart.tsx', 'const marker = 42;']])),
-    'error TS18048: my-unique-error',
+    tighteningContext(
+      new Map([['src/Chart.tsx', 'const marker = 42;']]),
+      'error TS18048: my-unique-error',
+    ),
   );
   assert.match(prompt, /my-unique-error/);
   assert.match(prompt, /const marker = 42;/);

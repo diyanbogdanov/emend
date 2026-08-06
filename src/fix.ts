@@ -27,9 +27,9 @@ import {
   workspaceDiff,
   type Workspace,
 } from './apply.ts';
-import { runPhase, compare } from './verify.ts';
-import { resolveLlmConfig } from './llm/providers.ts';
-import { proposeEdits, nearbySymbols, type TextEdit } from './llm/agent.ts';
+import { runPhase, compare, verificationPassed } from './verify.ts';
+import { resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
+import { proposeEdits, proposeTightening, nearbySymbols, type TextEdit } from './llm/agent.ts';
 import type {
   ApiSymbol,
   CallSite,
@@ -151,7 +151,7 @@ async function tightenAny(
   progress(`  tightening: removing ${total} parameter \`any\` annotation(s), re-verifying`);
   await write(candidates.keys(), true);
   let report = await check();
-  if (report.outcome === 'verified' || report.outcome === 'typecheck-only') {
+  if (verificationPassed(report.outcome)) {
     progress(`  tightening kept: all ${total} were unnecessary`);
     return report;
   }
@@ -166,7 +166,7 @@ async function tightenAny(
     const repaired = await tighten(verificationErrors(report));
     if (repaired) {
       const after = await check();
-      if (after.outcome === 'verified' || after.outcome === 'typecheck-only') {
+      if (verificationPassed(after.outcome)) {
         progress(`  tightening kept: all ${total} removed, ${repaired} follow-up edit(s)`);
         return after;
       }
@@ -195,7 +195,7 @@ async function tightenAny(
   for (const file of files) {
     await write([file], true);
     const trial = await check();
-    if (trial.outcome === 'verified' || trial.outcome === 'typecheck-only') {
+    if (verificationPassed(trial.outcome)) {
       keptFiles.push(file);
       keptCount += candidates.get(file)?.[2] ?? 0;
       best = trial;
@@ -213,6 +213,50 @@ async function tightenAny(
       `${keptFiles.length} file(s); the rest were load-bearing`,
   );
   return best;
+}
+
+/**
+ * The repair `tightenAny` asks for: show the model the compiler's complaints
+ * against the already-stripped sources, and apply whatever it proposes.
+ *
+ * Each way this can come to nothing is reported separately. They used to share
+ * one `return null`, so a repair that proposed no edits looked exactly like one
+ * whose edits all failed to apply, and the run reported neither.
+ */
+async function repairTightening(
+  config: LlmConfig,
+  dir: string,
+  finding: Finding,
+  extraFiles: string[],
+  progress: (message: string) => void,
+  errors: string,
+): Promise<number | null> {
+  const proposal = await proposeTightening(config, {
+    finding,
+    // Re-read: the files on disk are the stripped ones, not what the migration
+    // was shown, and the prompt promises the model exactly what it is holding.
+    sources: await loadSources(dir, finding, extraFiles),
+    errors,
+  });
+  if (!proposal.ok) {
+    progress(`    tightening repair unavailable: ${proposal.error ?? 'unknown error'}`);
+    return null;
+  }
+  if (proposal.edits.length === 0) {
+    progress(
+      `    tightening repair proposed no edits: ${proposal.rationale || 'no rationale given'}`,
+    );
+    return null;
+  }
+  const applied = await applyTextEdits(dir, proposal.edits);
+  if (applied.applied.length === 0) {
+    progress(`    tightening repair: none of ${proposal.edits.length} edit(s) matched the source`);
+    return null;
+  }
+  progress(
+    `    tightening repair: applied ${applied.applied.length} of ${proposal.edits.length} edit(s)`,
+  );
+  return applied.applied.length;
 }
 
 async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol>> {
@@ -640,7 +684,7 @@ export async function fixPackage(
 
         appliedCount += editResult.applied.length;
         verification = report;
-        if (report.outcome === 'verified' || report.outcome === 'typecheck-only') break;
+        if (verificationPassed(report.outcome)) break;
 
         if (attempt < config.maxRetries) {
           // Keep progress. Reverting every failed attempt made the retries three
@@ -670,45 +714,11 @@ export async function fixPackage(
       agentRecord = { model: config.model, provider: config.providerLabel, attempts, rationale };
 
       // The migration is green. Now find out how much of its `any` was real.
-      if (verification.outcome === 'verified' || verification.outcome === 'typecheck-only') {
-        const tightened = await tightenAny(
-          ws.dir,
-          phaseOpts,
-          baseline,
-          progress,
-          async (errors) => {
-            const workspace = ws;
-            if (!workspace) return null;
-            const sourcesNow = await loadSources(workspace.dir, agentFinding, [
-              ...collateral,
-              ...referenced,
-            ]);
-            const proposal = await proposeEdits(config, {
-              finding: first,
-              changes: findings.map((f) => ({ change: f.change, sites: f.sites })),
-              sources: sourcesNow,
-              candidateSymbols: candidates,
-              tightening: { errors },
-            });
-            // Each of these used to return null indistinguishably, so a repair
-            // that proposed nothing looked exactly like one whose edits all
-            // failed to apply — and the run reported neither.
-            if (!proposal.ok) {
-              progress(`    tightening repair unavailable: ${proposal.error ?? 'unknown error'}`);
-              return null;
-            }
-            if (proposal.edits.length === 0) {
-              progress(`    tightening repair proposed no edits: ${proposal.rationale || 'no rationale given'}`);
-              return null;
-            }
-            const applied = await applyTextEdits(workspace.dir, proposal.edits);
-            if (applied.applied.length === 0) {
-              progress(`    tightening repair: none of ${proposal.edits.length} edit(s) matched the source`);
-              return null;
-            }
-            progress(`    tightening repair: applied ${applied.applied.length} of ${proposal.edits.length} edit(s)`);
-            return applied.applied.length;
-          },
+      if (verificationPassed(verification.outcome)) {
+        const dir = ws.dir;
+        const extraFiles = [...collateral, ...referenced];
+        const tightened = await tightenAny(dir, phaseOpts, baseline, progress, (errors) =>
+          repairTightening(config, dir, agentFinding, extraFiles, progress, errors),
         );
         if (tightened) verification = tightened;
       }

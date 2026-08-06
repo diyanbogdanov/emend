@@ -28,6 +28,7 @@ async function stubProvider(
       providerLabel: 'stub',
       temperature: 0,
       maxRetries: 3,
+      maxTokens: 32_000,
     },
     hits: () => hits,
     close: () => new Promise<void>((r) => server.close(() => r())),
@@ -35,7 +36,10 @@ async function stubProvider(
 }
 
 const GOOD = { status: 200, body: { choices: [{ message: { content: '{"edits":[]}' } }] } };
-const EMPTY = { status: 200, body: { choices: [{ message: { content: '' } }], finish_reason: 'stop' } };
+// `finish_reason` belongs to the choice, not the body — the client reads
+// `choices[0].finish_reason`, so putting it alongside `choices` would leave the
+// truncation branch untested against a fixture that looked like it covered it.
+const EMPTY = { status: 200, body: { choices: [{ message: { content: '' }, finish_reason: 'stop' }] } };
 
 test('an empty message is retried rather than ending the migration', async () => {
   // The failure this exists for: on a real recharts run the provider returned one

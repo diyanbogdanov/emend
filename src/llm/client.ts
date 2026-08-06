@@ -19,6 +19,16 @@ export interface ChatResult {
   content: string;
   error?: string;
   usage?: { promptTokens: number; completionTokens: number };
+  /**
+   * Whether asking again could plausibly give a different answer. Only
+   * meaningful when `ok` is false.
+   *
+   * Carried on the result rather than beside it because it is a property of the
+   * failure — a rejected API key is permanent, a 503 is not — and only the code
+   * holding the status and `finish_reason` can tell which. Callers other than
+   * the retry loop can ignore it.
+   */
+  transient?: boolean;
 }
 
 interface ChatResponseBody {
@@ -40,22 +50,6 @@ interface ChatResponseBody {
  */
 const TRANSPORT_ATTEMPTS = 3;
 
-/**
- * Output budget per request.
- *
- * The former 8,000 dated from when that was a typical ceiling. It is not any
- * more — GLM-5.2 allows 262,144 and DeepSeek V4 Pro 384,000 — and on a six-file
- * migration a reasoning model spent the whole 8,000 thinking and returned an
- * empty message with `finish_reason: length`. Nothing in Emend ever overrode
- * this, so the default was the effective limit everywhere.
- *
- * A cap is not a charge: tokens are billed as generated, so headroom is close to
- * free. 32,000 clears the largest edit set seen while staying under the smallest
- * ceiling among candidate models (qwen3-coder, 65,536). Lower it for a local
- * runtime that rejects large values.
- */
-const DEFAULT_MAX_TOKENS = Number(process.env.EMEND_LLM_MAX_TOKENS ?? 32_000);
-
 export async function chat(
   config: LlmConfig,
   messages: ChatMessage[],
@@ -63,10 +57,9 @@ export async function chat(
 ): Promise<ChatResult> {
   let last: ChatResult = { ok: false, content: '', error: 'no attempt made' };
   for (let attempt = 1; attempt <= TRANSPORT_ATTEMPTS; attempt++) {
-    const { result, transient } = await chatOnce(config, messages, options);
-    if (result.ok) return result;
-    last = result;
-    if (attempt === TRANSPORT_ATTEMPTS || !transient) break;
+    last = await chatOnce(config, messages, options);
+    if (last.ok) return last;
+    if (attempt === TRANSPORT_ATTEMPTS || !last.transient) break;
     // Linear rather than exponential: the ceiling is three attempts, so the
     // difference is a second of wall clock against a migration that takes minutes.
     await new Promise((r) => setTimeout(r, attempt * 1000));
@@ -85,8 +78,8 @@ async function chatOnce(
   config: LlmConfig,
   messages: ChatMessage[],
   options: { jsonMode?: boolean; maxTokens?: number; timeoutMs?: number } = {},
-): Promise<{ result: ChatResult; transient: boolean }> {
-  const { jsonMode = true, maxTokens = DEFAULT_MAX_TOKENS, timeoutMs = 180_000 } = options;
+): Promise<ChatResult> {
+  const { jsonMode = true, maxTokens = config.maxTokens, timeoutMs = 180_000 } = options;
 
   const body: Record<string, unknown> = {
     model: config.model,
@@ -117,7 +110,9 @@ async function chatOnce(
       // 4xx means the request itself is wrong — a rejected key or an unknown
       // model will be exactly as wrong the second time. 429 is the exception.
       return {
-        result: { ok: false, content: '', error: `HTTP ${res.status}: ${text.slice(0, 400)}` },
+        ok: false,
+        content: '',
+        error: `HTTP ${res.status}: ${text.slice(0, 400)}`,
         transient: res.status === 429 || res.status >= 500,
       };
     }
@@ -128,7 +123,9 @@ async function chatOnce(
     } catch {
       // A 200 carrying a non-JSON body is usually an intermediary, not the model.
       return {
-        result: { ok: false, content: '', error: `non-JSON response: ${text.slice(0, 300)}` },
+        ok: false,
+        content: '',
+        error: `non-JSON response: ${text.slice(0, 300)}`,
         transient: true,
       };
     }
@@ -136,7 +133,9 @@ async function chatOnce(
     if (parsed.error) {
       const msg = typeof parsed.error === 'string' ? parsed.error : parsed.error.message;
       return {
-        result: { ok: false, content: '', error: msg ?? 'unknown provider error' },
+        ok: false,
+        content: '',
+        error: msg ?? 'unknown provider error',
         transient: true,
       };
     }
@@ -149,39 +148,32 @@ async function chatOnce(
       // end. Say what to change instead of retrying three times in silence.
       const truncated = reason === 'length';
       return {
-        result: {
-          ok: false,
-          content: '',
-          error: truncated
-            ? `ran out of output tokens before producing a reply (max_tokens=${maxTokens}). ` +
-              'Raise EMEND_LLM_MAX_TOKENS, or use a model that reasons less.'
-            : `provider returned an empty message${reason ? ` (finish_reason: ${reason})` : ''}`,
-        },
+        ok: false,
+        content: '',
+        error: truncated
+          ? `ran out of output tokens before producing a reply (max_tokens=${maxTokens}). ` +
+            'Raise EMEND_LLM_MAX_TOKENS, or use a model that reasons less.'
+          : `provider returned an empty message${reason ? ` (finish_reason: ${reason})` : ''}`,
         transient: !truncated,
       };
     }
 
     return {
-      result: {
-        ok: true,
-        content,
-        usage: {
-          promptTokens: parsed.usage?.prompt_tokens ?? 0,
-          completionTokens: parsed.usage?.completion_tokens ?? 0,
-        },
+      ok: true,
+      content,
+      usage: {
+        promptTokens: parsed.usage?.prompt_tokens ?? 0,
+        completionTokens: parsed.usage?.completion_tokens ?? 0,
       },
-      transient: false,
     };
   } catch (err) {
     const e = err as Error;
     // A socket failure is worth another try; a timeout has already waited.
     const timedOut = e.name === 'AbortError';
     return {
-      result: {
-        ok: false,
-        content: '',
-        error: timedOut ? `request timed out after ${timeoutMs}ms` : e.message,
-      },
+      ok: false,
+      content: '',
+      error: timedOut ? `request timed out after ${timeoutMs}ms` : e.message,
       transient: !timedOut,
     };
   } finally {
