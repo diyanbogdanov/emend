@@ -42,7 +42,7 @@ export interface EvalCase {
   toVersion: string;
   /** Where the pre-breaking repository comes from. */
   repo:
-    | { kind: 'demo' }
+    | { kind: 'fixture'; name: string }
     | { kind: 'local'; dir: string }
     | { kind: 'git'; url: string; ref: string };
   /**
@@ -311,7 +311,7 @@ export async function runCase(
  * is enough to prove the harness runs and to catch an outright regression.
  */
 export async function loadCases(file?: string): Promise<EvalCase[]> {
-  if (!file) return [DEMO_CASE];
+  if (!file) return BUILT_IN_CASES;
   const raw = await readFile(file, 'utf8');
   const parsed: unknown = JSON.parse(raw);
   return Array.isArray(parsed) ? (parsed as EvalCase[]) : [];
@@ -321,7 +321,7 @@ export const DEMO_CASE: EvalCase = {
   id: 'zod-3.22.4-to-4.4.3',
   pkg: 'zod',
   toVersion: '4.4.3',
-  repo: { kind: 'demo' },
+  repo: { kind: 'fixture', name: 'demo-repo' },
   // Five: `ZodError.errors` -> `.issues` and the `z.record` arity change, which
   // are the compile errors, plus the three deprecations — `z.string().uuid()`
   // becomes `z.uuid()`, `.email()` becomes `z.email()`, `.datetime()` becomes
@@ -338,6 +338,38 @@ export const DEMO_CASE: EvalCase = {
   mustResolve: ['ZodError.errors', 'record', 'ZodString.uuid', 'ZodString.email', 'ZodString.datetime'],
 };
 
+/**
+ * recharts 2.15.4 -> 3.10.1, the migration #1 and #2 were both written against.
+ *
+ * It exercises what the zod case cannot. `Cell` is a *named import*, so
+ * `remainingDeprecations` can see whether the migration finished — zod's
+ * deprecations are reached through call chains and are invisible to it. And the
+ * only compile error is one the declaration diff never explains, so it tests
+ * rule 7 rather than the change list.
+ *
+ * It also reproduces the narrowing trap. The tooltip formatter's value is
+ * `ValueType | undefined` in 3.x, and the obvious repair — `Number(value)` —
+ * renders `$NaN` for a missing value while typechecking and passing every test.
+ */
+export const RECHARTS_CASE: EvalCase = {
+  id: 'recharts-2.15.4-to-3.10.1',
+  pkg: 'recharts',
+  toVersion: '3.10.1',
+  repo: { kind: 'fixture', name: 'recharts-repo' },
+  // Three: drop `Cell` from the import, replace the per-datum `<Cell>` children
+  // with recharts 3's `fill` on the data, and narrow the tooltip formatter.
+  //
+  // Edit counts are chunk-sensitive — a model that rewrites the whole JSX block
+  // in one find/replace reports fewer edits than one that makes the same change
+  // in three, with an identical diff. The ratio is therefore a signal about
+  // scope, not a precise measure, and is read alongside the deprecation and
+  // escape columns rather than on its own.
+  minimalEdits: 3,
+  mustResolve: ['Cell'],
+};
+
+export const BUILT_IN_CASES: EvalCase[] = [DEMO_CASE, RECHARTS_CASE];
+
 /** Put a case's repository on disk, ready to migrate. */
 export async function materialiseCase(evalCase: EvalCase): Promise<string> {
   if (evalCase.repo.kind === 'local') return evalCase.repo.dir;
@@ -349,7 +381,7 @@ export async function materialiseCase(evalCase: EvalCase): Promise<string> {
     await execFileAsync('git', ['-C', dir, 'checkout', '--quiet', ref]);
   } else {
     const here = path.dirname(fileURLToPath(import.meta.url));
-    const template = path.resolve(here, '..', 'fixtures', 'demo-repo');
+    const template = path.resolve(here, '..', 'fixtures', evalCase.repo.name);
     for (const entry of ['package.json', 'tsconfig.json', '.gitignore', 'src', 'test']) {
       await cp(path.join(template, entry), path.join(dir, entry), { recursive: true }).catch(
         () => {},

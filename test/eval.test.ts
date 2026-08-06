@@ -6,7 +6,7 @@ const zodCase: EvalCase = {
   id: 'zod-3-to-4',
   pkg: 'zod',
   toVersion: '4.4.3',
-  repo: { kind: 'demo' },
+  repo: { kind: 'fixture', name: 'demo-repo' },
   minimalEdits: 2,
   mustResolve: ['ZodError.errors', 'record'],
 };
