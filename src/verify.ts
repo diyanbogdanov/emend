@@ -169,6 +169,26 @@ function phaseRanAnything(phase: VerifyPhase): boolean {
   return !phase.typecheck.skipped || !phase.test.skipped;
 }
 
+/**
+ * Whether a migration has earned a pull request.
+ *
+ * An allowlist, not a denylist. The CLI previously refused only on `regression`,
+ * which let `pre-existing-failure` and `unverified` through — states that mean
+ * "we could not tell whether this works", not "this works". A broken baseline
+ * (the repository's own tests already failing, or dependencies that do not match
+ * its manifests) produced exactly that, and would have force-pushed an unproven
+ * migration onto a live PR whose body implies verification.
+ *
+ * `typecheck-only` counts: it is the strongest result obtainable when a
+ * repository has no runnable tests, and the hosted path already treats it as
+ * success because it never runs tests at all.
+ *
+ * Stated as an allowlist so a future outcome fails closed rather than open.
+ */
+export function readyForPullRequest(outcome: VerifyOutcome): boolean {
+  return outcome === 'verified' || outcome === 'typecheck-only';
+}
+
 export function compare(baseline: VerifyPhase, post: VerifyPhase): VerificationReport {
   const baselineOk = phasePassed(baseline);
   const postOk = phasePassed(post);

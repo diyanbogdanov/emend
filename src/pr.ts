@@ -296,25 +296,18 @@ export async function createPullRequest(
 ): Promise<{ ok: boolean; url?: string; error?: string }> {
   const { repoDir, branch, title, body, draft = true } = options;
   try {
-    // `-B` rather than `-b`: a previous run may have created the branch and then
-    // failed later, and re-running after fixing that is the normal case. The
-    // branch content is fully determined by the migration, so resetting it is
-    // safe and produces the same result.
-    try {
-      await execFileAsync('git', ['-C', repoDir, 'checkout', '-B', branch]);
-    } catch (err) {
-      // git refuses to move a branch that another worktree has checked out. The
-      // holder is one of Emend's own kept workspaces — `--keep` leaves them on
-      // disk deliberately — so a kept workspace from an earlier run silently
-      // blocks every later run of the same finding.
-      const message = (err as Error).message;
-      const holder = message.match(/worktree at '([^']+)'/)?.[1];
-      if (!holder || !/emend-ws-/.test(holder)) throw err;
-      await execFileAsync('git', [
-        '-C', repoDir, 'worktree', 'remove', '--force', holder,
-      ]).catch(() => execFileAsync('git', ['-C', repoDir, 'worktree', 'prune']));
-      await execFileAsync('git', ['-C', repoDir, 'checkout', '-B', branch]);
-    }
+    // No local branch is created. The workspace is already on a detached HEAD,
+    // and a commit can be pushed to a remote ref without one.
+    //
+    // `git checkout -B <branch>` was the previous approach and it fails outright
+    // when any other worktree in the repository has that branch checked out:
+    //
+    //   fatal: 'emend/recharts-…' is already used by worktree at '…/the-monorepo'
+    //
+    // The holder is normally the developer's own checkout, because reviewing a
+    // pull request means checking its branch out. Reclaiming it is not an option
+    // — it may hold uncommitted work — so the update simply could not proceed on
+    // exactly the repositories where someone was paying attention.
     await execFileAsync('git', ['-C', repoDir, 'add', '-A']);
 
     // Nothing staged means the migration produced no committable change —
@@ -343,7 +336,9 @@ export async function createPullRequest(
     await execFileAsync('git', [
       '-C', repoDir, 'push',
       `--force-with-lease=refs/heads/${branch}:${remoteSha}`,
-      '-u', 'origin', branch,
+      // Explicit source:destination, so no local branch has to exist. `-u` is
+      // gone with it: there is nothing local to set upstream on.
+      'origin', `HEAD:refs/heads/${branch}`,
     ]);
 
     // Reuse an open PR for this branch instead of failing on the second run.
