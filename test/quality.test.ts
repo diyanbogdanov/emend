@@ -183,3 +183,24 @@ test('the review prompt demands the deprecation be finished before anything else
   // And the licence to decline, so the pass does not invent work to look busy.
   assert.match(REVIEW_SYSTEM_PROMPT, /empty "edits" array/);
 });
+
+test('the review prompt says what to do with a comment the migration made false', () => {
+  // Measured: on every zod run the review pass rewrote the file's doc comment,
+  // which had said "Written against zod 3.x", into a duplicate of the line
+  // directly above it:
+  //
+  //     /**
+  //      * Validation schemas for the checkout service.
+  //      *
+  //      * Validation schemas for the checkout service.
+  //      */
+  //
+  // Updating it was right — the comment had become untrue, and a migration that
+  // leaves a false comment behind is incomplete. Rule 6 covers code the
+  // migration did not touch and says nothing about comments, so the pass had no
+  // guidance and produced a careless edit six runs out of six.
+  assert.match(REVIEW_SYSTEM_PROMPT, /comment/i);
+  // Specifically: the replacement has to stand on its own, which is the part
+  // that failed.
+  assert.match(REVIEW_SYSTEM_PROMPT, /repeat|duplicat/i);
+});

@@ -337,7 +337,13 @@ export const DEMO_CASE: EvalCase = {
   // removing X has not done what it said. Under that standard the deprecations
   // are required, and a case that scores their absence as ideal would train the
   // agent to skip them.
-  minimalEdits: 5,
+  // Six. Five are code — the two compile errors and the three deprecations —
+  // and the sixth is the file's doc comment, which says "Written against zod
+  // 3.x. Several of the APIs used here changed in zod 4". After the migration
+  // that sentence is false, and a migration that leaves a false comment behind
+  // has not finished. Every run makes exactly six edits; scoring the sixth as
+  // over-editing was the harness mismeasuring, not the model over-reaching.
+  minimalEdits: 6,
   mustResolve: ['ZodError.errors', 'record', 'ZodString.uuid', 'ZodString.email', 'ZodString.datetime'],
 };
 
