@@ -6,10 +6,17 @@
  * also means a self-hosted vLLM or Ollama endpoint is a first-class option — no
  * code change, just a different base URL.
  *
- * Model IDs are deliberately NOT pinned. The open-weight frontier moves monthly
- * (Kimi K2.7, Qwen 3.7, DeepSeek V4, GLM-5.x all landed recently), so a
- * hardcoded default would ship stale. Use `emend models` to list what your
- * provider currently serves.
+ * Where a provider's catalogue has been verified, it carries ONE default model
+ * rather than a list of peers. An earlier version shipped three unranked
+ * suggestions per provider and nothing read them, so whoever opened the file
+ * picked the first line — which by then was a generation old and measurably
+ * worse at the tightening pass. One ranked, dated, overridable default is
+ * honest about which choice is actually recommended; an unranked list is not.
+ *
+ * The frontier still moves monthly, so a default here is a starting point with
+ * a shelf life, not a pin. `EMEND_LLM_MODEL` overrides it, `emend models` lists
+ * what your provider serves today, and docs/deployment.md records when the
+ * recommendation was last measured and against what.
  */
 
 export interface ProviderPreset {
@@ -20,8 +27,14 @@ export interface ProviderPreset {
   keyEnv: string[];
   /** Documentation pointer shown when the key is missing. */
   docs: string;
-  /** Models known to suit agentic code editing. Advisory only. */
-  suggested: string[];
+  /**
+   * Used when `EMEND_LLM_MODEL` is unset. Only set where the ID has actually
+   * been confirmed against the provider's catalogue — a guessed ID fails at the
+   * first request with a 404 that reads like a bug in Emend. Providers whose
+   * catalogue needs a key to read are left without one on purpose: their users
+   * get the "set EMEND_LLM_MODEL" error, which is honest.
+   */
+  defaultModel?: string;
   /** Some local runtimes accept any key value. */
   keyOptional?: boolean;
 }
@@ -33,12 +46,6 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
     baseUrl: 'https://api.tokenfactory.nebius.com/v1',
     keyEnv: ['NEBIUS_API_KEY', 'EMEND_LLM_API_KEY'],
     docs: 'https://docs.tokenfactory.nebius.com/',
-    suggested: [
-      'Qwen/Qwen3-Coder-480B-A35B-Instruct',
-      'deepseek-ai/DeepSeek-V3-0324',
-      'moonshotai/Kimi-K2-Instruct',
-      'zai-org/GLM-4.6',
-    ],
   },
   fireworks: {
     id: 'fireworks',
@@ -46,12 +53,6 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
     baseUrl: 'https://api.fireworks.ai/inference/v1',
     keyEnv: ['FIREWORKS_API_KEY', 'EMEND_LLM_API_KEY'],
     docs: 'https://docs.fireworks.ai/tools-sdks/openai-compatibility',
-    suggested: [
-      'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
-      'accounts/fireworks/models/deepseek-v3p1',
-      'accounts/fireworks/models/kimi-k2-instruct',
-      'accounts/fireworks/models/glm-4p6',
-    ],
   },
   together: {
     id: 'together',
@@ -59,11 +60,6 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
     baseUrl: 'https://api.together.xyz/v1',
     keyEnv: ['TOGETHER_API_KEY', 'EMEND_LLM_API_KEY'],
     docs: 'https://docs.together.ai/docs/openai-api-compatibility',
-    suggested: [
-      'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8',
-      'deepseek-ai/DeepSeek-V3',
-      'moonshotai/Kimi-K2-Instruct',
-    ],
   },
   groq: {
     id: 'groq',
@@ -71,7 +67,6 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
     baseUrl: 'https://api.groq.com/openai/v1',
     keyEnv: ['GROQ_API_KEY', 'EMEND_LLM_API_KEY'],
     docs: 'https://console.groq.com/docs/openai',
-    suggested: ['moonshotai/kimi-k2-instruct', 'qwen/qwen3-32b'],
   },
   deepinfra: {
     id: 'deepinfra',
@@ -79,7 +74,8 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
     baseUrl: 'https://api.deepinfra.com/v1/openai',
     keyEnv: ['DEEPINFRA_API_KEY', 'EMEND_LLM_API_KEY'],
     docs: 'https://deepinfra.com/docs/openai_api',
-    suggested: ['Qwen/Qwen3-Coder-480B-A35B-Instruct', 'deepseek-ai/DeepSeek-V3'],
+    // Confirmed present in DeepInfra's public catalogue on 2026-08-06.
+    defaultModel: 'zai-org/GLM-5.2',
   },
   openrouter: {
     id: 'openrouter',
@@ -89,7 +85,11 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
     // "no API key found" at someone holding a perfectly good key.
     keyEnv: ['OPENROUTER_API_KEY', 'OPEN_ROUTER_API_KEY', 'EMEND_LLM_API_KEY'],
     docs: 'https://openrouter.ai/docs/quickstart',
-    suggested: ['qwen/qwen3-coder', 'deepseek/deepseek-chat', 'moonshotai/kimi-k2'],
+    // Measured 2026-08-06 against kimi-k3, deepseek-v4-pro and qwen3-coder on the
+    // recharts 3 tooltip migration: GLM-5.2 and deepseek-v4-pro both produced the
+    // correctly narrowed edit, qwen3-coder did not, and kimi-k3 matched at 6x the
+    // price. See docs/deployment.md for the table.
+    defaultModel: 'z-ai/glm-5.2',
   },
   ollama: {
     id: 'ollama',
@@ -97,7 +97,6 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
     baseUrl: 'http://localhost:11434/v1',
     keyEnv: ['EMEND_LLM_API_KEY'],
     docs: 'https://github.com/ollama/ollama/blob/main/docs/openai.md',
-    suggested: ['qwen3-coder:30b', 'deepseek-coder-v2:16b'],
     keyOptional: true,
   },
   vllm: {
@@ -106,7 +105,6 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
     baseUrl: 'http://localhost:8000/v1',
     keyEnv: ['EMEND_LLM_API_KEY'],
     docs: 'https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html',
-    suggested: [],
     keyOptional: true,
   },
 };
@@ -140,7 +138,7 @@ export function resolveLlmConfig(overrides: Partial<{
 }> = {}): LlmConfigResult {
   const providerId = overrides.provider ?? process.env.EMEND_LLM_PROVIDER ?? '';
   const explicitBase = overrides.baseUrl ?? process.env.EMEND_LLM_BASE_URL;
-  const model = overrides.model ?? process.env.EMEND_LLM_MODEL ?? '';
+  let model = overrides.model ?? process.env.EMEND_LLM_MODEL ?? '';
 
   let baseUrl = explicitBase;
   let keyEnv = ['EMEND_LLM_API_KEY'];
@@ -159,6 +157,9 @@ export function resolveLlmConfig(overrides: Partial<{
     keyEnv = preset.keyEnv;
     label = preset.label;
     keyOptional = preset.keyOptional ?? false;
+    // Only when nothing was asked for. An explicit choice always wins, including
+    // an explicit choice that turns out to be worse than the default.
+    if (!model) model = preset.defaultModel ?? '';
   }
 
   if (!baseUrl) {
@@ -169,9 +170,17 @@ export function resolveLlmConfig(overrides: Partial<{
     };
   }
   if (!model) {
+    // Reached only for providers with no verified default, or a custom base URL.
+    // Naming the ones that do have a default turns a dead end into a next step.
+    const withDefaults = Object.values(PROVIDERS)
+      .filter((p) => p.defaultModel)
+      .map((p) => `${p.id} (${p.defaultModel})`)
+      .join(', ');
     return {
       ok: false,
-      reason: 'EMEND_LLM_MODEL is not set. Run `emend models` to list what your provider serves.',
+      reason:
+        'EMEND_LLM_MODEL is not set and this provider has no verified default. ' +
+        `Run \`emend models\` to list what it serves, or use a provider that ships one: ${withDefaults}.`,
     };
   }
 

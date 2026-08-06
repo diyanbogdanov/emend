@@ -45,6 +45,17 @@ export interface StoredRun {
   report: VerificationReport | null;
   planRationale: string | null;
   diff: string | null;
+  /**
+   * Which model produced this migration, or null when the deterministic planner
+   * did it alone.
+   *
+   * Recorded because model quality is not visible in the outcome. Two models can
+   * both verify and still differ in what they left behind — one narrowing a union
+   * correctly, another coercing it and silently rendering a real string as "0".
+   * Without this column that difference is unattributable after the fact, so a
+   * regression introduced by changing EMEND_LLM_MODEL cannot be traced to it.
+   */
+  agent: { model: string; provider: string } | null;
 }
 
 export interface TrackedRepo {
@@ -216,6 +227,30 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_repos_install ON repos(installation_id);
       CREATE INDEX IF NOT EXISTS idx_pr_branch ON pull_requests(branch);
     `);
+
+    // Columns added after a database already exists. `CREATE TABLE IF NOT EXISTS`
+    // above is a no-op on an existing table, so every later column needs this.
+    this.#addColumn('runs', 'agent_model', 'TEXT');
+    this.#addColumn('runs', 'agent_provider', 'TEXT');
+  }
+
+  /**
+   * Add a column unless it is already there.
+   *
+   * SQLite has no `ADD COLUMN IF NOT EXISTS`, and re-adding raises a plain error
+   * that is only distinguishable by message — too fragile to catch. So the
+   * existing columns are read first. Nullable by design: back-filling a value
+   * for rows that predate the column would be inventing history, and here a null
+   * genuinely means "we do not know", not "no agent ran".
+   */
+  #addColumn(table: string, column: string, definition: string): void {
+    // Table and column are internal literals, never user input; PRAGMA does not
+    // accept bound parameters for its argument.
+    const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+      name: string;
+    }>;
+    if (columns.some((c) => c.name === column)) return;
+    this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   recordPullRequest(pr: {
@@ -550,11 +585,13 @@ export class Store {
     report: VerificationReport,
     planRationale: string | null,
     diff: string | null,
+    /** Omitted when the deterministic planner produced the migration unaided. */
+    agent?: { model: string; provider: string } | null,
   ): number {
     const res = this.#db
       .prepare(
-        `INSERT INTO runs (finding_id, repo_dir, outcome, summary, created_at, report_json, plan_rationale, diff)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO runs (finding_id, repo_dir, outcome, summary, created_at, report_json, plan_rationale, diff, agent_model, agent_provider)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         findingId,
@@ -565,6 +602,8 @@ export class Store {
         JSON.stringify(report),
         planRationale,
         diff,
+        agent?.model ?? null,
+        agent?.provider ?? null,
       );
     return Number(res.lastInsertRowid);
   }
@@ -588,6 +627,14 @@ export class Store {
         : null,
       planRationale: r['plan_rationale'] ? String(r['plan_rationale']) : null,
       diff: r['diff'] ? String(r['diff']) : null,
+      // Rows written before this column existed report null rather than a
+      // placeholder model, so "unknown" stays distinguishable from "no agent".
+      agent: r['agent_model']
+        ? {
+            model: String(r['agent_model']),
+            provider: String(r['agent_provider'] ?? 'unknown'),
+          }
+        : null,
     }));
   }
 

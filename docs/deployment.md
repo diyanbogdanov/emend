@@ -150,3 +150,50 @@ workload whose cost is bursty CPU.
 - **Set `EMEND_LLM_*`** if you want agent migrations. Without them the runner
   still scans and still proposes anything the deterministic planner can do; it
   just declines the rest.
+- **Re-check the default model periodically.** `openrouter` and `deepinfra` ship
+  a verified default, so a provider and a key are enough to start. The frontier
+  moves monthly, though, and a stale model silently costs quality rather than
+  failing — so treat the date on the table below as its expiry, and re-measure
+  rather than copying a model ID out of a blog post or an old commit.
+
+---
+
+## Which model, and why it matters more than it looks
+
+Measured 2026-08-06 on the recharts 3 tooltip formatter, the hardest real case
+seen so far. Every model below migrates and verifies identically; they differ
+only in the *tightening* pass, where nothing can fail them:
+
+| Model | $/Mtok in/out | Result |
+| --- | --- | --- |
+| `moonshotai/kimi-k3` | 3.00 / 15.00 | `typeof value === 'number' ? value.toFixed(1) : String(value ?? '')` |
+| `z-ai/glm-5.2` | 0.76 / 2.42 | same, and 4× cheaper |
+| `deepseek/deepseek-v4-pro` | 0.43 / 0.87 | same, cheapest of the three |
+| `qwen/qwen3-coder` | 0.30 / 1.00 | narrowed, but `Number(value)` in the else branch — renders "NaN" |
+
+**`z-ai/glm-5.2` is the default** on `openrouter`, and `zai-org/GLM-5.2` on
+`deepinfra` — a provider and a key are all you need:
+
+```bash
+export EMEND_LLM_PROVIDER=openrouter && export OPENROUTER_API_KEY=... && emend fix ./repo --agent
+```
+
+`deepseek/deepseek-v4-pro` scores identically and costs less; it is a reasonable
+swap. Kimi K3 also matches, at 6–17× the price on this workload. Any of them —
+or any other model your provider serves — via `EMEND_LLM_MODEL`, which always
+wins over the default:
+
+```bash
+export EMEND_LLM_MODEL=deepseek/deepseek-v4-pro
+```
+
+`nebius`, `fireworks`, `together` and `groq` carry no default: their catalogues
+need a key to read, so no ID has been verified and guessing one would fail at the
+first request with a 404 that looks like an Emend bug. Run `emend models` there.
+
+The trap worth internalising: an A/B on the same models showed the *prompt*
+decided correctness and the *model* decided whether edits applied at all. Under
+the previous tightening prompt — which listed coercion before narrowing — both
+K3 and GLM-5.2 dutifully returned `Number(value ?? 0)`, which renders a real
+string value as "0". Verification passes either way. Neither a stronger model
+nor a better prompt is sufficient alone.

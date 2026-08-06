@@ -17,6 +17,7 @@ import { fixFinding, fixPackage } from './fix.ts';
 import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
 import { startServer } from './server.ts';
+import { readyForPullRequest } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { listModels } from './llm/client.ts';
 import type { Finding, ScanReport } from './types.ts';
@@ -273,8 +274,11 @@ async function cmdFix(args: Args): Promise<number> {
 
     const rationale =
       result.plans.map((p) => p.rationale).join(' ') || result.agent?.rationale || null;
+    const agent = result.agent
+      ? { model: result.agent.model, provider: result.agent.provider }
+      : null;
     for (const f of findings) {
-      store.recordRun(f.id, repoDir, v, rationale, result.diff);
+      store.recordRun(f.id, repoDir, v, rationale, result.diff, agent);
     }
     console.log('');
   }
@@ -336,9 +340,14 @@ async function cmdPr(args: Args): Promise<number> {
     return 0;
   }
 
-  if (!result.verification || result.verification.outcome === 'regression') {
+  if (!result.verification || !readyForPullRequest(result.verification.outcome)) {
     console.error(
-      c.red('  Refusing to open a PR: the change did not verify. Fix the regression first.'),
+      c.red(
+        `  Refusing to open a PR: verification came back "${result.verification?.outcome ?? 'none'}".\n` +
+          '  Only a verified or typecheck-only migration is proposable. A failing\n' +
+          '  baseline usually means the checkout\'s dependencies do not match its\n' +
+          '  manifests — reinstall, confirm the repository is green, then re-run.',
+      ),
     );
     return 1;
   }
@@ -404,10 +413,26 @@ async function cmdModels(args: Args): Promise<number> {
     return 1;
   }
 
+  const preset = typeof providerFlag === 'string' ? PROVIDERS[providerFlag] : undefined;
+  const fallback =
+    preset?.defaultModel ?? PROVIDERS[process.env.EMEND_LLM_PROVIDER ?? '']?.defaultModel;
+
   console.log('');
-  for (const m of res.models) console.log(`  ${m}`);
+  for (const m of res.models) {
+    // Mark the default in the listing itself. A catalogue of several hundred
+    // models with no recommendation is how the previous stale pick happened.
+    console.log(m === fallback ? `  ${c.cyan(m)} ${c.dim('← default')}` : `  ${m}`);
+  }
   console.log('');
-  console.log(c.dim(`  ${res.models.length} model(s). Set one with EMEND_LLM_MODEL, then run 'emend fix <repo> --agent'.`));
+  console.log(
+    c.dim(
+      `  ${res.models.length} model(s). ` +
+        (fallback
+          ? `Defaults to ${fallback}; override with EMEND_LLM_MODEL.`
+          : 'Set one with EMEND_LLM_MODEL.') +
+        ` Then run 'emend fix <repo> --agent'.`,
+    ),
+  );
   console.log('');
   return 0;
 }
@@ -511,11 +536,13 @@ ${c.bold('EXAMPLE')}
   emend fix ./emend-demo
 
 ${c.bold('OPTIONAL LLM AGENT')} ${c.dim('(any OpenAI-compatible endpoint)')}
-  export EMEND_LLM_PROVIDER=nebius        # or fireworks, together, groq, ollama...
-  export NEBIUS_API_KEY=...
+  export EMEND_LLM_PROVIDER=openrouter    # or deepinfra, nebius, fireworks, groq, ollama...
+  export OPENROUTER_API_KEY=...
+  emend fix ./emend-demo --agent          # defaults to z-ai/glm-5.2
+
+  ${c.dim('To use a different open-weight model:')}
   emend models                            # see what your provider serves
   export EMEND_LLM_MODEL=<id from above>
-  emend fix ./emend-demo --agent
 
   ${c.dim('Detection, localisation and verification are always deterministic.')}
   ${c.dim('The model only proposes edits, and only where the planner declines.')}
