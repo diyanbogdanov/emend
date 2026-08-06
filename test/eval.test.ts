@@ -51,6 +51,30 @@ test('over-editing is penalised even though the build is green', () => {
   assert.ok(score.penalties.some((p) => p.includes('edit')));
 });
 
+test('under-editing is penalised too, and never rewarded', () => {
+  // The first live sweep ranked qwen3-coder top at 0.4x: it fixed the two
+  // compile errors and skipped all three deprecations. A scorer that only
+  // punishes doing too much reads "did less" as "did better" and puts the least
+  // complete migration at the head of the table — training for exactly the
+  // failure #2 exists to catch.
+  const score = scoreCase(zodCase, outcome({ editsApplied: 1 }));
+  assert.equal(score.passed, true, 'the build is green');
+  assert.equal(score.clean, false, 'but half the required edits is not a finished migration');
+  assert.ok(score.penalties.some((p) => p.includes('incomplete')));
+});
+
+test('the table ranks by distance from the minimum, not by fewest edits', () => {
+  const rows = summarise(
+    [zodCase],
+    [
+      outcome({ model: 'complete', editsApplied: 2 }),
+      outcome({ model: 'skipped-work', editsApplied: 1 }),
+      outcome({ model: 'padder', editsApplied: 5 }),
+    ],
+  );
+  assert.equal(rows[0]?.model, 'complete', 'the migration that did the job comes first');
+});
+
 test('buying a green build with `any` is penalised', () => {
   // PR #1 measured this directly: one model reached verified with ten type
   // escapes and another with zero. Both are "verified".

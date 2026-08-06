@@ -119,9 +119,17 @@ export function scoreCase(evalCase: EvalCase, outcome: CaseOutcome): CaseScore {
   if (outcome.typeEscapes > 0) {
     penalties.push(`${outcome.typeEscapes} type escape(s) — a green build bought with \`any\``);
   }
+  // Both directions. Doing too much is churn a reviewer has to read; doing too
+  // little is a migration that reported work it did not do, and a scorer that
+  // only punished the first would rank the least complete run highest — which is
+  // precisely what the first live sweep did.
   if (outcome.editsApplied > minimal) {
     penalties.push(
       `${outcome.editsApplied} edit(s) where ${minimal} were required (${editRatio.toFixed(1)}x)`,
+    );
+  } else if (outcome.editsApplied < minimal) {
+    penalties.push(
+      `only ${outcome.editsApplied} of ${minimal} required edit(s) — the migration is incomplete`,
     );
   }
   if (outcome.verdict === 'typecheck-only') {
@@ -214,7 +222,14 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
         totalDurationMs: m.ms,
       };
     })
-    .sort((a, b) => b.cleanRate - a.cleanRate || a.meanEditRatio - b.meanEditRatio);
+    // Distance from the minimum, not the smallest number: 0.4x and 2.5x are both
+    // wrong, and ordering by the raw ratio puts the run that skipped most of the
+    // work at the top of the table.
+    .sort(
+      (a, b) =>
+        b.cleanRate - a.cleanRate ||
+        Math.abs(a.meanEditRatio - 1) - Math.abs(b.meanEditRatio - 1),
+    );
 }
 
 /**
@@ -307,11 +322,20 @@ export const DEMO_CASE: EvalCase = {
   pkg: 'zod',
   toVersion: '4.4.3',
   repo: { kind: 'demo' },
-  // `ZodError.errors` -> `.issues`, which the deterministic planner resolves, and
-  // the `z.record` arity change, which it cannot. Anything beyond these two is
-  // the model editing what the upgrade did not require.
-  minimalEdits: 2,
-  mustResolve: ['ZodError.errors', 'record'],
+  // Five: `ZodError.errors` -> `.issues` and the `z.record` arity change, which
+  // are the compile errors, plus the three deprecations — `z.string().uuid()`
+  // becomes `z.uuid()`, `.email()` becomes `z.email()`, `.datetime()` becomes
+  // `z.iso.datetime()`.
+  //
+  // This said two until a live run showed why that was wrong. Two was
+  // `llm-harness.md`'s standard, where fixing a deprecation counted as editing
+  // what the upgrade did not require. #2 established the opposite: a migration
+  // that reports "X is deprecated", titles its commit after X and ships without
+  // removing X has not done what it said. Under that standard the deprecations
+  // are required, and a case that scores their absence as ideal would train the
+  // agent to skip them.
+  minimalEdits: 5,
+  mustResolve: ['ZodError.errors', 'record', 'ZodString.uuid', 'ZodString.email', 'ZodString.datetime'],
 };
 
 /** Put a case's repository on disk, ready to migrate. */

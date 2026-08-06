@@ -303,7 +303,10 @@ async function reviewMigration(
   extraFiles: string[],
   candidateSymbols: string[],
   progress: (message: string) => void,
-): Promise<VerificationReport | null> {
+  // The kept edit count travels back with the report. Without it the review's
+  // work is invisible to `appliedEdits`, and a migration that landed five edits
+  // reports two — which is exactly what the first eval sweep measured.
+): Promise<{ report: VerificationReport; applied: number } | null> {
   // Measured before the model is asked. A migration can report "X is deprecated"
   // and ship without removing one use of X — that happened, on a pull request
   // titled "migrate `Cell`" that removed no use of `Cell` — and no phase of
@@ -339,7 +342,7 @@ async function reviewMigration(
   const report = compare(baseline, await runPhase(ws.dir, phaseOpts));
   if (verificationPassed(report.outcome)) {
     progress(`  review kept: ${applied.applied.length} edit(s), still ${report.outcome}`);
-    return report;
+    return { report, applied: applied.applied.length };
   }
 
   // The review broke it. The migration was already good; discard the opinion.
@@ -886,7 +889,10 @@ export async function fixPackage(
           config, ws, phaseOpts, baseline, agentFinding, findings,
           extraFiles, candidates, progress,
         );
-        if (reviewed) verification = reviewed;
+        if (reviewed) {
+          verification = reviewed.report;
+          appliedCount += reviewed.applied;
+        }
       }
     }
 
