@@ -118,11 +118,60 @@ pre-existing failures blamed on the migration. Emend distinguishes
 | `emend scan <repo>` | Find API changes that intersect your code |
 | `emend fix <repo>` | Plan, apply, and verify migrations |
 | `emend pr <repo> --finding <id>` | Render the pull request (dry run by default) |
+| `emend pins <repo>` | Repair drifted version pins — no model involved |
+| `emend eval` | Measure the agent against a corpus |
 | `emend serve` | Local dashboard |
 | `emend models` | List models your LLM provider serves |
 
 Useful flags: `--only pkg,pkg`, `--all`, `--json`, `--no-dev` (scan);
-`--finding <id>`, `--agent`, `--keep` (fix); `--create` (pr).
+`--finding <id>`, `--agent`, `--keep` (fix); `--create` (pr);
+`--model a,b`, `--repeat n`, `--cases <file>` (eval).
+
+---
+
+## Versions your repo writes down twice
+
+A dependency version lives in the lockfile, where the package manager keeps it
+honest. The same version copied into a Dockerfile tag, an `.nvmrc` or a CI matrix
+is a copy, and nothing keeps a copy honest.
+
+```
+$ emend pins ./my-service
+
+  drift      node → 22 (the declared engines.node)
+    → Dockerfile:1  node:18-alpine
+    → .github/workflows/ci.yml:6  node-version: '22'
+
+  VERIFIED  2 edit(s) applied of 1 repairable conflict(s)
+```
+
+Two authorities and no others. For a package you install, the resolved version is
+the fact and the tag is the stale copy. For node, `engines` is your own statement
+of intent. Three files declaring three versions with nothing to arbitrate are
+reported as disagreeing and **not** repaired — picking a winner would be guessing,
+and that decision is yours.
+
+---
+
+## Measuring the agent
+
+Prompt changes are cheap to make and hard to judge. `emend eval` runs a corpus of
+real migrations and scores them:
+
+```
+$ emend eval --model z-ai/glm-5.2,qwen/qwen3-coder --repeat 3
+
+| Model | Cases | Runs | Pass | Clean | Edit ratio | Withheld | ... |
+```
+
+**`Pass` and `Clean` are deliberately different columns.** A green build says the
+migration compiles and the tests pass. It says nothing about whether the model
+changed things nobody asked about, bought the green with `any`, or shipped a
+commit titled *"migrate `Cell`"* without removing a single use of `Cell`. Every
+failure this project has actually hit lived in that gap.
+
+Migrations vary between runs, so `--repeat` is how you tell a real change from
+noise.
 
 ---
 
