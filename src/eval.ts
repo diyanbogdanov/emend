@@ -152,6 +152,14 @@ export interface ModelSummary {
   meanEditRatio: number;
   totalTypeEscapes: number;
   totalDeprecationGaps: number;
+  /**
+   * Edits the gate withheld across the sweep.
+   *
+   * Without this, a model that proposed six edits and applied two scores exactly
+   * like one that proposed two — and the gate's own effect, which is the reason
+   * it exists, is invisible in the only place it would ever be judged.
+   */
+  totalEditsWithheld: number;
   totalDurationMs: number;
 }
 
@@ -169,7 +177,7 @@ const mean = (values: number[]): number =>
 export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSummary[] {
   const byCase = new Map(cases.map((c) => [c.id, c]));
   const byModel = new Map<string, CaseScore[]>();
-  const meta = new Map<string, { escapes: number; gaps: number; ms: number }>();
+  const meta = new Map<string, { escapes: number; gaps: number; ms: number; withheld: number }>();
 
   for (const outcome of outcomes) {
     const evalCase = byCase.get(outcome.caseId);
@@ -178,8 +186,9 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
     scores.push(scoreCase(evalCase, outcome));
     byModel.set(outcome.model, scores);
 
-    const m = meta.get(outcome.model) ?? { escapes: 0, gaps: 0, ms: 0 };
+    const m = meta.get(outcome.model) ?? { escapes: 0, gaps: 0, ms: 0, withheld: 0 };
     m.escapes += outcome.typeEscapes;
+    m.withheld += outcome.editsWithheld;
     m.gaps += outcome.deprecationGaps;
     m.ms += outcome.durationMs;
     meta.set(outcome.model, m);
@@ -187,7 +196,7 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
 
   return [...byModel.entries()]
     .map(([model, scores]) => {
-      const m = meta.get(model) ?? { escapes: 0, gaps: 0, ms: 0 };
+      const m = meta.get(model) ?? { escapes: 0, gaps: 0, ms: 0, withheld: 0 };
       const failed = scores.filter((s) => !s.passed);
       return {
         model,
@@ -201,6 +210,7 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
         meanEditRatio: mean(scores.filter((s) => s.passed).map((s) => s.editRatio)),
         totalTypeEscapes: m.escapes,
         totalDeprecationGaps: m.gaps,
+        totalEditsWithheld: m.withheld,
         totalDurationMs: m.ms,
       };
     })
@@ -339,14 +349,14 @@ export async function materialiseCase(evalCase: EvalCase): Promise<string> {
 export function renderSummary(rows: ModelSummary[]): string {
   if (rows.length === 0) return 'No results.';
   const lines = [
-    '| Model | Cases | Pass | Clean | Edit ratio | Err. reduced (failed) | Escapes | Depr. gaps |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| Model | Cases | Pass | Clean | Edit ratio | Withheld | Err. reduced (failed) | Escapes | Depr. gaps |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
   ];
   const pct = (n: number): string => `${Math.round(n * 100)}%`;
   for (const r of rows) {
     lines.push(
       `| \`${r.model}\` | ${r.casesRun}/${r.casesTotal} | ${pct(r.passRate)} | ${pct(r.cleanRate)} | ` +
-        `${r.meanEditRatio.toFixed(1)}x | ${pct(r.meanErrorReduction)} | ${r.totalTypeEscapes} | ${r.totalDeprecationGaps} |`,
+        `${r.meanEditRatio.toFixed(1)}x | ${r.totalEditsWithheld} | ${pct(r.meanErrorReduction)} | ${r.totalTypeEscapes} | ${r.totalDeprecationGaps} |`,
     );
   }
   return lines.join('\n');

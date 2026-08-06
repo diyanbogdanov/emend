@@ -125,6 +125,22 @@ test('models are compared on clean rate, not just pass rate', () => {
   assert.equal(padder?.cleanRate, 0);
 });
 
+test('withheld edits are reported, because they are how the gate is judged', () => {
+  // A model that proposes six edits and applies two after the gate withholds
+  // four scores the same edit ratio as one that proposed two. Those are very
+  // different models, and without this column the gate's own effect is invisible
+  // — which is the claim it exists to support.
+  const rows = summarise(
+    [zodCase],
+    [
+      outcome({ model: 'restrained', editsApplied: 2, editsWithheld: 0 }),
+      outcome({ model: 'gated', editsApplied: 2, editsWithheld: 4 }),
+    ],
+  );
+  assert.equal(rows.find((r) => r.model === 'restrained')?.totalEditsWithheld, 0);
+  assert.equal(rows.find((r) => r.model === 'gated')?.totalEditsWithheld, 4);
+});
+
 test('a model that was never run on a case is not silently scored as failing', () => {
   // Otherwise a cheap partial run makes a model look worse than one that was
   // given the full corpus, and the comparison is meaningless.
