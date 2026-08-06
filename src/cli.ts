@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
-import { fixFinding, fixPackage } from './fix.ts';
+import { fixFinding, fixPackage, fixPins } from './fix.ts';
 import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
 import { startServer } from './server.ts';
@@ -488,6 +488,78 @@ async function exists(p: string): Promise<boolean> {
 }
 
 /**
+ * Bring drifted version pins back in line.
+ *
+ * Separate from `fix` because the unit of work is different: a pin conflict
+ * belongs to the repository rather than to any package upgrade, and needs no
+ * stored finding to act on — the lockfile and the files that copied out of it
+ * are all the evidence there is.
+ */
+async function cmdPins(args: Args): Promise<number> {
+  const repoDir = path.resolve(args.positional[0] ?? '.');
+  const result = await fixPins(repoDir, {
+    keepWorkspace: args.flags.get('keep') === true,
+    onProgress: (m) => console.log(c.dim(`  ${m}`)),
+  });
+
+  console.log('');
+  if (result.conflicts.length === 0) {
+    console.log(c.green('  Every version pin agrees with what the repository installs.'));
+    console.log('');
+    return 0;
+  }
+
+  for (const conflict of result.conflicts) {
+    console.log(
+      conflict.expected
+        ? `  ${c.yellow('drift')}      ${conflict.subject} → ${conflict.expected} (${conflict.authority})`
+        : `  ${c.yellow('conflict')}   ${conflict.subject} — nothing declares the intended version, so this one needs a human`,
+    );
+    for (const pin of conflict.pins) {
+      console.log(c.dim(`    → ${pin.file}:${pin.line}  ${pin.text}`));
+    }
+  }
+
+  const v = result.verification;
+  console.log('');
+
+  // A repair that changed nothing is not a success, however green the build is.
+  // Verification only ever says "this change broke nothing", and an empty change
+  // breaks nothing by construction — so reporting VERIFIED here would be a badge
+  // for having done no work.
+  if (result.repairable > 0 && result.appliedEdits === 0) {
+    console.log(`  ${c.red('NOT REPAIRED')}  ${result.repairable} conflict(s) could be fixed and none were`);
+    for (const failure of result.failedEdits) {
+      console.log(c.dim(`    ${failure.file}: ${failure.reason}`));
+    }
+    if (result.failedEdits.some((f) => /cannot read/i.test(f.reason))) {
+      console.log('');
+      console.log(
+        c.dim('    Emend migrates inside a git worktree, which contains committed files only.'),
+      );
+      console.log(c.dim('    Commit these files first, then run again.'));
+    }
+    console.log('');
+    return 1;
+  }
+
+  console.log(
+    `  ${verificationPassed(v.outcome) ? c.green(v.outcome.toUpperCase()) : c.red(v.outcome.toUpperCase())}` +
+      `  ${result.appliedEdits} edit(s) applied of ${result.repairable} repairable conflict(s)`,
+  );
+  console.log(c.dim(`  ${v.summary}`));
+  for (const failure of result.failedEdits) {
+    console.log(c.yellow(`  not applied — ${failure.file}: ${failure.reason}`));
+  }
+  if (result.diff) {
+    console.log('');
+    console.log(result.diff.split('\n').map((l) => `    ${l}`).join('\n'));
+  }
+  console.log('');
+  return verificationPassed(v.outcome) ? 0 : 1;
+}
+
+/**
  * Measure the agent against a corpus, so changing it is a decision.
  *
  * Each case costs a full install, migration and verification, so the corpus is
@@ -637,6 +709,11 @@ ${c.bold('COMMANDS')}
 
   demo [dir]      Scaffold a demo repository with real dependency drift.
 
+  pins <repo>     Bring drifted version pins back in line — Dockerfile tags,
+                  .nvmrc, engines and CI node versions — and verify the build.
+                  Deterministic: no model is involved.
+    --keep          Leave the workspace on disk for inspection.
+
   eval            Measure the agent against a corpus. Reports pass rate, clean
                   rate, edit ratio and error reduction per model, so an agent
                   change is a decision rather than a hope.
@@ -688,6 +765,9 @@ async function main(): Promise<void> {
         break;
       case 'eval':
         process.exitCode = await cmdEval(args);
+        break;
+      case 'pins':
+        process.exitCode = await cmdPins(args);
         break;
       default:
         usage();

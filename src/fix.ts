@@ -17,6 +17,8 @@ import { extractSurface } from './surface.ts';
 import { diffSurfaces } from './diff.ts';
 import { planFinding } from './plan.ts';
 import { findWorkspaces } from './workspaces.ts';
+import { readRepo } from './inventory.ts';
+import { scanPins, resolvedVersions, planPinRepair } from './pins.ts';
 import {
   prepareWorkspace,
   applyEdits,
@@ -49,6 +51,7 @@ import type {
   CommandResult,
   Finding,
   MigrationPlan,
+  PinConflict,
   SurfaceChange,
   VerificationReport,
 } from './types.ts';
@@ -914,6 +917,89 @@ export async function fixPackage(
       ...(agentRecord ? { agent: agentRecord } : {}),
     };
 
+    if (!options.keepWorkspace) {
+      await ws.cleanup();
+      result.workspaceDir = null;
+    }
+    return result;
+  } catch (err) {
+    if (ws && !options.keepWorkspace) await ws.cleanup().catch(() => {});
+    throw err;
+  }
+}
+
+export interface PinFixResult {
+  conflicts: PinConflict[];
+  /** Conflicts with an authority, which are the only ones that can be repaired. */
+  repairable: number;
+  verification: VerificationReport;
+  diff: string;
+  appliedEdits: number;
+  failedEdits: Array<{ file: string; reason: string }>;
+  workspaceDir: string | null;
+  workspaceMode: string | null;
+}
+
+/**
+ * Bring drifted version pins back in line, and prove the build still works.
+ *
+ * Its own pipeline rather than a step inside `fixPackage`, because the unit of
+ * work is different: a pin conflict belongs to the repository, not to any
+ * package upgrade, and there is no dependency bump involved. What it shares is
+ * the part that matters — an isolated worktree, a baseline taken before any
+ * edit, and a verdict that distinguishes a repository this change broke from one
+ * that was already red.
+ *
+ * No model is involved at any point.
+ */
+export async function fixPins(
+  repoDir: string,
+  options: FixOptions = {},
+): Promise<PinFixResult> {
+  const progress = options.onProgress ?? (() => {});
+  const untrusted = options.untrusted === true;
+  const phaseOpts = { skipTests: untrusted };
+
+  const repo = await readRepo(repoDir);
+  const conflicts = await scanPins(resolvedVersions(repo.dependencies), async (file) => {
+    try {
+      return await readFile(path.join(repoDir, file), 'utf8');
+    } catch {
+      return null;
+    }
+  });
+
+  const edits = conflicts.flatMap((c) => planPinRepair(c));
+  const repairable = conflicts.filter((c) => c.expected !== null).length;
+  progress(`${conflicts.length} pin conflict(s), ${repairable} with an authority to repair against`);
+
+  let ws: Workspace | null = null;
+  try {
+    ws = await prepareWorkspace(repoDir);
+    progress(`  workspace: ${ws.dir} (${ws.mode})`);
+
+    progress('running baseline verification (before any change)');
+    const baseline = await runPhase(ws.dir, phaseOpts);
+
+    const applied = await applyTextEdits(
+      ws.dir,
+      edits.map((e) => ({ file: e.file, find: e.find, replace: e.replace, reason: e.reason })),
+    );
+    progress(`applied ${applied.applied.length} pin edit(s), ${applied.failed.length} rejected`);
+
+    const verification = compare(baseline, await runPhase(ws.dir, phaseOpts));
+    progress(`  ${verification.outcome}`);
+
+    const result: PinFixResult = {
+      conflicts,
+      repairable,
+      verification,
+      diff: await workspaceDiff(ws),
+      appliedEdits: applied.applied.length,
+      failedEdits: applied.failed.map((f) => ({ file: f.edit.file, reason: f.reason })),
+      workspaceDir: ws.dir,
+      workspaceMode: ws.mode,
+    };
     if (!options.keepWorkspace) {
       await ws.cleanup();
       result.workspaceDir = null;
