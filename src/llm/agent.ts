@@ -163,6 +163,7 @@ Rules you must follow:
 1. Output ONLY a JSON object. No prose, no markdown fences.
 2. Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.
 3. Change only what the API changes require. Do not reformat, rename variables, add comments, or refactor.
+   The deprecations listed above ARE required. A deprecated symbol never produces a compiler error, so nothing downstream will object if you leave it — and a migration that reports "X is deprecated" and ships with X still in the code has not done what it said. Replace each one with its current equivalent from the available-symbols list. If a deprecation genuinely has no replacement there, leave it and say so in "rationale".
 4. Only use symbols that appear in the provided list of available symbols. Never invent an API.
 5. If you cannot determine a correct edit, return an empty "edits" array and explain why in "rationale". An empty result is far better than a wrong one.
 6. When compiler output from a failed attempt is provided, it is the authoritative statement of what is still broken. Fix the errors it reports. Do not edit call sites it does not complain about, however plausible the change looks.
@@ -304,7 +305,7 @@ export function buildUserPrompt(ctx: AgentContext): string {
     parts.push(ctx.failureOutput.slice(0, 40_000));
     parts.push('```');
     parts.push(
-      'Fix exactly what this output reports. Do not edit call sites it does not name, however plausible the change looks.',
+      'Fix exactly what this output reports, plus the deprecations listed above — those never appear here, because deprecated code compiles. Do not edit anything else, however plausible the change looks.',
     );
     parts.push('');
   }

@@ -327,6 +327,28 @@ test('the six-edit over-edit is reduced to the two edits the compiler asked for'
 // The narrowing rule belongs to every prompt that can hit a union
 // ---------------------------------------------------------------------------
 
+test('the migration prompt says a listed deprecation is in scope', () => {
+  // Measured across twelve runs: the dominant failure is not over-editing but
+  // under-editing — deprecations reported in the finding list and left in the
+  // code. Two rules cause it. Rule 3 says change only what the API changes
+  // require, and the failure section says not to edit call sites the compiler
+  // does not name. A deprecation never appears in compiler output, so both read
+  // as "leave it".
+  //
+  // The review pass exists to catch this afterwards and sometimes reverts. The
+  // cheaper fix is to stop asking for the wrong thing in the first place.
+  assert.match(MIGRATION_SYSTEM_PROMPT, /deprecat/i);
+  // And the failure section must not contradict it.
+  const prompt = buildUserPrompt({
+    finding: FINDING,
+    changes: CHANGES,
+    sources: SOURCES,
+    candidateSymbols: [],
+    failureOutput: FAILURE,
+  });
+  assert.match(prompt, /deprecat/i, 'the failure section must carve out the deprecations it lists');
+});
+
 test('the migration prompt carries the same narrowing rule as tightening', () => {
   // #1 disclosed this as a known gap: the narrowing rules lived only in the
   // tightening prompt, so a migration that had to handle a union wrote
