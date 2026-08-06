@@ -12,6 +12,38 @@ function sym(path: string, signature: string, extra: Partial<ApiSymbol> = {}): A
   return { path, kind: 'function', signature, deprecated: false, optional: false, ...extra };
 }
 
+test('a deprecation carries the guidance its declaration gives', () => {
+  // recharts 3 deprecates `Cell` and says what to do instead, in the declaration
+  // itself: "use the `shape` prop or `content` prop". There is no replacement
+  // *symbol*, so the candidate list cannot express the migration and the model
+  // correctly reports that none exists — while the answer sits in the `.d.ts`
+  // that Emend already downloaded and parsed.
+  //
+  // The whole wedge is that type declarations are machine-readable and
+  // exhaustive. Reading the `@deprecated` tag as a boolean and discarding the
+  // prose beside it throws away the half that says what to do.
+  const guidance =
+    'Please use the `shape` prop or `content` prop on the respective chart components instead of using `Cell`.';
+  const diff = diffSurfaces(
+    surface('2.15.4', [sym('Cell', 'FunctionComponent<Props>')]),
+    surface('3.10.1', [sym('Cell', 'FunctionComponent<Props>', { deprecated: true, doc: guidance })]),
+  );
+  const change = diff.changes.find((c) => c.path === 'Cell');
+  assert.equal(change?.kind, 'deprecated');
+  assert.equal(change?.guidance, guidance);
+});
+
+test('guidance is only carried for the deprecation that needs it', () => {
+  // Every symbol has documentation and almost none of it is a migration
+  // instruction. Attaching it to unrelated changes would spend the prompt's
+  // budget on prose the model must ignore.
+  const diff = diffSurfaces(
+    surface('1.0.0', [sym('gone', 'string', { doc: 'A perfectly ordinary description.' })]),
+    surface('2.0.0', []),
+  );
+  assert.equal(diff.changes.find((c) => c.path === 'gone')?.guidance, undefined);
+});
+
 function surface(
   version: string,
   symbols: ApiSymbol[],

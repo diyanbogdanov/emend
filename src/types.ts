@@ -29,6 +29,16 @@ export interface ApiSymbol {
   signature: string;
   /** True when the declaration carries an `@deprecated` JSDoc tag. */
   deprecated: boolean;
+  /**
+   * The declaration's own prose, captured only for deprecated symbols.
+   *
+   * A deprecation frequently says what to use instead, and often that
+   * replacement is not another symbol at all — recharts 3 deprecates `Cell` in
+   * favour of a `shape` prop, which no symbol table can express. Reading the
+   * `@deprecated` tag as a boolean and discarding the sentence beside it throws
+   * away the half of the declaration that says what to do.
+   */
+  doc?: string;
   optional: boolean;
 }
 
@@ -79,6 +89,14 @@ export interface SurfaceChange {
   confidence: Confidence;
   before: string | null;
   after: string | null;
+  /**
+   * What the new declaration says to do instead. Deprecations only.
+   *
+   * Carried no further than that on purpose: every symbol has documentation and
+   * almost none of it is a migration instruction, so attaching it to unrelated
+   * changes would spend the prompt's budget on prose the model must ignore.
+   */
+  guidance?: string;
 }
 
 export interface SurfaceDiff {

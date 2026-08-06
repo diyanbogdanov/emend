@@ -151,6 +151,10 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
           confidence: 'high',
           before: before.signature,
           after: after.signature,
+          // What the new declaration says to do instead, when it says anything.
+          // Often the replacement is not a symbol — recharts 3 replaces `Cell`
+          // with a `shape` prop — so this is the only channel that can carry it.
+          ...(after.doc ? { guidance: after.doc } : {}),
         });
         // A symbol can be both newly deprecated and re-signatured; fall through
         // so the signature change is also recorded.

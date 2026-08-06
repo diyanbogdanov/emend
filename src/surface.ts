@@ -155,6 +155,38 @@ function isDeprecated(sym: ts.Symbol, checker: ts.TypeChecker): boolean {
   }
 }
 
+const partsToText = (parts?: ts.SymbolDisplayPart[]): string =>
+  (parts ?? []).map((p) => p.text).join('').trim();
+
+/**
+ * What a deprecated declaration says to do instead.
+ *
+ * Three sources, because library authors use all three. recharts puts the
+ * instruction in the description and the migration guide in `@see`, leaving
+ * `@deprecated` itself bare; other packages put it inline after `@deprecated`.
+ * Taking only one of them misses most of them.
+ *
+ * Called only for symbols already known to be deprecated. Every symbol has
+ * documentation, the surface holds thousands of them, and none of the rest is a
+ * migration instruction.
+ */
+function deprecationGuidance(sym: ts.Symbol, checker: ts.TypeChecker): string | undefined {
+  try {
+    const description = partsToText(sym.getDocumentationComment(checker));
+    const tags = sym.getJsDocTags(checker);
+    const inline = tags
+      .filter((t) => t.name === 'deprecated' || t.name === 'see')
+      .map((t) => partsToText(t.text))
+      .filter(Boolean);
+    const text = [description, ...inline].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    // Bounded: this rides in the prompt beside the signature, and a long
+    // description would crowd out the compiler output that outranks it.
+    return text ? text.slice(0, 600) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * True when a symbol comes from TypeScript's own lib files (Array, Promise,
  * Number, ...). These are JavaScript built-ins, never part of a package's API
@@ -439,11 +471,16 @@ export async function extractSurface(
       signature = 'unresolved';
     }
 
+    const deprecated = isDeprecated(resolved, checker);
+    // Only for deprecations. Every symbol has documentation, a surface holds
+    // thousands of them, and none of the rest is a migration instruction.
+    const guidance = deprecated ? deprecationGuidance(resolved, checker) : undefined;
     symbols[symPath] = {
       path: symPath,
       kind: kindOf(resolved.flags),
       signature: normaliseSignature(signature),
-      deprecated: isDeprecated(resolved, checker),
+      deprecated,
+      ...(guidance ? { doc: guidance } : {}),
       optional: Boolean(resolved.flags & ts.SymbolFlags.Optional),
     };
 

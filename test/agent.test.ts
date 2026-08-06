@@ -327,6 +327,26 @@ test('the six-edit over-edit is reduced to the two edits the compiler asked for'
 // The narrowing rule belongs to every prompt that can hit a union
 // ---------------------------------------------------------------------------
 
+test('the prompt shows the guidance a deprecated declaration gives', () => {
+  // Without it the model is handed a signature and a symbol list, and the
+  // recharts migration is neither — `Cell` becomes a `shape` prop. Every run
+  // declined it for the same stated reason: no replacement in the available
+  // symbols. That reason was correct and the answer was in the declaration.
+  const guidance = 'Please use the `shape` prop or `content` prop instead of using `Cell`.';
+  const prompt = buildUserPrompt({
+    finding: FINDING,
+    changes: [
+      {
+        change: { ...change('Cell', 'deprecated'), guidance },
+        sites: [site(3, '<Cell fill={c} />')],
+      },
+    ],
+    sources: SOURCES,
+    candidateSymbols: [],
+  });
+  assert.ok(prompt.includes(guidance), 'the declaration says what to do; the prompt must repeat it');
+});
+
 test('the migration prompt says a listed deprecation is in scope', () => {
   // Measured across twelve runs: the dominant failure is not over-editing but
   // under-editing — deprecations reported in the finding list and left in the

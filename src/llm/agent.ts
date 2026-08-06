@@ -246,6 +246,10 @@ function describeChange(change: SurfaceChange): string {
   if (change.before) lines.push(`Old type:    ${change.before.slice(0, 1200)}`);
   if (change.after) lines.push(`New type:    ${change.after.slice(0, 1200)}`);
   else lines.push('New type:    (symbol no longer exists)');
+  // The declaration's own instruction, when it gives one. This outranks the
+  // candidate symbol list, because the replacement is frequently not a symbol
+  // at all and no list can express it.
+  if (change.guidance) lines.push(`The library says: ${change.guidance}`);
   return lines.join('\n');
 }
 
