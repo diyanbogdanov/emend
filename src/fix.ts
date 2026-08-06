@@ -756,10 +756,33 @@ export async function fixPackage(
 
         rationale = proposal.rationale;
 
+        // Deprecations that are still present, so the gate below does not
+        // withhold the edits that would resolve them. Recomputed each attempt
+        // against the sources as they stand: once the symbol is gone the finding
+        // is settled and further edits to that line are churn again.
+        const stillDeprecated = new Set(
+          agentChanges
+            .filter(({ change }) => change.kind === 'deprecated')
+            .filter(({ change, sites }) => {
+              const symbol = change.path.split('.').pop() ?? change.path;
+              return sites.some((s) => {
+                const source = sources.get(s.file);
+                return source ? importsSymbolFrom(source, symbol, first.pkg) : false;
+              });
+            })
+            .map(({ change }) => change.path),
+        );
+
         // Withhold edits the current failure does not ask for. Nothing later can
         // do this: an unnecessary edit that compiles and passes the tests is
         // invisible to verification precisely because it is not wrong.
-        const classified = classifyEdits(proposal.edits, agentChanges, bestErrors, sources);
+        const classified = classifyEdits(
+          proposal.edits,
+          agentChanges,
+          bestErrors,
+          sources,
+          stillDeprecated,
+        );
         const { keep, dropped } = selectEvidencedEdits(classified);
         if (dropped.length > 0) {
           progress(`    withheld ${dropped.length} edit(s) no diagnostic asked for`);

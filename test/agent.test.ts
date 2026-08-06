@@ -166,6 +166,50 @@ test('unrequested edits are dropped when evidenced edits exist alongside them', 
   assert.equal(dropped.length, 2);
 });
 
+test('an edit removing a still-imported deprecated symbol is not withheld', () => {
+  // The recharts case from PR #2: Emend reported `Cell` as deprecated, titled a
+  // commit "migrate `Cell`", and shipped without removing a single use of it.
+  // Nothing objected, because deprecated code compiles and its tests pass.
+  //
+  // A diagnostic-only gate would make that permanent: there is never a compiler
+  // error on a deprecated call, so the edit that resolves the finding looks
+  // exactly like the churn this gate exists to withhold. Still being imported is
+  // the evidence that distinguishes them, and it is measured, not asked for.
+  const source = [
+    "import { BarChart, Bar, Cell } from 'recharts';", // 1
+    '', // 2
+    'export const chart = <BarChart data={d}><Bar /><Cell fill="#000" /></BarChart>;', // 3
+  ].join('\n');
+  const changes = [
+    {
+      change: change('Cell', 'deprecated'),
+      sites: [{ file: 'src/chart.tsx', line: 3, column: 48, text: '<Cell fill="#000" />', via: 'import' as const }],
+    },
+  ];
+  const classified = classifyEdits(
+    [{ file: 'src/chart.tsx', find: '<Cell fill="#000" />', replace: '', reason: 'test' }],
+    changes,
+    'src/chart.tsx(1,10): error TS2305: Module has no exported member.',
+    new Map([['src/chart.tsx', source]]),
+    new Set(['Cell']),
+  );
+  assert.equal(classified[0]?.evidence, 'evidenced');
+});
+
+test('a deprecation the migration already resolved stops evidencing further edits', () => {
+  // Once the symbol is gone the finding is settled, so a later attempt editing
+  // that same line is churn again. The set is recomputed from the files as they
+  // stand, so this follows automatically rather than needing its own rule.
+  const classified = classifyEdits(
+    [edit('.uuid()', ".uuid({ message: 'Invalid UUID' })")],
+    CHANGES,
+    FAILURE,
+    SOURCES,
+    new Set(), // nothing outstanding
+  );
+  assert.equal(classified[0]?.evidence, 'unrequested');
+});
+
 test('nothing is withheld when the failure carries no diagnostics at all', () => {
   // A failing test suite reports no `file(line,col): error`, so there is no
   // positive evidence for any location. An edit elsewhere in the file would then

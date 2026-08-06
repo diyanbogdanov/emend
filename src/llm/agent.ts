@@ -659,9 +659,17 @@ export function classifyEdits(
   changes: Array<{ change: SurfaceChange; sites: CallSite[] }>,
   failureOutput: string,
   sources: Map<string, string>,
+  /**
+   * Paths of deprecation findings the migration has not resolved yet, measured
+   * from the files as they currently stand.
+   *
+   * A deprecated call never produces a compiler error, so a diagnostic-only rule
+   * cannot tell the edit that *resolves* the finding from the churn that merely
+   * disturbs it. Whether the symbol is still there can.
+   */
+  unresolvedDeprecations: ReadonlySet<string> = new Set(),
 ): EditClassification[] {
   const diagnostics = parseDiagnostics(failureOutput);
-  const sites = changes.flatMap((c) => c.sites);
 
   // A failing test suite reports no `file(line,col): error` anywhere, so there
   // is no positive evidence for any location. Without that, an edit merely
@@ -696,14 +704,26 @@ export function classifyEdits(
       };
     }
 
-    const quiet = sites.find(
-      (s) => sameFile(s.file, edit.file) && s.line >= span.start && s.line <= span.end,
+    // Which change owns this line, not merely whether some change does: a
+    // deprecation that is still outstanding evidences its own repair, and only
+    // the owning change can say whether that is the case.
+    const owner = changes.find((c) =>
+      c.sites.some(
+        (s) => sameFile(s.file, edit.file) && s.line >= span.start && s.line <= span.end,
+      ),
     );
-    if (quiet) {
+    if (owner) {
+      if (unresolvedDeprecations.has(owner.change.path)) {
+        return {
+          edit,
+          evidence: 'evidenced',
+          reason: `${owner.change.path} is deprecated and still present here`,
+        };
+      }
       return {
         edit,
         evidence: 'unrequested',
-        reason: `${edit.file}:${quiet.line} is a known call site and no diagnostic reports it`,
+        reason: `${edit.file} line ${span.start} is a known call site with nothing outstanding on it`,
       };
     }
 
