@@ -204,6 +204,26 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
       lines.push(`| ${a.attempt} | ${a.outcome}${a.error ? ` — ${a.error.slice(0, 100)}` : ''} | ${a.modelConfidence} |`);
     }
     lines.push('');
+
+    // Edits the model wanted that no diagnostic asked for. Withheld rather than
+    // applied, and named rather than hidden: they are usually valid code, which
+    // is exactly why verification cannot be what catches them, and why a
+    // reviewer should know they were proposed.
+    const withheld = result.agent.attempts.flatMap((a) => a.droppedEdits ?? []);
+    if (withheld.length > 0) {
+      lines.push(
+        `<details><summary>${withheld.length} edit(s) withheld as not required by this upgrade</summary>`,
+      );
+      lines.push('');
+      for (const w of withheld) {
+        lines.push(`- \`${w.edit.file}\` — ${w.reason}`);
+        lines.push(`  - proposed: \`${w.edit.find.replace(/\n/g, ' ').slice(0, 120)}\``);
+      }
+      lines.push('');
+      lines.push('</details>');
+      lines.push('');
+    }
+
     lines.push(`Edits applied: **${result.appliedEdits}**.`);
   } else if (result.appliedEdits === 0 && verification && verification.outcome !== 'regression') {
     // The bump alone satisfied the type checker. Saying "this needs a human"

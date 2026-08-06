@@ -55,11 +55,27 @@ export interface AgentContext {
   sources: Map<string, string>;
   /** Symbols available in the target version, to ground replacements in reality. */
   candidateSymbols: string[];
-  /** Verification output from the previous failed attempt, if any. */
-  previousAttempt?: {
+  /**
+   * Compiler and test output as it stands right now — the authority on what is
+   * still broken.
+   *
+   * Separate from the attempt history because it exists before the model has
+   * tried anything: the deterministic phase has already run and left the build
+   * red. Passing it as a zero-edit "previous attempt" reads as "you tried
+   * nothing and it did not work" the moment real attempts accumulate.
+   */
+  failureOutput?: string;
+  /**
+   * Every failed attempt so far, oldest first.
+   *
+   * Carrying only the most recent one lets attempt 3 re-propose what attempt 1
+   * already tried, because it cannot see that it did. A bounded retry budget is
+   * then spent oscillating between two wrong fixes rather than reaching a third.
+   */
+  previousAttempts?: Array<{
     edits: TextEdit[];
     errors: string;
-  };
+  }>;
 }
 
 /**
@@ -165,7 +181,7 @@ function describeSites(sites: CallSite[]): string {
     .join('\n');
 }
 
-function buildUserPrompt(ctx: AgentContext): string {
+export function buildUserPrompt(ctx: AgentContext): string {
   const { finding } = ctx;
   const parts: string[] = [];
 
@@ -206,21 +222,38 @@ function buildUserPrompt(ctx: AgentContext): string {
     parts.push('');
   }
 
-  if (ctx.previousAttempt) {
-    parts.push('# Your previous attempt FAILED verification');
-    parts.push('These edits were applied:');
-    parts.push('```json');
-    parts.push(JSON.stringify(ctx.previousAttempt.edits, null, 2));
+  if (ctx.failureOutput?.trim()) {
+    parts.push('# Currently broken — the authority on what to fix');
     parts.push('```');
-    parts.push('The compiler/test output was:');
-    parts.push('```');
-        // The compiler output is the most reliable thing in this prompt: it states
+    // The compiler output is the most reliable thing in this prompt: it states
     // exactly what is still wrong, in a form that cannot be misremembered.
     // Truncating it hides failures the model is then blamed for not fixing.
-    parts.push(ctx.previousAttempt.errors.slice(0, 40_000));
+    parts.push(ctx.failureOutput.slice(0, 40_000));
     parts.push('```');
     parts.push(
-      'Correct the edits. Note the source shown above is the ORIGINAL, unmodified file — your new edits apply to that, not to your previous attempt.',
+      'Fix exactly what this output reports. Do not edit call sites it does not name, however plausible the change looks.',
+    );
+    parts.push('');
+  }
+
+  const attempts = ctx.previousAttempts ?? [];
+  if (attempts.length > 0) {
+    parts.push(`# Your previous attempts FAILED verification (${attempts.length})`);
+    // Every attempt's edits are listed, because those are what must not be
+    // repeated. Their error output is not: it is superseded by the current
+    // failure above, and reproducing each one would spend the context that
+    // output needs.
+    attempts.forEach(({ edits, errors }, i) => {
+      parts.push(`## Attempt ${i + 1} — rejected, do not propose these again`);
+      parts.push('```json');
+      parts.push(JSON.stringify(edits, null, 2));
+      parts.push('```');
+      // A short outcome, not the full output: what is broken now is stated once,
+      // above, and repeating a superseded copy per attempt would crowd it out.
+      if (errors.trim()) parts.push(`Outcome: ${errors.slice(0, 500)}`);
+    });
+    parts.push(
+      'Propose a DIFFERENT fix. Repeating an edit listed above will fail the same way. Note the source shown above is the ORIGINAL, unmodified file — your new edits apply to that, not to any previous attempt.',
     );
     parts.push('');
   }
@@ -371,12 +404,23 @@ export function nearbySymbols(
   const parent = dot === -1 ? '' : changedPath.slice(0, dot);
   const leaf = (dot === -1 ? changedPath : changedPath.slice(dot + 1)).toLowerCase();
 
+  const leafOf = (p: string): string => {
+    const i = p.lastIndexOf('.');
+    return (i === -1 ? p : p.slice(i + 1)).toLowerCase();
+  };
+
+  // Same-container siblings, *plus* any symbol elsewhere carrying the same leaf
+  // name. Restricting to siblings makes a relocated helper — `record` becoming
+  // `core.record` — impossible to offer, because the filter runs before the
+  // ranking below ever sees it. The model is told to use nothing outside this
+  // list, so a migration that moves a symbol between containers could not be
+  // expressed at all.
   const out: string[] = [];
   for (const s of Object.values(toSymbols)) {
     if (s.deprecated) continue;
     const sDot = s.path.lastIndexOf('.');
     const sParent = sDot === -1 ? '' : s.path.slice(0, sDot);
-    if (sParent === parent) out.push(s.path);
+    if (sParent === parent || leafOf(s.path) === leaf) out.push(s.path);
   }
 
   // Rank by name similarity to the symbol that broke, not alphabetically.
@@ -388,15 +432,179 @@ export function nearbySymbols(
   // symbol that would have fixed the build, and spent three attempts failing.
   const score = (candidatePath: string): number => {
     const cDot = candidatePath.lastIndexOf('.');
-    const name = (cDot === -1 ? candidatePath : candidatePath.slice(cDot + 1)).toLowerCase();
-    if (name === leaf) return 0;
-    if (name.includes(leaf)) return 1; // record -> partialRecord, looseRecord
-    if (leaf.includes(name)) return 2;
-    return 3;
+    const cParent = cDot === -1 ? '' : candidatePath.slice(0, cDot);
+    const name = leafOf(candidatePath);
+    const sibling = cParent === parent;
+    if (name === leaf) return sibling ? 0 : 1; // same name, here or relocated
+    if (name.includes(leaf)) return 2; // record -> partialRecord, looseRecord
+    if (leaf.includes(name)) return 3;
+    return 4;
   };
 
   return out.sort((a, b) => {
     const diff = score(a) - score(b);
     return diff !== 0 ? diff : a.localeCompare(b);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Evidence: deciding which proposed edits the upgrade actually asked for.
+// ---------------------------------------------------------------------------
+
+/** A compiler or test diagnostic, reduced to the location it points at. */
+export interface Diagnostic {
+  file: string;
+  line: number;
+}
+
+/** `src/schema.ts(28,15): error TS2554: ...` — tsc's own format. */
+const TSC_DIAGNOSTIC = /^\s*(\S+?)\((\d+),(\d+)\):\s*error\b/gm;
+/** `src/schema.ts:28:15: error ...` — most other tools. */
+const COLON_DIAGNOSTIC = /^\s*(\S+?):(\d+):(\d+):\s*error\b/gm;
+
+/**
+ * Where the failure points, not how much of it there is.
+ *
+ * `failureSize` in fix.ts already counts errors to drive keep-or-rollback. This
+ * is the other half: a count cannot say whether a proposed edit lands somewhere
+ * the compiler actually complained about, and that is the only question the
+ * evidence gate below can be answered with.
+ */
+export function parseDiagnostics(output: string): Diagnostic[] {
+  const seen = new Set<string>();
+  const out: Diagnostic[] = [];
+  for (const pattern of [TSC_DIAGNOSTIC, COLON_DIAGNOSTIC]) {
+    pattern.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = pattern.exec(output)) !== null) {
+      const [, file, rawLine, rawColumn] = m;
+      const line = Number(rawLine);
+      if (!file || !Number.isFinite(line)) continue;
+      const key = `${file}:${line}:${rawColumn}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ file, line });
+    }
+  }
+  return out;
+}
+
+export type EditEvidence = 'evidenced' | 'unrequested';
+
+export interface EditClassification {
+  edit: TextEdit;
+  evidence: EditEvidence;
+  reason: string;
+}
+
+/** Tolerate the same file being named relative to different roots. */
+function sameFile(a: string, b: string): boolean {
+  const an = a.replace(/\\/g, '/');
+  const bn = b.replace(/\\/g, '/');
+  return an === bn || an.endsWith(`/${bn}`) || bn.endsWith(`/${an}`);
+}
+
+/** 1-indexed line span of `find` inside `content`, or null when absent. */
+function spanOf(content: string, find: string): { start: number; end: number } | null {
+  const index = content.indexOf(find);
+  if (index === -1) return null;
+  const start = content.slice(0, index).split('\n').length;
+  return { start, end: start + find.split('\n').length - 1 };
+}
+
+/**
+ * Split proposed edits into those the current failure supports and those it does not.
+ *
+ * The failure mode this exists for is measured, not hypothetical: asked to fix a
+ * `z.record` arity break, models also rewrote `.uuid()` and `.email()` at the
+ * call sites of *deprecation* findings — extra edits that compile, pass every
+ * test, and silently change runtime error messages nobody asked to touch. No
+ * later stage can catch that, because the edits are correct; they are merely
+ * unnecessary. Rule 3 of the system prompt asks for restraint and the measured
+ * model comparison shows asking is not enough.
+ *
+ * The discriminator is evidence Emend already holds. A diagnostic pointing into
+ * an edit's own span is positive evidence the upgrade requires it. A known call
+ * site with no diagnostic on it is positive evidence the compiler is content
+ * with that line. Anything else — an import rewrite, a Dockerfile the failing
+ * test reads — has no evidence either way and is left alone, because dropping it
+ * would lose real repairs.
+ *
+ * This does not weaken rule 7 (fix errors the change list does not explain): the
+ * authority here is the diagnostic, not the list, so an unexplained error still
+ * evidences its own fix.
+ */
+export function classifyEdits(
+  edits: TextEdit[],
+  changes: Array<{ change: SurfaceChange; sites: CallSite[] }>,
+  failureOutput: string,
+  sources: Map<string, string>,
+): EditClassification[] {
+  const diagnostics = parseDiagnostics(failureOutput);
+  const sites = changes.flatMap((c) => c.sites);
+
+  // A failing test suite reports no `file(line,col): error` anywhere, so there
+  // is no positive evidence for any location. Without that, an edit merely
+  // *away* from a call site would count as evidenced by absence of information —
+  // and one such edit is enough to start withholding real ones. The gate has to
+  // abstain rather than invent a verdict from silence.
+  if (diagnostics.length === 0) {
+    return edits.map((edit) => ({
+      edit,
+      evidence: 'evidenced' as const,
+      reason: 'the failure reports no diagnostic locations to judge against',
+    }));
+  }
+
+  return edits.map((edit): EditClassification => {
+    const content = sources.get(edit.file);
+    const span = content ? spanOf(content, edit.find) : null;
+    if (!span) {
+      // Unlocatable here means the applicator will reject it anyway; let it, so
+      // one place decides and one reason is reported.
+      return { edit, evidence: 'evidenced', reason: 'could not be located to judge' };
+    }
+
+    const pointedAt = diagnostics.some(
+      (d) => sameFile(d.file, edit.file) && d.line >= span.start && d.line <= span.end,
+    );
+    if (pointedAt) {
+      return {
+        edit,
+        evidence: 'evidenced',
+        reason: `a diagnostic points into ${edit.file}:${span.start}`,
+      };
+    }
+
+    const quiet = sites.find(
+      (s) => sameFile(s.file, edit.file) && s.line >= span.start && s.line <= span.end,
+    );
+    if (quiet) {
+      return {
+        edit,
+        evidence: 'unrequested',
+        reason: `${edit.file}:${quiet.line} is a known call site and no diagnostic reports it`,
+      };
+    }
+
+    return { edit, evidence: 'evidenced', reason: 'no call site and no diagnostic here' };
+  });
+}
+
+/**
+ * Keep the edits the failure supports, dropping the rest — unless none are
+ * supported, in which case the model's proposal is all there is and verification
+ * remains the judge. Silently dropping everything would turn a possible repair
+ * into a guaranteed no-op.
+ */
+export function selectEvidencedEdits(classified: EditClassification[]): {
+  keep: TextEdit[];
+  dropped: EditClassification[];
+} {
+  const evidenced = classified.filter((c) => c.evidence === 'evidenced');
+  if (evidenced.length === 0) return { keep: classified.map((c) => c.edit), dropped: [] };
+  return {
+    keep: evidenced.map((c) => c.edit),
+    dropped: classified.filter((c) => c.evidence === 'unrequested'),
+  };
 }

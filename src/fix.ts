@@ -19,7 +19,6 @@ import { planFinding } from './plan.ts';
 import { findWorkspaces } from './workspaces.ts';
 import {
   prepareWorkspace,
-  applyPlan,
   applyEdits,
   applyTextEdits,
   restoreSnapshots,
@@ -29,7 +28,15 @@ import {
 } from './apply.ts';
 import { runPhase, compare, verificationPassed } from './verify.ts';
 import { resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
-import { proposeEdits, proposeTightening, nearbySymbols, type TextEdit } from './llm/agent.ts';
+import {
+  proposeEdits,
+  proposeTightening,
+  nearbySymbols,
+  classifyEdits,
+  selectEvidencedEdits,
+  type TextEdit,
+  type EditClassification,
+} from './llm/agent.ts';
 import type {
   ApiSymbol,
   CallSite,
@@ -72,6 +79,13 @@ export interface AgentAttempt {
   modelConfidence: string;
   outcome: string;
   error?: string;
+  /**
+   * Edits the current failure did not ask for, withheld before applying.
+   *
+   * Recorded rather than discarded: a reviewer is entitled to see what the model
+   * wanted to change beyond what the upgrade required.
+   */
+  droppedEdits?: EditClassification[];
 }
 
 export interface FixResult {
@@ -629,29 +643,37 @@ export async function fixPackage(
       // showing those alongside the restored sources asks the model to fix
       // problems that are not there while hiding the one that is.
       let bestErrors = verificationErrors(verification);
-      let previousAttempt: { edits: TextEdit[]; errors: string } | undefined = {
-        edits: [],
-        errors: verificationErrors(verification),
-      };
+      // The edit sets already tried, so attempt 3 cannot re-propose what attempt
+      // 1 already burned. Deliberately separate from `bestErrors`, which is what
+      // is broken *now*: one slot could not hold both, which is why it had to be
+      // handed the current failure under a heading claiming those edits had been
+      // applied.
+      const previousAttempts: Array<{ edits: TextEdit[]; errors: string }> = [];
 
       for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
         progress(`  attempt ${attempt}/${config.maxRetries}: requesting edits`);
         // Recomputed each attempt: the compiler names different symbols as
         // earlier errors are fixed, so the contract shown should follow it.
-        const errorsNow = previousAttempt?.errors ?? failureOutput;
-        const explaining = await changesNamedInErrors(first, errorsNow);
+        const explaining = await changesNamedInErrors(first, bestErrors);
         const detected = findings.map((f) => ({ change: f.change, sites: f.sites }));
         const known = new Set(detected.map((c) => c.change.path));
+        // Also the basis the evidence gate judges against, so a call site that
+        // only the compiler named counts the same as one the diff found.
+        const agentChanges = [
+          ...detected,
+          ...explaining.filter((c) => !known.has(c.change.path)),
+        ];
 
         const proposal = await proposeEdits(config, {
           // Present the whole upgrade, not one finding — a version bump is
           // atomic and the model must see every break to produce a coherent set
           // of edits.
           finding: first,
-          changes: [...detected, ...explaining.filter((c) => !known.has(c.change.path))],
+          changes: agentChanges,
           sources,
           candidateSymbols: candidates,
-          ...(previousAttempt ? { previousAttempt } : {}),
+          failureOutput: bestErrors,
+          ...(previousAttempts.length > 0 ? { previousAttempts: [...previousAttempts] } : {}),
         });
 
         if (!proposal.ok) {
@@ -666,13 +688,34 @@ export async function fixPackage(
         }
 
         rationale = proposal.rationale;
-        const editResult = await applyTextEdits(ws.dir, proposal.edits);
+
+        // Withhold edits the current failure does not ask for. Nothing later can
+        // do this: an unnecessary edit that compiles and passes the tests is
+        // invisible to verification precisely because it is not wrong.
+        const classified = classifyEdits(proposal.edits, agentChanges, bestErrors, sources);
+        const { keep, dropped } = selectEvidencedEdits(classified);
+        if (dropped.length > 0) {
+          progress(`    withheld ${dropped.length} edit(s) no diagnostic asked for`);
+        }
+
+        const editResult = await applyTextEdits(ws.dir, keep);
         progress(`    ${editResult.applied.length} applied, ${editResult.failed.length} rejected`);
+
+        const record: Omit<AgentAttempt, 'outcome'> = {
+          attempt,
+          edits: keep,
+          rationale: proposal.rationale,
+          modelConfidence: proposal.modelConfidence,
+          ...(dropped.length > 0 ? { droppedEdits: dropped } : {}),
+        };
 
         if (editResult.applied.length === 0) {
           const why = editResult.failed.map((f) => f.reason).join('; ');
-          attempts.push({ attempt, edits: proposal.edits, rationale: proposal.rationale, modelConfidence: proposal.modelConfidence, outcome: 'all-edits-rejected', error: why });
-          previousAttempt = { edits: proposal.edits, errors: `Your edits were rejected: ${why}` };
+          attempts.push({ ...record, outcome: 'all-edits-rejected', error: why });
+          previousAttempts.push({
+            edits: proposal.edits,
+            errors: `every edit was rejected — ${why}`,
+          });
           await restoreSnapshots(ws.dir, editResult.snapshots);
           continue;
         }
@@ -680,7 +723,7 @@ export async function fixPackage(
         post = await runPhase(ws.dir, phaseOpts);
         const report = compare(baseline, post);
         progress(`    verification: ${report.outcome}`);
-        attempts.push({ attempt, edits: proposal.edits, rationale: proposal.rationale, modelConfidence: proposal.modelConfidence, outcome: report.outcome });
+        attempts.push({ ...record, outcome: report.outcome });
 
         appliedCount += editResult.applied.length;
         verification = report;
@@ -694,7 +737,8 @@ export async function fixPackage(
           // the failure and rolled back when they do not, so the loop climbs
           // instead of restarting.
           const size = failureSize(report);
-          if (size < bestFailureSize) {
+          const kept = size < bestFailureSize;
+          if (kept) {
             bestFailureSize = size;
             bestErrors = verificationErrors(report);
             progress(`    kept (${size} error(s) remain, was ${previousSize})`);
@@ -706,8 +750,15 @@ export async function fixPackage(
             appliedCount -= editResult.applied.length;
           }
           previousSize = size;
-          // Always the errors of the state on disk, kept or restored.
-          previousAttempt = { edits: proposal.edits, errors: bestErrors };
+          // The whole proposal is recorded, including edits the gate withheld,
+          // so none of them come back. `bestErrors` already carries what is
+          // broken now; this only needs to say how the attempt ended.
+          previousAttempts.push({
+            edits: proposal.edits,
+            errors: kept
+              ? `kept — ${size} error(s) still remained`
+              : `rolled back — ${size} error(s), no improvement`,
+          });
         }
       }
 
