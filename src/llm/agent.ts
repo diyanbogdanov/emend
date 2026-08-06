@@ -100,6 +100,31 @@ export interface TighteningContext {
 }
 
 /**
+ * Input for the review pass over a migration that already verifies.
+ *
+ * Its own type for the same reason `TighteningContext` is: the tasks disagree.
+ * Migration says "change only what the API requires"; review is asked to
+ * restructure. What review needs and the others do not is the diff — the
+ * question is whether *this change* is worth merging, which cannot be answered
+ * from the files alone.
+ *
+ * `deprecationGaps` is measured before the model is asked, never inferred. A
+ * migration can report "X is deprecated" and ship without removing a single use
+ * of X, and no phase of verification objects, because deprecated code compiles.
+ */
+export interface ReviewContext {
+  finding: Finding;
+  /** repo-relative path -> source text, with the migration applied. */
+  sources: Map<string, string>;
+  /** What the migration did, as a unified diff. */
+  diff: string;
+  /** Deprecated symbols still imported, one per line. Empty when there are none. */
+  deprecationGaps: string;
+  /** Symbols available in the target version, to ground a replacement in reality. */
+  candidateSymbols: string[];
+}
+
+/**
  * The output contract, shared by every prompt.
  *
  * Kept in one constant because `proposeEdits` parses one shape and one shape
@@ -125,6 +150,41 @@ Rules you must follow:
 6. When compiler output from a failed attempt is provided, it is the authoritative statement of what is still broken. Fix the errors it reports. Do not edit call sites it does not complain about, however plausible the change looks.
 7. The list of API changes is derived from a type-declaration diff and can be incomplete. If the compiler reports an error the list does not explain, fix it anyway using the error's own description of the expected type. Do not decline solely because an error is absent from the list.
 8. Prefer the strongest type that compiles, in this order. First, name the constraint with a type the package exports — the error text usually names it and it is usually in the available-symbols list, sometimes under a different export name; prefer (value: TooltipValueType | undefined) => Number(value ?? 0).toFixed(1). Second, omit the annotation and let it be inferred from context. Only if neither compiles, use any or a cast, and say so in that edit's "reason". Never use @ts-ignore or @ts-expect-error. Getting to green matters more than getting there elegantly, but try the stronger forms first.
+
+${RESPONSE_SHAPE}`;
+
+/**
+ * The review pass: it verifies, but is it worth merging?
+ *
+ * Adapted from the "thermo-nuclear code quality review" criteria, narrowed to
+ * what this harness can enforce. Two findings from a human review of a real
+ * Emend pull request shaped it, and neither could fail verification:
+ *
+ *  - Emend reported `Cell` as *deprecated*, titled its commit "migrate `Cell`",
+ *    and removed no use of `Cell`. It fixed the type errors the version bump
+ *    caused and left the deprecated API in place.
+ *  - The migration repeated the same coercion at nine call sites. The reviewer
+ *    extracted one module and the diff got smaller.
+ */
+export const REVIEW_SYSTEM_PROMPT = `You are a demanding code reviewer with commit rights, reviewing a dependency migration that already compiles and passes its tests.
+
+Passing is the floor, not the goal. Decide whether this diff leaves the codebase better or merely green, and fix it where it does not.
+
+Rules you must follow:
+1. Output ONLY a JSON object. No prose, no markdown fences.
+2. Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.
+3. Behaviour must not change. This is a restructuring pass. The one exception: replacing a deprecated API with its supported equivalent is the migration finishing its job, not a behaviour change.
+4. Finish the migration first. If you are told a deprecated symbol is still imported, removing it is the highest-priority edit in this pass. A migration that reports "X is deprecated" and still uses X has not done what it said. Use the package's supported replacement; if there is none, leave it and say so in "rationale".
+5. Then look for the move that deletes complexity rather than rearranging it:
+   - The same edit repeated at three or more call sites is a missing helper. Extract it once, in the layer that owns that boundary, and call it.
+   - Conditionals, flags or special cases the diff added where a better shape would need none.
+   - Casts, \`any\`, \`unknown\` or new optionality that hides an invariant instead of stating it.
+   - A wrapper or indirection that does not earn the extra hop.
+6. Do not reformat, rename, or restructure code the migration did not touch. Out-of-scope churn buries the change under noise and is the fastest way for a reviewer to reject an otherwise good pull request.
+7. When a coercion has to stand in for missing data, prefer a value the caller can detect over one it cannot. \`Number(x ?? 0)\` renders a real string as "0", which no test objects to and no reader spots; returning null, or a sentinel the formatter understands, keeps the absence visible.
+8. If the diff is already good, return an empty "edits" array and say why. That is a valid and useful answer — a pass that invents work to look busy is worse than one that declines.
+
+Prefer a small number of high-conviction structural improvements to an exhaustive list of nits.
 
 ${RESPONSE_SHAPE}`;
 
@@ -333,6 +393,66 @@ export async function proposeTightening(
   ctx: TighteningContext,
 ): Promise<AgentProposal> {
   return propose(config, TIGHTENING_SYSTEM_PROMPT, buildTighteningPrompt(ctx));
+}
+
+/**
+ * The review prompt: what the migration did, what it left undone, the files.
+ *
+ * Unlike the tightening prompt this carries the candidate symbols, because
+ * finishing a deprecation means naming what replaced the symbol — and unlike
+ * either of the others it carries the diff, because "is this worth merging"
+ * cannot be answered from the files alone.
+ */
+export function buildReviewPrompt(ctx: ReviewContext): string {
+  const { finding } = ctx;
+  const parts: string[] = [];
+
+  parts.push('# What was migrated');
+  parts.push(`${finding.pkg}: ${finding.fromVersion} -> ${finding.toVersion}. It verifies.`);
+  parts.push('');
+
+  if (ctx.deprecationGaps) {
+    parts.push('# Unfinished: deprecated symbols still imported');
+    parts.push('_Measured from the files as they stand, not inferred. Rule 4: these come first._');
+    parts.push(ctx.deprecationGaps);
+    parts.push('');
+    if (ctx.candidateSymbols.length > 0) {
+      parts.push(`Available in ${finding.pkg}@${finding.toVersion} (most relevant first):`);
+      parts.push(ctx.candidateSymbols.slice(0, 60).join('\n'));
+      parts.push('');
+    }
+  }
+
+  parts.push('# The diff under review');
+  parts.push('```diff');
+  parts.push(ctx.diff.slice(0, 30_000));
+  parts.push('```');
+  parts.push('');
+
+  parts.push('# Source files — CURRENT state, with the migration applied');
+  for (const [file, content] of ctx.sources) {
+    parts.push(`## ${file}`);
+    parts.push('```typescript');
+    parts.push(content);
+    parts.push('```');
+    parts.push('');
+  }
+
+  parts.push('Produce the JSON now. An empty edit list is a valid answer.');
+  return parts.join('\n');
+}
+
+/**
+ * Propose the edits that make an already-green migration worth merging.
+ *
+ * Separate from `proposeEdits` for the same reason `proposeTightening` is: only
+ * the prompt differs, and the three prompts contradict each other.
+ */
+export async function proposeReview(
+  config: LlmConfig,
+  ctx: ReviewContext,
+): Promise<AgentProposal> {
+  return propose(config, REVIEW_SYSTEM_PROMPT, buildReviewPrompt(ctx));
 }
 
 async function propose(

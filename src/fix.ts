@@ -31,12 +31,14 @@ import { resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
 import {
   proposeEdits,
   proposeTightening,
+  proposeReview,
   nearbySymbols,
   classifyEdits,
   selectEvidencedEdits,
   type TextEdit,
   type EditClassification,
 } from './llm/agent.ts';
+import { remainingDeprecations, describeDeprecationGaps, importsSymbolFrom } from './quality.ts';
 import type {
   ApiSymbol,
   CallSite,
@@ -271,6 +273,71 @@ async function repairTightening(
     `    tightening repair: applied ${applied.applied.length} of ${proposal.edits.length} edit(s)`,
   );
   return applied.applied.length;
+}
+
+/**
+ * Review the green migration, keeping the review's edits only if it stays green.
+ *
+ * Same shape as `tightenAny`, because that shape is proven: the model may
+ * restructure freely since the compiler and the tests decide whether it was
+ * right, and a snapshot puts the migration back when it was not.
+ *
+ * One attempt. The migration already works, so everything here is upside —
+ * spending three verifications chasing a nicer diff is the wrong trade.
+ */
+async function reviewMigration(
+  config: LlmConfig,
+  ws: Workspace,
+  phaseOpts: { skipTests: boolean },
+  baseline: Awaited<ReturnType<typeof runPhase>>,
+  finding: Finding,
+  findings: Finding[],
+  extraFiles: string[],
+  candidateSymbols: string[],
+  progress: (message: string) => void,
+): Promise<VerificationReport | null> {
+  // Measured before the model is asked. A migration can report "X is deprecated"
+  // and ship without removing one use of X — that happened, on a pull request
+  // titled "migrate `Cell`" that removed no use of `Cell` — and no phase of
+  // verification objects, because deprecated code compiles and its tests pass.
+  const gaps = await remainingDeprecations(findings, ws.dir);
+  if (gaps.length > 0) {
+    progress(`  review: ${gaps.length} deprecation(s) not finished by the migration`);
+  }
+
+  const proposal = await proposeReview(config, {
+    finding,
+    sources: await loadSources(ws.dir, finding, extraFiles),
+    diff: await workspaceDiff(ws),
+    deprecationGaps: describeDeprecationGaps(gaps),
+    candidateSymbols,
+  });
+
+  if (!proposal.ok) {
+    progress(`    review unavailable: ${proposal.error ?? 'unknown error'}`);
+    return null;
+  }
+  if (proposal.edits.length === 0) {
+    progress(`    review found nothing to change: ${proposal.rationale.slice(0, 160)}`);
+    return null;
+  }
+  const applied = await applyTextEdits(ws.dir, proposal.edits);
+  if (applied.applied.length === 0) {
+    progress(`    review: none of ${proposal.edits.length} edit(s) matched the source`);
+    return null;
+  }
+  progress(`    review: applied ${applied.applied.length} of ${proposal.edits.length} edit(s)`);
+
+  const report = compare(baseline, await runPhase(ws.dir, phaseOpts));
+  if (verificationPassed(report.outcome)) {
+    progress(`  review kept: ${applied.applied.length} edit(s), still ${report.outcome}`);
+    return report;
+  }
+
+  // The review broke it. The migration was already good; discard the opinion.
+  progress(`  review reverted: did not verify (${report.outcome})`);
+  await restoreSnapshots(ws.dir, applied.snapshots);
+  return null;
 }
 
 async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol>> {
@@ -772,6 +839,13 @@ export async function fixPackage(
           repairTightening(config, dir, agentFinding, extraFiles, progress, errors),
         );
         if (tightened) verification = tightened;
+
+        // Green, and now: is it worth merging? Verification cannot answer that.
+        const reviewed = await reviewMigration(
+          config, ws, phaseOpts, baseline, agentFinding, findings,
+          extraFiles, candidates, progress,
+        );
+        if (reviewed) verification = reviewed;
       }
     }
 
