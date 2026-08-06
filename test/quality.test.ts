@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   importsSymbolFrom,
+  deprecationStillPresent,
   remainingDeprecations,
   describeDeprecationGaps,
 } from '../src/quality.ts';
@@ -35,6 +36,58 @@ function deprecationFinding(files: string[]): Finding {
     confidence: 'high',
   };
 }
+
+// ---------------------------------------------------------------------------
+// deprecationStillPresent — the gate's question, not the report's
+//
+// `remainingDeprecations` deliberately looks only at imports, because a false
+// "still deprecated" shown to a reviewer is indistinguishable from a real one.
+// The evidence gate asks the same question for the opposite purpose: a false
+// positive there only *permits* an edit that verification still judges, while a
+// false negative withholds the migration the finding asked for. So members are
+// resolved here and not there, and the asymmetry is the point.
+// ---------------------------------------------------------------------------
+
+test('a deprecated member reached through a call chain counts as still present', () => {
+  // zod 4 deprecates ZodString.email in favour of the top-level z.email. It is
+  // never a named import, so the import-scoped check cannot see it, and the gate
+  // would withhold the very edit that performs the migration.
+  const source = "import { z } from 'zod';\nconst S = z.object({ id: z.string().uuid() });";
+  assert.equal(deprecationStillPresent('ZodString.uuid', 'zod', source), true);
+});
+
+test('a member migrated to a same-named top-level call still reads as present', () => {
+  // Known limitation, and biased this way on purpose. zod's deprecated
+  // `z.string().uuid()` and its replacement `z.uuid()` both contain `.uuid`;
+  // separating them means resolving what the call sits on, which is the type
+  // checker's job and not a regex's.
+  //
+  // So the site keeps reading as outstanding, which *permits* edits there rather
+  // than withholding them. Permitting is the safe direction: verification still
+  // judges whatever the model writes, whereas withholding cancels the migration
+  // the finding exists to request. Exact resolution needs the checker, and the
+  // eval harness is what should decide whether that is worth its cost.
+  const source = "import { z } from 'zod';\nconst S = z.object({ id: z.uuid() });";
+  assert.equal(deprecationStillPresent('ZodString.uuid', 'zod', source), true);
+});
+
+test('a bare identifier is not mistaken for a member access', () => {
+  // `uuid` the variable, `uuid` the package, `uuid` in prose. Only a property
+  // access is evidence that the deprecated member is still being called.
+  const source = "import { v4 as uuid } from 'uuid';\nconst id = uuid();";
+  assert.equal(deprecationStillPresent('ZodString.uuid', 'zod', source), false);
+});
+
+test('a top-level deprecated export still resolves by import, not by member access', () => {
+  // `Cell` has no container, so the import check remains the authority for it —
+  // `.Cell` would not appear even when it is very much still in use.
+  const source = "import { BarChart, Cell } from 'recharts';\nexport const c = <Cell />;";
+  assert.equal(deprecationStillPresent('Cell', 'recharts', source), true);
+  assert.equal(
+    deprecationStillPresent('Cell', 'recharts', "import { BarChart } from 'recharts';"),
+    false,
+  );
+});
 
 test('a migration that leaves the deprecated symbol imported is reported', () => {
   // The case that shipped: Emend reported `Cell` as deprecated, titled its

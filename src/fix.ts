@@ -38,7 +38,11 @@ import {
   type TextEdit,
   type EditClassification,
 } from './llm/agent.ts';
-import { remainingDeprecations, describeDeprecationGaps, importsSymbolFrom } from './quality.ts';
+import {
+  remainingDeprecations,
+  describeDeprecationGaps,
+  deprecationStillPresent,
+} from './quality.ts';
 import type {
   ApiSymbol,
   CallSite,
@@ -763,13 +767,12 @@ export async function fixPackage(
         const stillDeprecated = new Set(
           agentChanges
             .filter(({ change }) => change.kind === 'deprecated')
-            .filter(({ change, sites }) => {
-              const symbol = change.path.split('.').pop() ?? change.path;
-              return sites.some((s) => {
+            .filter(({ change, sites }) =>
+              sites.some((s) => {
                 const source = sources.get(s.file);
-                return source ? importsSymbolFrom(source, symbol, first.pkg) : false;
-              });
-            })
+                return source ? deprecationStillPresent(change.path, first.pkg, source) : false;
+              }),
+            )
             .map(({ change }) => change.path),
         );
 

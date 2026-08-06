@@ -52,6 +52,43 @@ export function importsSymbolFrom(source: string, symbol: string, pkg: string): 
 }
 
 /**
+ * Whether `source` still accesses `member` as a property.
+ *
+ * A member deprecation is never a named import — `ZodString.uuid` is reached as
+ * `z.string().uuid()`, so `importsSymbolFrom` cannot see it at all. The dot is
+ * what makes this safe to search for: bare `uuid` also matches the `uuid`
+ * package, a local variable, and the word in a comment, while `.uuid` is a
+ * property access on something.
+ */
+function usesMemberAccess(source: string, member: string): boolean {
+  return new RegExp(`\\.\\s*${member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(source);
+}
+
+/**
+ * Whether a deprecation is still outstanding in this source.
+ *
+ * Deliberately *not* used by `remainingDeprecations`, which reports to a human.
+ * The two callers want opposite failure directions:
+ *
+ *  - Reporting a gap that is not real tells a reviewer the migration is
+ *    unfinished when it is finished, and a false "still deprecated" is
+ *    indistinguishable from a true one to whoever reads the pull request. So
+ *    that path stays import-scoped and errs toward silence.
+ *  - The evidence gate uses this to decide whether an edit at a deprecation's
+ *    call site is requested. Missing a real deprecation there withholds the
+ *    migration itself; claiming one that is not real merely permits an edit that
+ *    verification still judges. So this errs toward presence.
+ *
+ * Top-level exports keep the import check, because `.Cell` never appears even
+ * when `Cell` is very much in use.
+ */
+export function deprecationStillPresent(path: string, pkg: string, source: string): boolean {
+  const dot = path.lastIndexOf('.');
+  const leaf = dot === -1 ? path : path.slice(dot + 1);
+  return dot === -1 ? importsSymbolFrom(source, leaf, pkg) : usesMemberAccess(source, leaf);
+}
+
+/**
  * Deprecated symbols a migration claimed to handle and left in place.
  *
  * Only the files the finding itself named are examined. The scan already
