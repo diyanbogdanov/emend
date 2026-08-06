@@ -1,3 +1,7 @@
+import type { PinConflict } from './pins.ts';
+
+export type { PinConflict, VersionPin } from './pins.ts';
+
 /**
  * Core domain types for Emend.
  *
@@ -207,11 +211,22 @@ export interface ScanReport {
   packages: PackageReport[];
   /** Non-fatal problems that limited analysis. Surfaced in every summary. */
   warnings: string[];
+  /**
+   * Versions the repository writes down that disagree with what it installs, or
+   * with each other.
+   *
+   * Kept beside `packages` rather than folded into their findings: a Dockerfile
+   * tag that has drifted from the lockfile is not a change in anybody's public
+   * API, and counting it among the breaking changes would overstate both.
+   */
+  pinConflicts: PinConflict[];
   counts: {
     packagesAnalyzed: number;
     packagesSkipped: number;
     breaking: number;
     deprecation: number;
     callSites: number;
+    /** Reported separately. A drifted pin is not an API break. */
+    pinConflicts: number;
   };
 }

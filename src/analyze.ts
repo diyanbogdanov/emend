@@ -7,7 +7,10 @@
  */
 
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { readRepo } from './inventory.ts';
+import { scanPins, resolvedVersions } from './pins.ts';
 import {
   fetchPackument,
   fetchPackageDir,
@@ -321,18 +324,31 @@ export async function scanRepo(
     .flatMap((p) => p.findings)
     .filter((f) => f.change.severity === 'deprecation').length;
 
+  // Versions the repository copied out of its lockfile into places nothing keeps
+  // honest. Independent of the surface diff: it needs no registry and no target
+  // version, so it runs even for packages that were skipped as unanalyzable.
+  const pinConflicts = await scanPins(resolvedVersions(repo.dependencies), async (file) => {
+    try {
+      return await readFile(path.join(repoDir, file), 'utf8');
+    } catch {
+      return null;
+    }
+  });
+
   return {
     repo: options.repoKey ?? repoDir,
     startedAt,
     finishedAt: new Date().toISOString(),
     packages,
     warnings,
+    pinConflicts,
     counts: {
       packagesAnalyzed: packages.filter((p) => p.status === 'analyzed').length,
       packagesSkipped: packages.filter((p) => p.status !== 'analyzed').length,
       breaking,
       deprecation,
       callSites: callSiteCount,
+      pinConflicts: pinConflicts.length,
     },
   };
 }

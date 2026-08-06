@@ -132,10 +132,32 @@ function printScan(report: ScanReport, showAll: boolean): void {
     console.log(c.green('  No findings: no tracked API change intersects this codebase.'));
   }
 
+  // Reported in its own block, above the summary but never inside its counts. A
+  // drifted Dockerfile tag is real and worth fixing, and it is not a change in
+  // anybody's public API — folding it into "breaking" would overstate both and
+  // blunt the one number that makes a scan worth reading.
+  if (report.pinConflicts.length > 0) {
+    console.log('');
+    console.log(`  ${c.bold('Version pins that disagree')}`);
+    for (const conflict of report.pinConflicts) {
+      console.log(
+        conflict.expected
+          ? `    ${c.yellow('drift')}      ${conflict.subject} should be ${conflict.expected} (${conflict.authority})`
+          : `    ${c.yellow('conflict')}   ${conflict.subject} is pinned inconsistently and nothing declares the intent`,
+      );
+      for (const pin of conflict.pins) {
+        console.log(c.dim(`      → ${pin.file}:${pin.line}  ${pin.text}`));
+      }
+    }
+  }
+
   console.log('');
   console.log(
     `  ${c.bold('Summary')}  ${counts.breaking} breaking · ${counts.deprecation} deprecated · ${counts.callSites} call site(s)`,
   );
+  if (counts.pinConflicts > 0) {
+    console.log(c.dim(`           ${counts.pinConflicts} version pin(s) disagree`));
+  }
   console.log(
     c.dim(
       `           ${counts.packagesAnalyzed} package(s) analyzed, ${counts.packagesSkipped} skipped (skipped ≠ clean)`,

@@ -1,0 +1,268 @@
+/**
+ * Versions a repository writes down as literals, and whether they agree.
+ *
+ * A dependency version lives in the lockfile, where the package manager keeps it
+ * honest. The same version written into a Dockerfile tag, an `.nvmrc`, or a CI
+ * matrix is a copy, and nothing keeps a copy honest. a scanned repository pins
+ * `playwright` exactly and asserts in a test that its Docker base image matches;
+ * that test is the only thing in the repository that noticed, and most
+ * repositories have no such test.
+ *
+ * This is the same shape as the `.d.ts` wedge and is why run scripts and API
+ * version pins are one detector rather than two subsystems: something declares a
+ * version, something else can be asked what the version really is, and the
+ * difference is a finding with a file and a line.
+ *
+ * Only provable mismatches are reported. A pin for a tool the repository does
+ * not install is left alone — Emend can say a copy disagrees with its source,
+ * and cannot say a version is "old" without knowing what current means.
+ */
+
+export type PinKind = 'docker-image' | 'node-version';
+
+export interface VersionPin {
+  /** Repo-relative path. */
+  file: string;
+  /** 1-indexed. */
+  line: number;
+  /** What is pinned: `node`, or an image/package name. */
+  subject: string;
+  version: string;
+  /** The exact source text, so a repair is a locatable find/replace. */
+  text: string;
+  kind: PinKind;
+}
+
+export interface PinConflict {
+  subject: string;
+  /**
+   * The version the pins should say, or null when nothing can arbitrate.
+   *
+   * Null is a real answer: three files declaring three node versions with no
+   * `engines` field disagree, and picking a winner would be the guessing that
+   * `plan.ts` already refuses to do.
+   */
+  expected: string | null;
+  /** What established `expected`, for the finding's evidence. */
+  authority: string | null;
+  /** The pins that disagree with it. */
+  pins: VersionPin[];
+}
+
+/** `v1.62.1-jammy` -> `1.62.1`, `18-alpine` -> `18`, `latest` -> null. */
+function versionOfTag(tag: string): string | null {
+  const match = tag.match(/^v?(\d+(?:\.\d+)*)/);
+  return match?.[1] ?? null;
+}
+
+/** `mcr.microsoft.com/playwright` -> `playwright`. */
+function imageName(ref: string): string {
+  const segments = ref.split('/');
+  return segments[segments.length - 1] ?? ref;
+}
+
+function fromDockerfile(file: string, source: string): VersionPin[] {
+  const pins: VersionPin[] = [];
+  source.split('\n').forEach((raw, index) => {
+    // `FROM image:tag AS stage`, case-insensitive, digest refs ignored because
+    // a digest is already exact and has nothing to drift against.
+    const match = raw.match(/^\s*FROM\s+(\S+?):([\w.-]+)(?:\s|$)/i);
+    if (!match) return;
+    const [, ref = '', tag = ''] = match;
+    const version = versionOfTag(tag);
+    if (!version) return; // `latest`, `alpine`, `jammy` — nothing to disagree with
+
+    const name = imageName(ref);
+    pins.push({
+      file,
+      line: index + 1,
+      // `FROM node:18` is how most repositories pin node, and reading it as an
+      // opaque image would leave the commonest inconsistency invisible.
+      subject: name === 'node' ? 'node' : name,
+      version,
+      text: `${ref}:${tag}`,
+      kind: name === 'node' ? 'node-version' : 'docker-image',
+    });
+  });
+  return pins;
+}
+
+function fromWorkflow(file: string, source: string): VersionPin[] {
+  const pins: VersionPin[] = [];
+  source.split('\n').forEach((raw, index) => {
+    const match = raw.match(/^\s*node-version:\s*['"]?(\d+(?:\.\d+)*)['"]?\s*$/);
+    const version = match?.[1];
+    if (!version) return;
+    pins.push({
+      file,
+      line: index + 1,
+      subject: 'node',
+      version,
+      text: raw.trim(),
+      kind: 'node-version',
+    });
+  });
+  return pins;
+}
+
+function fromManifest(file: string, source: string): VersionPin[] {
+  let manifest: { engines?: { node?: string } };
+  try {
+    manifest = JSON.parse(source) as { engines?: { node?: string } };
+  } catch {
+    return [];
+  }
+  const declared = manifest.engines?.node;
+  if (!declared) return [];
+  const version = declared.match(/(\d+(?:\.\d+)*)/)?.[1];
+  if (!version) return [];
+
+  const lines = source.split('\n');
+  const line = lines.findIndex((l) => l.includes('"node"')) + 1;
+  return [
+    {
+      file,
+      line: line > 0 ? line : 1,
+      subject: 'node',
+      version,
+      text: declared,
+      kind: 'node-version',
+    },
+  ];
+}
+
+/** Every version literal the given files declare. */
+export function extractPins(files: ReadonlyMap<string, string>): VersionPin[] {
+  const pins: VersionPin[] = [];
+  for (const [file, source] of files) {
+    const base = file.split('/').pop() ?? file;
+    if (/^Dockerfile/i.test(base)) pins.push(...fromDockerfile(file, source));
+    else if (base === '.nvmrc') {
+      const version = source.trim().replace(/^v/, '');
+      if (/^\d/.test(version)) {
+        pins.push({ file, line: 1, subject: 'node', version, text: source.trim(), kind: 'node-version' });
+      }
+    } else if (base === 'package.json') pins.push(...fromManifest(file, source));
+    else if (/\.ya?ml$/.test(base)) pins.push(...fromWorkflow(file, source));
+  }
+  return pins;
+}
+
+/**
+ * Pins that disagree with something able to arbitrate.
+ *
+ * Two authorities, and no others. For a package the repository installs, the
+ * resolved version is the fact and the pin is a stale copy of it. For node, the
+ * `engines` field is the project's own statement of intent — anything else would
+ * be Emend choosing a version the project never asked for.
+ */
+export function findPinConflicts(
+  pins: VersionPin[],
+  installed: ReadonlyMap<string, string>,
+): PinConflict[] {
+  const conflicts: PinConflict[] = [];
+
+  const images = pins.filter((p) => p.kind === 'docker-image');
+  const bySubject = new Map<string, VersionPin[]>();
+  for (const pin of images) {
+    bySubject.set(pin.subject, [...(bySubject.get(pin.subject) ?? []), pin]);
+  }
+  for (const [subject, group] of bySubject) {
+    const resolved = installed.get(subject);
+    // Not an npm dependency: outside what can be proven, so not reported.
+    if (!resolved) continue;
+    const disagreeing = group.filter((p) => p.version !== resolved);
+    if (disagreeing.length > 0) {
+      conflicts.push({
+        subject,
+        expected: resolved,
+        authority: `the installed ${subject}`,
+        pins: disagreeing,
+      });
+    }
+  }
+
+  const nodePins = pins.filter((p) => p.kind === 'node-version');
+  if (nodePins.length > 1) {
+    const distinct = new Set(nodePins.map((p) => p.version));
+    if (distinct.size > 1) {
+      const engine = nodePins.find((p) => p.file.endsWith('package.json'));
+      const expected = engine?.version ?? null;
+      conflicts.push({
+        subject: 'node',
+        expected,
+        authority: expected ? 'the declared engines.node' : null,
+        // With an authority, only the pins that disagree with it. Without one,
+        // all of them, because the disagreement is the finding.
+        pins: expected ? nodePins.filter((p) => p.version !== expected) : nodePins,
+      });
+    }
+  }
+
+  return conflicts;
+}
+
+/**
+ * Versions that can arbitrate a disagreement.
+ *
+ * A dependency whose version was inferred from its declared range is explicitly
+ * not a fact about the repository — it may name a release that was never
+ * published. Using one as the authority would report a Dockerfile as drifted
+ * against a version that does not exist, and the reader has no way to tell that
+ * finding from a lockfile-backed one.
+ */
+export function resolvedVersions(
+  deps: ReadonlyArray<{ name: string; installed: string | null; source: string }>,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const dep of deps) {
+    if (dep.installed === null) continue;
+    if (dep.source !== 'node_modules' && dep.source !== 'lockfile') continue;
+    out.set(dep.name, dep.installed);
+  }
+  return out;
+}
+
+/**
+ * Files a repository writes versions into.
+ *
+ * A fixed list rather than a walk: these are the places a version is copied by
+ * convention, and globbing a repository for anything version-shaped is how a
+ * detector starts reporting suspicion instead of evidence.
+ */
+const PIN_FILES = [
+  'Dockerfile',
+  'Dockerfile.dev',
+  'Dockerfile.prod',
+  '.nvmrc',
+  'package.json',
+  '.github/workflows/ci.yml',
+  '.github/workflows/test.yml',
+  '.github/workflows/build.yml',
+  '.github/workflows/main.yml',
+];
+
+/** Read a repository's version pins and report the ones that disagree. */
+export async function scanPins(
+  installed: ReadonlyMap<string, string>,
+  read: (file: string) => Promise<string | null>,
+): Promise<PinConflict[]> {
+  const files = new Map<string, string>();
+  for (const file of PIN_FILES) {
+    const source = await read(file);
+    if (source !== null) files.set(file, source);
+  }
+  return findPinConflicts(extractPins(files), installed);
+}
+
+/** One line per conflict, for a report or a prompt. */
+export function describePinConflicts(conflicts: PinConflict[]): string {
+  return conflicts
+    .map((cf) => {
+      const where = cf.pins.map((p) => `${p.file}:${p.line} (${p.version})`).join(', ');
+      return cf.expected
+        ? `- \`${cf.subject}\` should be ${cf.expected} per ${cf.authority}, but ${where}`
+        : `- \`${cf.subject}\` is pinned inconsistently and nothing declares the intended version: ${where}`;
+    })
+    .join('\n');
+}
