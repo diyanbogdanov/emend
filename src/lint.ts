@@ -20,6 +20,9 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
@@ -181,3 +184,55 @@ export function shellcheckAdapter(options: { bin?: string } = {}): LintAdapter {
 }
 
 export const LINT_ADAPTERS: LintAdapter[] = [hadolintAdapter(), shellcheckAdapter()];
+
+/**
+ * Files a linter can repair on its own.
+ *
+ * Only shellcheck: it ships `--format=diff`, which emits a unified patch of its
+ * own suggestions. hadolint has no equivalent, and inventing Dockerfile edits is
+ * the agent's job rather than a deterministic one — so a hadolint finding is
+ * reported and not repaired here.
+ */
+export function repairableFiles(findings: LintFinding[]): string[] {
+  return [...new Set(findings.filter((f) => f.tool === 'shellcheck').map((f) => f.file))];
+}
+
+/**
+ * Apply shellcheck's own suggestions to these files.
+ *
+ * Its patch, not a reconstruction of it. The `fix.replacements` array carries
+ * column offsets, insertion points and precedence, and rebuilding a patch from
+ * those is a second implementation of something the tool already did correctly.
+ *
+ * `git apply` is atomic per invocation, so a patch that will not apply leaves
+ * every file untouched — which is why a refusal can be reported as "not applied"
+ * rather than "partially applied and now unknown".
+ */
+export async function applyLintPatch(
+  dir: string,
+  files: string[],
+  options: { bin?: string } = {},
+): Promise<{ applied: boolean; error?: string }> {
+  if (files.length === 0) return { applied: false };
+  const bin = options.bin ?? 'shellcheck';
+
+  const { stdout } = await runTool(bin, ['--format=diff', ...files], dir);
+  // No suggestions is not a failure. It is the ordinary case for a clean file.
+  if (!stdout.includes('@@')) return { applied: false };
+
+  const scratch = await mkdtemp(path.join(tmpdir(), 'emend-lintfix-'));
+  const patch = path.join(scratch, 'fix.patch');
+  try {
+    await writeFile(patch, stdout.endsWith('\n') ? stdout : `${stdout}\n`, 'utf8');
+    // Default `-p1`, not `-p0`. shellcheck writes `--- a/run.sh` when given a
+    // relative path and the bare path when given an absolute one, and the first
+    // probe here used an absolute path — so `-p0` looked right and failed on
+    // every real invocation with "b/run.sh: No such file or directory".
+    await execFileAsync('git', ['-C', dir, 'apply', patch]);
+    return { applied: true };
+  } catch (err) {
+    return { applied: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    await rm(scratch, { recursive: true, force: true }).catch(() => {});
+  }
+}

@@ -20,6 +20,7 @@ import { findWorkspaces } from './workspaces.ts';
 import { readRepo } from './inventory.ts';
 import { scanPins, resolvedVersions, planPinRepair } from './pins.ts';
 import { planOverride, planRemediation, type Remediation } from './remediate.ts';
+import { applyLintPatch, repairableFiles, type LintFinding } from './lint.ts';
 import { readLockfile } from './lockfile.ts';
 import { compareVersions } from './registry.ts';
 import {
@@ -1359,6 +1360,162 @@ export async function fixVulnerability(
         : {
             note: `the build verified, but ${finding.pkg} still resolves to ${worst ?? 'an affected version'} — this bump did not clear the advisory`,
           }),
+    };
+    if (!options.keepWorkspace) {
+      await ws.cleanup();
+      result.workspaceDir = null;
+    }
+    return result;
+  } catch (err) {
+    if (ws && !options.keepWorkspace) await ws.cleanup().catch(() => {});
+    throw err;
+  }
+}
+
+export interface LintFixResult {
+  /** Files shellcheck rewrote. */
+  repaired: string[];
+  /** Findings nothing here can repair, and why. */
+  unrepairable: Array<{ finding: Finding; reason: string }>;
+  verification: VerificationReport | null;
+  diff: string;
+  workspaceDir: string | null;
+  workspaceMode: string | null;
+}
+
+/**
+ * Apply what the linter itself suggests, then check the repository still works.
+ *
+ * Only shellcheck has an autofix, so a hadolint finding comes back unrepairable
+ * with the reason — reported rather than silently absent, because a repair pass
+ * that quietly skips half its input reads as a repair pass that had nothing to
+ * do.
+ *
+ * Verification is the ordinary baseline comparison. A shell script rewrite is a
+ * behaviour change like any other: quoting `$f` is usually the fix and is
+ * occasionally the thing that breaks a script relying on word splitting.
+ */
+export async function fixLint(
+  repoDir: string,
+  findings: Finding[],
+  options: FixOptions = {},
+): Promise<LintFixResult> {
+  const progress = options.onProgress ?? (() => {});
+  const phaseOpts = { skipTests: options.untrusted === true };
+
+  const lintFindings: LintFinding[] = findings.map((f) => ({
+    file: f.sites[0]?.file ?? '',
+    line: f.sites[0]?.line ?? 1,
+    column: f.sites[0]?.column ?? 1,
+    code: f.change.path,
+    level: f.fromVersion,
+    message: f.change.guidance ?? '',
+    tool: f.pkg,
+  }));
+  const files = repairableFiles(lintFindings);
+  const unrepairable = findings
+    .filter((f) => f.pkg !== 'shellcheck')
+    .map((f) => ({
+      finding: f,
+      reason: `${f.pkg} ships no autofix, so ${f.change.path} needs a person or the agent`,
+    }));
+
+  const base: LintFixResult = {
+    repaired: [],
+    unrepairable,
+    verification: null,
+    diff: '',
+    workspaceDir: null,
+    workspaceMode: null,
+  };
+  if (files.length === 0) {
+    progress(`nothing here is machine-repairable: ${unrepairable.length} finding(s) need a person`);
+    return base;
+  }
+
+  let ws: Workspace | null = null;
+  try {
+    ws = await prepareWorkspace(repoDir);
+    progress(`  workspace: ${ws.dir} (${ws.mode})`);
+    progress('running baseline verification (before any change)');
+    const baseline = await runPhase(ws.dir, phaseOpts);
+
+    progress(`applying shellcheck's own suggestions to ${files.length} file(s)`);
+    const patch = await applyLintPatch(ws.dir, files);
+    if (!patch.applied) {
+      progress(patch.error ? `  patch refused: ${patch.error}` : '  nothing to apply');
+      if (!options.keepWorkspace) await ws.cleanup();
+      return base;
+    }
+
+    const verification = compare(baseline, await runPhase(ws.dir, phaseOpts));
+    progress(`  ${verification.outcome}`);
+
+    const result: LintFixResult = {
+      ...base,
+      repaired: files,
+      verification,
+      diff: await workspaceDiff(ws),
+      workspaceDir: ws.dir,
+      workspaceMode: ws.mode,
+    };
+    if (!options.keepWorkspace) {
+      await ws.cleanup();
+      result.workspaceDir = null;
+    }
+    return result;
+  } catch (err) {
+    if (ws && !options.keepWorkspace) await ws.cleanup().catch(() => {});
+    throw err;
+  }
+}
+
+/**
+ * Take an upgrade the scan already proved is safe for this repository.
+ *
+ * A freshness finding says nothing this repository calls changed between the
+ * installed version and the latest. That is a claim about the surface diff, and
+ * this is where it gets tested against a build rather than left as an assertion.
+ *
+ * It is the same shape as any other bump, which is the point: nothing special
+ * happens because the finding was cheap to produce.
+ */
+export async function fixFreshness(
+  repoDir: string,
+  finding: Finding,
+  options: FixOptions = {},
+): Promise<VulnFixResult> {
+  const progress = options.onProgress ?? (() => {});
+  const untrusted = options.untrusted === true;
+  const phaseOpts = { skipTests: untrusted };
+
+  let ws: Workspace | null = null;
+  try {
+    ws = await prepareWorkspace(repoDir);
+    progress(`  workspace: ${ws.dir} (${ws.mode})`);
+    progress('running baseline verification (before any change)');
+    const baseline = await runPhase(ws.dir, phaseOpts);
+
+    progress(`bumping ${finding.pkg} ${finding.fromVersion} -> ${finding.toVersion}`);
+    await bumpDependency(ws.dir, finding.pkg, finding.toVersion, { ignoreScripts: untrusted });
+
+    const after = await readLockfile(ws.dir);
+    const installed = [...after.tree.values()].filter((e) => e.name === finding.pkg);
+    const now = installed.map((e) => e.version).sort(compareVersions)[0] ?? null;
+    const verification = compare(baseline, await runPhase(ws.dir, phaseOpts));
+    progress(`  ${finding.pkg} now resolves to ${now ?? '(absent)'} — ${verification.outcome}`);
+
+    const result: VulnFixResult = {
+      finding,
+      remediation: { kind: 'direct', pkg: finding.pkg, to: finding.toVersion },
+      // The upgrade landing is the whole job here; there is no advisory to clear.
+      resolved: now !== null && compareVersions(now, finding.toVersion) >= 0,
+      overrode: false,
+      installedAfter: now,
+      verification,
+      diff: await workspaceDiff(ws),
+      workspaceDir: ws.dir,
+      workspaceMode: ws.mode,
     };
     if (!options.keepWorkspace) {
       await ws.cleanup();

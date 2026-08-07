@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
 import { reintroduced } from './remediate.ts';
-import { fixFinding, fixPackage, fixPins, fixVulnerability } from './fix.ts';
+import { fixFinding, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
 import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
 import { startServer } from './server.ts';
@@ -388,8 +388,14 @@ async function cmdFix(args: Args): Promise<number> {
   // half-succeed in ways that are hard to unpick.
   const pinTargets = targets.filter((f) => f.detector === 'version-pin');
   const vulnTargets = targets.filter((f) => f.detector === 'vulnerability');
+  const lintTargets = targets.filter((f) => f.detector === 'external-lint');
+  const freshTargets = targets.filter((f) => f.detector === 'freshness');
   const packageTargets = targets.filter(
-    (f) => f.detector !== 'version-pin' && f.detector !== 'vulnerability',
+    (f) =>
+      f.detector !== 'version-pin' &&
+      f.detector !== 'vulnerability' &&
+      f.detector !== 'external-lint' &&
+      f.detector !== 'freshness',
   );
 
   // Group by package: a version bump is atomic, so every finding for one
@@ -454,6 +460,52 @@ async function cmdFix(args: Args): Promise<number> {
     if (vulnResult.workspaceDir) {
       console.log(c.dim(`    workspace kept at ${vulnResult.workspaceDir}`));
     }
+  }
+
+  // One workspace for all of them: the repairs are independent text edits in
+  // separate files, and a single verification answers for the lot.
+  if (lintTargets.length > 0) {
+    console.log(c.bold('  lint') + c.dim(`  (${lintTargets.length} finding(s))`));
+    const lintResult = await fixLint(repoDir, lintTargets, {
+      keepWorkspace: args.flags.get('keep') === true,
+      onProgress: (m) => console.log(c.dim(`    ${m}`)),
+    });
+    const ok =
+      lintResult.verification !== null && verificationPassed(lintResult.verification.outcome);
+    if (ok) anyVerified = true;
+    if (lintResult.repaired.length > 0) {
+      console.log(
+        `    ${ok ? c.green('VERIFIED') : c.red('NOT VERIFIED')}  ${c.dim(`${lintResult.repaired.length} file(s) rewritten by shellcheck`)}`,
+      );
+    }
+    // Never silent about the half nothing can repair.
+    if (lintResult.unrepairable.length > 0) {
+      console.log(
+        c.yellow(`    ${lintResult.unrepairable.length} finding(s) have no automatic repair:`),
+      );
+      for (const u of lintResult.unrepairable.slice(0, 5)) {
+        console.log(c.dim(`      ${u.finding.change.path} — ${u.reason}`));
+      }
+    }
+    if (lintResult.workspaceDir) console.log(c.dim(`    workspace kept at ${lintResult.workspaceDir}`));
+  }
+
+  for (const finding of freshTargets) {
+    console.log(
+      c.bold(`  ${finding.pkg} ${finding.fromVersion} → ${finding.toVersion}`) +
+        c.dim('  (behind latest)'),
+    );
+    const freshResult = await fixFreshness(repoDir, finding, {
+      keepWorkspace: args.flags.get('keep') === true,
+      onProgress: (m) => console.log(c.dim(`    ${m}`)),
+    });
+    const ok =
+      freshResult.verification !== null && verificationPassed(freshResult.verification.outcome);
+    if (ok) anyVerified = true;
+    console.log(
+      `    ${ok ? c.green('VERIFIED') : c.red('NOT VERIFIED')}  ${c.dim(freshResult.verification?.summary ?? '')}`,
+    );
+    if (freshResult.workspaceDir) console.log(c.dim(`    workspace kept at ${freshResult.workspaceDir}`));
   }
 
   if (pinTargets.length > 0) {
@@ -973,6 +1025,10 @@ ${c.bold('COMMANDS')}
     --json          Machine-readable output
 
   fix <repo>      Plan, apply, and verify migrations in an isolated workspace.
+                  Routes by detector: an API break goes to the planner and the
+                  agent, a vulnerability to the remediation ladder, a lint
+                  finding to the linter's own autofix, a stale package to a
+                  plain bump. Everything is verified against a real baseline.
     --finding <id>  Fix one finding (default: all open findings)
     --agent         Let an LLM attempt findings the deterministic planner declines
     --harness[=m]   Escalate to opencode when structured edits still leave the
