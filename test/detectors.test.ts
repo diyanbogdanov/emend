@@ -32,7 +32,7 @@ test('a drifted pin becomes a finding with a call site', () => {
   // and never shown on the dashboard. Everything downstream consumes `Finding`;
   // anything that is not one is invisible to all of it.
   return versionPinDetector.detect(context({ Dockerfile: DOCKERFILE, 'package.json': MANIFEST }))
-    .then((findings: Finding[]) => {
+    .then(({ findings }: { findings: Finding[] }) => {
       const node = findings.find((f) => f.pkg === 'node');
       assert.equal(node?.detector, 'version-pin');
       assert.equal(node?.fromVersion, '18');
@@ -50,7 +50,7 @@ test('a pin drift is severity drift, never breaking', () => {
   // and is not a change in anybody's public API, so counting it as breaking
   // would overstate both and blunt the one number that carries the product.
   return versionPinDetector.detect(context({ Dockerfile: DOCKERFILE, 'package.json': MANIFEST }))
-    .then((findings: Finding[]) => {
+    .then(({ findings }: { findings: Finding[] }) => {
       assert.ok(findings.length > 0);
       assert.ok(findings.every((f) => f.change.severity === 'drift'));
     });
@@ -61,7 +61,7 @@ test('a pin with nothing to arbitrate it produces no finding', () => {
   // version, and inventing one would be the guess the planner refuses.
   return versionPinDetector
     .detect(context({ Dockerfile: DOCKERFILE, '.nvmrc': '22\n' }))
-    .then((findings: Finding[]) => {
+    .then(({ findings }: { findings: Finding[] }) => {
       assert.deepEqual(findings, []);
     });
 });
@@ -85,7 +85,7 @@ test('a detector that does not apply is never asked to detect', () => {
     applies: async () => false,
     detect: async () => {
       detected = true;
-      return [];
+      return { findings: [] };
     },
   };
   return runDetectors([never], context({})).then(() => {

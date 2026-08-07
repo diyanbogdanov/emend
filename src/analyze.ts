@@ -11,7 +11,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { readRepo } from './inventory.ts';
 import { scanPins, resolvedVersions } from './pins.ts';
-import { DETECTORS, runDetectors } from './detectors.ts';
+import { detectorsFor, groupByDetector, runDetectors, type HttpContractOptions } from './detectors.ts';
 import { walkDir } from './callsites.ts';
 import {
   fetchPackument,
@@ -46,6 +46,14 @@ export interface ScanOptions {
    * genuinely need a bound — an interactive command, a smoke test — can set one.
    */
   maxPackages?: number;
+  /**
+   * Check outbound HTTP calls against their vendor's published description.
+   *
+   * Off unless a resolver is supplied, because this is the only part of a scan
+   * that reaches the network — enabling it means choosing to make outbound
+   * requests to every host in the source tree.
+   */
+  contracts?: HttpContractOptions;
   /** Progress callback for CLI output. */
   onProgress?: (message: string) => void;
   /**
@@ -320,12 +328,6 @@ export async function scanRepo(
   }
 
   const packages = analyzed.map((a) => a.report);
-  const breaking = packages
-    .flatMap((p) => p.findings)
-    .filter((f) => f.change.severity === 'breaking').length;
-  const deprecation = packages
-    .flatMap((p) => p.findings)
-    .filter((f) => f.change.severity === 'deprecation').length;
 
   // Versions the repository copied out of its lockfile into places nothing keeps
   // honest. Independent of the surface diff: it needs no registry and no target
@@ -353,7 +355,7 @@ export async function scanRepo(
   // Everything downstream — the store, the dashboard, the pull request renderer
   // — consumes findings. A detector that produces anything else is invisible to
   // all of it, which is what kept pin drift out of every one of them.
-  const detected = await runDetectors(DETECTORS, {
+  const detected = await runDetectors(detectorsFor({ ...(options.contracts ? { contracts: options.contracts } : {}) }), {
     repoDir,
     dependencies: repo.dependencies,
     sourceFiles,
@@ -365,20 +367,26 @@ export async function scanRepo(
       }
     },
   });
+  // Carried into the report rather than dropped: a host whose description was
+  // located and not trusted is not a host that came back clean.
+  warnings.push(...detected.notes);
   for (const failure of detected.failures) {
     // Never silent. A missing finding is indistinguishable from a clean result.
     warnings.push(`detector "${failure.detector}" failed: ${failure.reason}`);
   }
-  if (detected.findings.length > 0) {
-    packages.push({
-      pkg: 'version pins',
-      status: 'analyzed',
-      fromVersion: null,
-      toVersion: null,
-      findings: detected.findings,
-      unlocatedBreaking: 0,
-    });
+  for (const group of groupByDetector(detected.findings)) {
+    packages.push({ ...group, status: 'analyzed', unlocatedBreaking: 0 });
   }
+
+  // Derived here rather than before the detectors ran. A contract finding is
+  // `breaking`, and counting only the packages would have left it out of the one
+  // line of a scan anybody reads.
+  const breaking = packages
+    .flatMap((p) => p.findings)
+    .filter((f) => f.change.severity === 'breaking').length;
+  const deprecation = packages
+    .flatMap((p) => p.findings)
+    .filter((f) => f.change.severity === 'deprecation').length;
 
   return {
     repo: options.repoKey ?? repoDir,

@@ -42,6 +42,8 @@ export interface DetectorFailure {
 
 export interface DetectorRun {
   findings: Finding[];
+  /** What each detector looked at without reaching a conclusion. Never dropped. */
+  notes: string[];
   /**
    * Detectors that threw, and why.
    *
@@ -91,11 +93,11 @@ export const versionPinDetector: Detector = {
     return false;
   },
 
-  async detect(ctx: DetectorContext): Promise<Finding[]> {
+  async detect(ctx: DetectorContext): Promise<{ findings: Finding[] }> {
     const pins = extractPins(await readPinFiles(ctx));
     const conflicts = findPinConflicts(pins, resolvedVersions(ctx.dependencies));
 
-    return conflicts
+    const findings = conflicts
       .filter((c) => c.expected !== null)
       .flatMap((conflict) =>
         conflict.pins.map((pin): Finding => {
@@ -123,6 +125,7 @@ export const versionPinDetector: Detector = {
           };
         }),
       );
+    return { findings };
   },
 };
 
@@ -189,11 +192,12 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
       return false;
     },
 
-    async detect(ctx: DetectorContext): Promise<Finding[]> {
+    async detect(ctx: DetectorContext): Promise<{ findings: Finding[]; notes: string[] }> {
       const calls = await callsIn(ctx);
       const hosts = [...new Set(calls.filter((c) => c.resolved && c.host).map((c) => c.host as string))];
 
       const findings: Finding[] = [];
+      const notes: string[] = [];
       // Bounded, and the bound is stated rather than silent: a repository
       // talking to thirty services should not turn one scan into thirty
       // resolutions without somebody choosing that.
@@ -203,9 +207,20 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
         // No description located means exactly that. The detector reports the
         // call sites it found and says the description was unavailable; it never
         // reports that there is no problem.
-        if (!spec) continue;
+        if (!spec) {
+          notes.push(`${host}: no API description could be located, so its calls were not checked`);
+          continue;
+        }
 
         const check = checkAgainstSpec(calls, host, spec);
+        // Said out loud. An empty finding list from a description that could not
+        // be trusted is indistinguishable, on screen, from a clean bill of health.
+        if (check.note) notes.push(`${host}: ${check.note}`);
+        if (check.unresolvedCalls > 0) {
+          notes.push(
+            `${host}: ${check.unresolvedCalls} call(s) build their URL at runtime and could not be checked`,
+          );
+        }
         for (const call of check.gone) {
           findings.push({
             id: httpFindingId(host, call.method, call.route ?? ''),
@@ -229,12 +244,70 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
           });
         }
       }
-      return findings;
+      return { findings, notes };
     },
   };
 }
 
 export const DETECTORS: Detector[] = [versionPinDetector];
+
+export interface DetectorSelection {
+  /**
+   * Enable the contract detector by handing it a resolver.
+   *
+   * A flag would not be enough. This is the only detector that reaches the
+   * network, so switching it on means choosing to make outbound requests to
+   * every host in someone's source tree — and that choice belongs to the caller,
+   * expressed by supplying the thing that does it.
+   */
+  contracts?: HttpContractOptions;
+}
+
+/** The detectors a scan should run, given what the caller enabled. */
+export function detectorsFor(selection: DetectorSelection): Detector[] {
+  return [
+    versionPinDetector,
+    ...(selection.contracts ? [httpContractDetector(selection.contracts)] : []),
+  ];
+}
+
+/**
+ * How each detector's findings are named in a report.
+ *
+ * Everything used to be filed under "version pins", which was true when there
+ * was one detector and became a lie the moment there were two: a reader seeing a
+ * vanished Stripe endpoint under that heading learns the wrong thing about where
+ * to look.
+ */
+const DETECTOR_LABELS: Record<string, string> = {
+  'version-pin': 'version pins',
+  'http-contract': 'http contracts',
+};
+
+export interface DetectorGroup {
+  pkg: string;
+  findings: Finding[];
+  /** Null, always: a detector finding is not an upgrade and has no version pair. */
+  fromVersion: null;
+  toVersion: null;
+}
+
+/** Findings split by the detector that produced them, in first-seen order. */
+export function groupByDetector(findings: Finding[]): DetectorGroup[] {
+  const groups = new Map<string, Finding[]>();
+  for (const finding of findings) {
+    const existing = groups.get(finding.detector);
+    if (existing) existing.push(finding);
+    else groups.set(finding.detector, [finding]);
+  }
+  return [...groups].map(([detector, group]) => ({
+    // An unnamed detector says what it is rather than borrowing another's name.
+    pkg: DETECTOR_LABELS[detector] ?? detector,
+    findings: group,
+    fromVersion: null,
+    toVersion: null,
+  }));
+}
 
 /**
  * Run every detector that applies, keeping what succeeds and naming what does not.
@@ -247,16 +320,19 @@ export async function runDetectors(
   ctx: DetectorContext,
 ): Promise<DetectorRun> {
   const findings: Finding[] = [];
+  const notes: string[] = [];
   const failures: DetectorFailure[] = [];
 
   for (const detector of detectors) {
     try {
       if (!(await detector.applies(ctx))) continue;
-      findings.push(...(await detector.detect(ctx)));
+      const result = await detector.detect(ctx);
+      findings.push(...result.findings);
+      if (result.notes) notes.push(...result.notes);
     } catch (err) {
       failures.push({ detector: detector.id, reason: (err as Error).message });
     }
   }
 
-  return { findings, failures };
+  return { findings, notes, failures };
 }

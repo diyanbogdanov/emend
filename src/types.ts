@@ -178,7 +178,16 @@ export interface Detector {
   id: string;
   /** Cheap precondition. Answering it must not cost what detecting costs. */
   applies(ctx: unknown): Promise<boolean>;
-  detect(ctx: unknown): Promise<Finding[]>;
+  /**
+   * Findings, and anything the detector looked at but could not conclude about.
+   *
+   * The notes matter as much as the findings. A contract check that located a
+   * vendor's description and found it not authoritative has *not* established
+   * that the integration is fine, and returning only an empty finding list
+   * renders as exactly that. "I could not check" and "I checked and it is fine"
+   * are different answers and only one is safe to show as a clean scan.
+   */
+  detect(ctx: unknown): Promise<{ findings: Finding[]; notes?: string[] }>;
 }
 
 /** A single concrete text edit the planner is confident about. */

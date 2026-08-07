@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, readdir, cp, access, rm } from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
@@ -20,6 +21,8 @@ import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { openCodeHarness, type Harness } from './harness.ts';
+import { resolveSpec, httpFetcher } from './specfetch.ts';
+import type { SpecCandidate } from './specs.ts';
 import { listModels } from './llm/client.ts';
 import {
   loadCases,
@@ -101,6 +104,23 @@ function harnessFrom(args: Args): Harness | undefined {
   return openCodeHarness(typeof flag === 'string' ? { model: flag } : {});
 }
 
+/**
+ * Contract checking, when it was asked for.
+ *
+ * Returns the resolver rather than a boolean, because handing over the thing
+ * that makes outbound requests is what "yes, go and ask the vendors" means.
+ * `--contracts=<dir>` puts the description cache somewhere durable; a hosted
+ * scan wants that, a one-off does not care.
+ */
+function contractsFrom(args: Args): { resolve: (v: { domain: string }) => Promise<SpecCandidate[]> } | undefined {
+  const flag = args.flags.get('contracts');
+  if (flag === undefined || flag === false) return undefined;
+  const cacheDir =
+    typeof flag === 'string' ? flag : path.join(os.tmpdir(), 'emend-specs');
+  const fetch = httpFetcher();
+  return { resolve: (vendor) => resolveSpec(vendor, { fetch, cacheDir }) };
+}
+
 function severityLabel(sev: string): string {
   if (sev === 'breaking') return c.red('breaking');
   if (sev === 'deprecation') return c.yellow('deprecated');
@@ -149,7 +169,15 @@ function printScan(report: ScanReport, showAll: boolean): void {
   }
 
   if (withFindings.length === 0) {
-    console.log(c.green('  No findings: no tracked API change intersects this codebase.'));
+    // Green only when there is nothing else to say. A scan that located a
+    // vendor's description and could not trust it has not established that the
+    // codebase is fine, and printing an all-clear above the caveats explaining
+    // why is how a reader takes the first line and stops.
+    console.log(
+      report.warnings.length === 0
+        ? c.green('  No findings: no tracked API change intersects this codebase.')
+        : c.yellow('  No findings — but see the caveats below before reading that as clean.'),
+    );
   }
 
   // Only the ones nothing can arbitrate. A drift with an authority is a finding
@@ -211,9 +239,11 @@ async function cmdScan(args: Args): Promise<number> {
     : undefined;
 
   const repo = await readRepo(repoDir);
+  const contracts = contractsFrom(args);
   const report = await scanRepo(repoDir, {
     ...(only ? { only } : {}),
     includeDev: args.flags.get('no-dev') !== true,
+    ...(contracts ? { contracts } : {}),
     onProgress: args.flags.get('json') === true ? () => {} : (m) => console.log(c.dim(`  ${m}`)),
   });
 
@@ -764,6 +794,10 @@ ${c.bold('COMMANDS')}
     --only a,b      Restrict to specific packages
     --no-dev        Skip devDependencies
     --all           Show up-to-date and skipped packages too
+    --contracts[=d] Also check outbound HTTP calls against each vendor's
+                    published API description. Makes network requests — one
+                    resolution per host found in your source. Optionally names a
+                    directory to cache descriptions in.
     --json          Machine-readable output
 
   fix <repo>      Plan, apply, and verify migrations in an isolated workspace.

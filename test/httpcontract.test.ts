@@ -168,7 +168,7 @@ test('a call to a vanished endpoint becomes a finding pointing at its line', asy
   const ctx = context(APP);
 
   assert.equal(await detector.applies(ctx), true);
-  const findings = await detector.detect(ctx);
+  const { findings } = await detector.detect(ctx);
   assert.equal(findings.length, 1);
   assert.equal(findings[0]?.detector, 'http-contract');
   assert.equal(findings[0]?.pkg, 'api.acme.com');
@@ -186,7 +186,7 @@ test('no description located means no findings, not a clean result', async () =>
   // carried by the detector never asserting anything it did not check. What must
   // not happen is a crash, or a finding invented from an absence.
   const detector = httpContractDetector({ resolve: async () => [] });
-  assert.deepEqual(await detector.detect(context(APP)), []);
+  assert.deepEqual((await detector.detect(context(APP))).findings, []);
 });
 
 test('a repository with no readable outbound call does not reach the network', async () => {
