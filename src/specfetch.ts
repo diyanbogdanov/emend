@@ -21,6 +21,7 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { MAX_SPEC_BYTES, parseSpec } from './specdiff.ts';
 import {
   PROVENANCE_RANK,
   provenanceOfPointer,
@@ -62,9 +63,6 @@ type Doc = Record<string, unknown>;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Above this, a body is not being read as an API description by anybody. */
-const MAX_SPEC_BYTES = 16 * 1024 * 1024;
-
 // ---------------------------------------------------------------------------
 // Is this actually a description?
 // ---------------------------------------------------------------------------
@@ -75,25 +73,11 @@ const MAX_SPEC_BYTES = 16 * 1024 * 1024;
  *
  * Structural, not by content type: a content type is a claim the server makes,
  * and `{"error":"not found"}` is perfectly good JSON describing no API at all.
- * What makes a document an OpenAPI or Swagger description is the version key and
- * a `paths` object, so that is what is looked for.
+ * Accepting or refusing is `parseSpec`'s decision, so what a fetch will take and
+ * what the diff can read cannot drift apart.
  */
 export function looksLikeSpec(body: string): boolean {
-  if (body.length === 0 || body.length > MAX_SPEC_BYTES) return false;
-  let doc: unknown;
-  try {
-    doc = JSON.parse(body);
-  } catch {
-    // YAML is legitimate and not parsed here. Rather than guess at it with a
-    // regex, treat it as unrecognised: a spec Emend cannot read is one it must
-    // not claim to have checked.
-    return false;
-  }
-  if (typeof doc !== 'object' || doc === null) return false;
-  const d = doc as Record<string, unknown>;
-  const versioned = typeof d['openapi'] === 'string' || typeof d['swagger'] === 'string';
-  const hasPaths = typeof d['paths'] === 'object' && d['paths'] !== null;
-  return versioned && hasPaths;
+  return parseSpec(body) !== null;
 }
 
 /** The spec URLs an APIs.json manifest points at, in the order it lists them. */
@@ -378,9 +362,10 @@ async function aggregatorLeads(fetch: Fetcher, domain: string): Promise<Aggregat
         const url = (origin as Doc | undefined)?.['url'];
         if (typeof url !== 'string') continue;
         pointers.push({ url });
-        // There is no YAML reader here. Rather than lose the best pointer
-        // available, its JSON sibling is tried too — and accepted only if it
-        // parses as a description, which makes it a check and not a guess.
+        // The JSON sibling is tried first where one exists: both forms parse
+        // now, but JSON is markedly cheaper — 6.4MB of Stripe YAML costs about
+        // a second. Accepted only if it parses as a description, so it stays a
+        // check rather than a guess, and the YAML is still there if it does not.
         if (/\.ya?ml$/i.test(url)) pointers.push({ url: url.replace(/\.ya?ml$/i, '.json') });
       }
     }

@@ -17,7 +17,8 @@
     "audit:removals": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/audit-removals.ts"
   },
   "dependencies": {
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

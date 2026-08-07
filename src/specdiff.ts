@@ -14,6 +14,7 @@
  * the diff looks, and the headline count stays worth reading.
  */
 
+import YAML from 'yaml';
 import type { SurfaceChange } from './types.ts';
 
 export interface SpecDiff {
@@ -157,13 +158,52 @@ function isSpec(doc: unknown): boolean {
   return versioned && typeof d['paths'] === 'object' && d['paths'] !== null;
 }
 
-function parse(body: string): unknown | null {
+/** Above this, a body is not being read as an API description by anybody. */
+export const MAX_SPEC_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Read a description in either form, or refuse it.
+ *
+ * The single place a spec document is turned into an object, so `looksLikeSpec`,
+ * the diff and the contract check cannot drift on what counts as readable.
+ *
+ * JSON is tried first because it is cheap and common; YAML 1.2 is a superset of
+ * JSON, so the fallback would handle both, just slower. YAML is not optional —
+ * most first-party descriptions are YAML, and Stripe's own `x-origin` names
+ * `spec3.yaml`, so refusing it meant the best pointer any directory gives us
+ * landed on a file we would not open.
+ *
+ * These bodies come from arbitrary URLs — a directory listing, a stranger's
+ * repository, a CDN — so the parser's defaults matter and are tested rather than
+ * assumed: alias bombs are refused, `__proto__` stays an own key, and a tag
+ * naming a function yields a string. No custom tags are enabled; the default
+ * schema constructs nothing.
+ */
+export function parseSpec(body: string): unknown | null {
+  if (body.length === 0 || body.length > MAX_SPEC_BYTES) return null;
+
+  const accept = (doc: unknown): unknown | null => (isSpec(doc) ? doc : null);
+
+  const trimmed = body.trimStart();
+  if (trimmed.startsWith('{')) {
+    try {
+      return accept(JSON.parse(body));
+    } catch {
+      return null;
+    }
+  }
+
   try {
-    const doc = JSON.parse(body);
-    return isSpec(doc) ? doc : null;
+    return accept(YAML.parse(body, { logLevel: 'silent' }));
   } catch {
+    // Unreadable is not the same as absent, and the caller renders that
+    // distinction. What must not happen is a parse error taking a scan down.
     return null;
   }
+}
+
+function parse(body: string): unknown | null {
+  return parseSpec(body);
 }
 
 /**

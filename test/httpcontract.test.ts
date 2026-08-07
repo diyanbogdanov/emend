@@ -59,6 +59,62 @@ test('nothing is claimed from a description that is not the provider’s word', 
   assert.match(result.note ?? '', /not authoritative/i);
 });
 
+test('a templated route covers a literal call, which is a real gap and the safe one', () => {
+  // Measured against Stripe. `GET /v1/invoices/upcoming` is genuinely gone from
+  // today's description, but `GET /v1/invoices/{invoice}` is not — so the call
+  // still matches a described route and this check stays quiet.
+  //
+  // Kept deliberately. Requiring a literal to match a literal would report every
+  // hardcoded identifier — `/v1/charges/ch_123` — as a vanished endpoint, and a
+  // false break is far worse here than a missed one: this check has no baseline
+  // and its whole design is about not being confidently wrong.
+  //
+  // The precise answer needs a baseline, and `matchAgainstDiff` gives it: two
+  // route sets compared exactly, where `/v1/invoices/upcoming` shows up as
+  // removed. Two tools, two questions.
+  const spec = JSON.stringify({
+    openapi: '3.0.0',
+    info: {},
+    paths: { '/v1/invoices/{invoice}': { get: {} } },
+  });
+  const result = checkAgainstSpec(
+    calls(`await fetch('https://api.acme.com/v1/invoices/upcoming');`),
+    'api.acme.com',
+    candidate({ body: spec }),
+  );
+  assert.equal(result.matched, 1);
+  assert.deepEqual(result.gone, []);
+});
+
+test('a partial description cannot report the endpoints it simply does not cover', () => {
+  // Reachable only since YAML became readable, and worth pinning. apis.io
+  // publishes Stripe as 159 separate descriptions — "Account API", twelve
+  // operations — so a fragment can match one call in a repository and know
+  // nothing about the other nineteen. The misalignment guard does not catch that:
+  // it only fires when *nothing* matches.
+  //
+  // What does catch it is provenance. A directory listing is not the provider's
+  // word, so no claim is made from it at all, and the fragment is a lead rather
+  // than a verdict. This asserts the containment rather than trusting it.
+  const fragment = JSON.stringify({
+    openapi: '3.0.0',
+    info: {},
+    paths: { '/v1/charges': { post: {} } },
+  });
+  const source = `
+    await fetch('https://api.acme.com/v1/charges', { method: 'POST' });
+    await fetch('https://api.acme.com/v1/invoices');
+    await fetch('https://api.acme.com/v1/refunds');
+  `;
+  const result = checkAgainstSpec(
+    calls(source),
+    'api.acme.com',
+    candidate({ provenance: 'directory', body: fragment }),
+  );
+  assert.deepEqual(result.gone, [], 'the two endpoints it never described are not reported');
+  assert.match(result.note ?? '', /not authoritative/i);
+});
+
 test('when no call matches anything, the description is misaligned, not the code', () => {
   // The guard against the worst failure this detector could have. If a base path
   // or a host convention means none of the routes line up, the honest reading is

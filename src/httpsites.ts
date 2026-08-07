@@ -23,7 +23,7 @@
 
 import ts from 'typescript';
 import { canAssertBreakage, describeProvenance, type SpecCandidate } from './specs.ts';
-import { readOperations } from './specdiff.ts';
+import { parseSpec, readOperations } from './specdiff.ts';
 import type { CallSite, SurfaceChange } from './types.ts';
 
 export interface HttpCall {
@@ -247,12 +247,9 @@ export function checkAgainstSpec(
     };
   }
 
-  let ops: ReturnType<typeof readOperations>;
-  try {
-    ops = readOperations(JSON.parse(spec.body));
-  } catch {
-    return { ...empty, note: 'the description could not be read as OpenAPI or Swagger' };
-  }
+  const doc = parseSpec(spec.body);
+  if (!doc) return { ...empty, note: 'the description could not be read as OpenAPI or Swagger' };
+  const ops = readOperations(doc);
   if (ops.size === 0) return { ...empty, note: 'the description could not be read as OpenAPI or Swagger' };
 
   const described = [...ops.keys()].map((key) => endpointOf(key)).filter((e) => e !== null);
