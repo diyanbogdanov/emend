@@ -19,6 +19,7 @@ import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr
 import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
+import { openCodeHarness, type Harness } from './harness.ts';
 import { listModels } from './llm/client.ts';
 import {
   loadCases,
@@ -84,6 +85,20 @@ function parseArgs(argv: string[]): Args {
     }
   }
   return { command, positional, flags };
+}
+
+/**
+ * The harness escalation, when one was asked for.
+ *
+ * `--harness` alone leaves the model to opencode's own configuration;
+ * `--harness=<provider/model>` pins one. Pinning is the mitigation for the
+ * reproducibility cost the design spec prices: a regression that cannot be
+ * attributed to a model is a regression nobody can chase.
+ */
+function harnessFrom(args: Args): Harness | undefined {
+  const flag = args.flags.get('harness');
+  if (flag === undefined || flag === false) return undefined;
+  return openCodeHarness(typeof flag === 'string' ? { model: flag } : {});
 }
 
 function severityLabel(sev: string): string {
@@ -288,9 +303,11 @@ async function cmdFix(args: Args): Promise<number> {
       console.log(c.dim(`    · ${f.change.path} (${f.change.kind}, ${f.id})`));
     }
 
+    const harness = harnessFrom(args);
     const result = await fixPackage(repoDir, findings, {
       keepWorkspace: args.flags.get('keep') === true,
       useAgent: args.flags.get('agent') === true,
+      ...(harness ? { harness } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
 
@@ -328,6 +345,22 @@ async function cmdFix(args: Args): Promise<number> {
       }
       if (result.agent.rationale) {
         console.log(c.dim(`      rationale: ${result.agent.rationale.slice(0, 200)}`));
+      }
+    }
+    if (result.harness) {
+      const h = result.harness;
+      // An escalation that ran and achieved nothing has to be as visible as one
+      // that worked. It is the most expensive step in the pipeline, and a run
+      // that quietly declined to happen looks identical to one that tried.
+      console.log(
+        h.ok
+          ? c.magenta(
+              `      harness ${h.id}: ${h.keptHunks} hunk(s) kept, ${h.revertedHunks.length} reverted`,
+            )
+          : c.yellow(`      harness ${h.id}: ${h.reason}`),
+      );
+      for (const r of h.revertedHunks) {
+        console.log(c.dim(`        reverted ${r.hunk.file}:${r.hunk.start} — ${r.reason}`));
       }
     }
     if (result.workspaceDir) console.log(`    ${c.dim(`workspace kept at ${result.workspaceDir}`)}`);
@@ -378,11 +411,15 @@ async function cmdPr(args: Args): Promise<number> {
   const creating = args.flags.get('create') === true;
 
   console.log(c.dim('  re-running fix to produce a verified PR body...'));
+  const prHarness = harnessFrom(args);
   const result = await fixFinding(repoDir, stored.finding, {
     // Without this, `emend pr --agent` silently re-ran deterministic-only and
     // rendered "unverified / needs a human" for a migration that had just
     // verified under `emend fix --agent`.
     useAgent: args.flags.get('agent') === true,
+    // Same reason: a PR re-run without the harness renders "needs a human" for a
+    // migration that had just verified under `emend fix --harness`.
+    ...(prHarness ? { harness: prHarness } : {}),
     // The verified edits live in the isolated workspace, never in the checkout.
     // Opening a PR from the checkout commits nothing, so the workspace has to
     // survive long enough to push from.
@@ -732,6 +769,10 @@ ${c.bold('COMMANDS')}
   fix <repo>      Plan, apply, and verify migrations in an isolated workspace.
     --finding <id>  Fix one finding (default: all open findings)
     --agent         Let an LLM attempt findings the deterministic planner declines
+    --harness[=m]   Escalate to opencode when structured edits still leave the
+                    build red, pinning provider/model if given. Every hunk it
+                    writes is held to the same evidence rule; anything the
+                    failure did not ask for is reverted. Slower and costlier.
     --keep          Leave the workspace on disk for inspection
 
   models          List models your configured LLM provider serves.
@@ -741,6 +782,8 @@ ${c.bold('COMMANDS')}
   pr <repo>       Render the pull request for a finding. Dry run by default.
     --finding <id>  Required
     --agent         Let the model attempt what the planner declined
+    --harness[=m]   As for 'fix' — pass it here too, or the re-run reports a
+                    migration that verified under 'fix --harness' as unverified
     --create        Actually push a branch and open a DRAFT PR
 
   serve           Local dashboard for browsing findings.

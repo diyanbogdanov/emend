@@ -18,7 +18,7 @@
  * baseline, and the verdict vocabulary do not care who wrote the bytes.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -180,6 +180,29 @@ export async function revertHunks(
 /** Vendored trees are churn, not work — the same exclusions `workspaceDiff` uses. */
 const NOT_SOURCE = [':(exclude)package-lock.json', ':(exclude)node_modules', ':(exclude)**/node_modules/**'];
 
+/**
+ * One line of context when judging, rather than git's default three.
+ *
+ * Observed live: asked to repair a real error on line 3 and to change something
+ * unrelated on line 7 of an eight-line file, opencode did both, and three lines
+ * of context merged them into one hunk. That hunk contained a diagnostic, so it
+ * was evidenced, and the unrequested change rode in on the back of the repair.
+ *
+ * One line still gives `git apply` something to verify against — zero context
+ * would make a revert unable to detect misapplication — while keeping changes a
+ * few lines apart separable, which is the entire point of judging hunks.
+ */
+const GATE_CONTEXT = '--unified=1';
+
+async function diffFor(dir: string, context: string[]): Promise<string> {
+  const { stdout } = await execFileAsync(
+    'git',
+    ['-C', dir, 'diff', ...context, '--', '.', ...NOT_SOURCE],
+    { maxBuffer: 16 * 1024 * 1024 },
+  );
+  return stdout;
+}
+
 function refused(reason: string, log = ''): EscalationResult {
   return { ok: false, reason, log, diff: '', keptHunks: 0, revertedHunks: [] };
 }
@@ -215,14 +238,11 @@ export async function escalate(
   try {
     const run = await harness.run(dir, task);
 
+    // Judged at one line of context; reported at git's default, because a
+    // reviewer reading the PR wants the surrounding code and the gate does not.
     let diff = '';
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', dir, 'diff', '--', '.', ...NOT_SOURCE],
-        { maxBuffer: 16 * 1024 * 1024 },
-      );
-      diff = stdout;
+      diff = await diffFor(dir, [GATE_CONTEXT]);
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
       return refused(`cannot read what ${harness.id} changed — ${why}`, run.log);
@@ -255,21 +275,14 @@ export async function escalate(
       return refused(`could not revert ${drop.length} unrequested hunk(s) — ${reverted.error}`, run.log);
     }
 
-    // Re-read, so the reported diff is what is actually on disk rather than what
-    // was there before the gate acted.
+    // Re-read at full context, so the reported diff is both what is actually on
+    // disk and readable by whoever reviews it.
     let final = diff;
-    if (reverted.reverted > 0) {
-      try {
-        const { stdout } = await execFileAsync(
-          'git',
-          ['-C', dir, 'diff', '--', '.', ...NOT_SOURCE],
-          { maxBuffer: 16 * 1024 * 1024 },
-        );
-        final = stdout;
-      } catch {
-        // Keep the pre-revert diff rather than claiming an empty one; the revert
-        // itself already succeeded.
-      }
+    try {
+      final = await diffFor(dir, []);
+    } catch {
+      // Keep the gating diff rather than claiming an empty one; any revert has
+      // already succeeded, and this only affects how the result reads.
     }
 
     return {
@@ -297,15 +310,106 @@ export interface OpenCodeOptions {
   model?: string;
   /** An opencode agent definition, if one is configured for this work. */
   agent?: string;
+  /**
+   * Let the harness run shell commands, so it can check its own work.
+   *
+   * Off by default. The workspace is a throwaway worktree in which Emend already
+   * runs the repository's own build and test scripts, so this is not a new
+   * capability at that boundary — but it is the widest one, and it should be a
+   * decision rather than something inherited.
+   */
+  allowBash?: boolean;
   timeoutMs?: number;
 }
 
 export interface OpenCodeHarness extends Harness {
   /** Exposed so the flags that make a run safe can be asserted rather than trusted. */
   commandFor(dir: string, message: string): string[];
+  /** Likewise for the permissions, which decide whether the run can do anything at all. */
+  envFor(): Record<string, string>;
+}
+
+/**
+ * Whether a harness may run at all, given how far the repository is trusted.
+ *
+ * `--untrusted` exists so a hosted run executes nothing from the repository or
+ * its dependency tree. A harness is an agent whose entire value is going and
+ * looking and running things, so pointing one at an untrusted checkout undoes
+ * that in a single step — and the verification that would catch a bad outcome is
+ * itself suppressed in that mode, so nothing downstream would notice.
+ */
+export function harnessPermitted(opts: {
+  untrusted?: boolean;
+}): { ok: true } | { ok: false; reason: string } {
+  if (opts.untrusted) {
+    return {
+      ok: false,
+      reason:
+        'the repository is marked untrusted, and a harness exists to run things in it',
+    };
+  }
+  return { ok: true };
 }
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+
+interface ProcessResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+/**
+ * Run a child with no stdin at all.
+ *
+ * `execFile` hands the child an open stdin pipe and never closes it, so a
+ * harness that reads stdin blocks forever. Measured, not theorised: the same
+ * opencode invocation took 242s through `execFile` — the full timeout — and 34s
+ * with stdin closed. A harness sitting on a read is indistinguishable from one
+ * that is thinking, so it burns the entire budget before anyone finds out.
+ */
+function spawnWithoutStdin(
+  bin: string,
+  args: string[],
+  opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number },
+): Promise<ProcessResult> {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, {
+      cwd: opts.cwd,
+      env: opts.env,
+      // 'ignore' gives the child /dev/null, so a read returns EOF immediately.
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    child.stdout.on('data', (d: Buffer) => {
+      stdout += d.toString();
+    });
+    child.stderr.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      // A harness that ignores SIGTERM still has to stop.
+      setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
+    }, opts.timeoutMs);
+
+    const finish = (code: number): void => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr, timedOut });
+    };
+    child.on('error', (err) => {
+      stderr += String(err);
+      finish(-1);
+    });
+    child.on('close', (code) => finish(code ?? -1));
+  });
+}
 
 /**
  * OpenCode as the escalation harness.
@@ -319,8 +423,23 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
   const bin = options.bin ?? 'opencode';
   const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+  /**
+   * Flags the binary in front of us actually accepts, learned in `available()`.
+   *
+   * The design spec priced "the harness becomes a dependency whose changes land
+   * in this product" as a cost of adoption. It arrived as a CLI contract change:
+   * `--auto` is on opencode's development branch and absent from the released
+   * 1.x, so hard-coding it made every real run die on a usage error rather than
+   * run. Empty until probed, and the command stays conservative until then.
+   */
+  let supported: ReadonlySet<string> | null = null;
+
   function commandFor(dir: string, message: string): string[] {
-    const args = ['run', message, '--dir', dir, '--format', 'json', '--auto'];
+    const args = ['run', message, '--dir', dir, '--format', 'json'];
+    // The flag that looks reckless. Where it exists, opencode auto-rejects every
+    // tool permission in non-interactive mode without it, and so edits nothing
+    // at all. What makes passing it safe is the evidence gate, not its absence.
+    if (supported?.has('--auto')) args.push('--auto');
     // No default model. opencode resolves one from the user's own config, and
     // inventing one here would silently override a choice Emend has no business
     // making.
@@ -329,9 +448,37 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
     return args;
   }
 
+  /**
+   * Permissions, carried as config rather than flags.
+   *
+   * Measured, not assumed: opencode 1.x rejects tool permissions in
+   * non-interactive mode. A real run against this fixture read the file, called
+   * `edit`, and got back "The user rejected permission to use this specific tool
+   * call" — so without granting them the escalation is a guaranteed no-op that
+   * still costs a model call. `OPENCODE_CONFIG_CONTENT` is used rather than a
+   * config file because a file written into the workspace would be one more
+   * thing to exclude from the very diff the gate is reading.
+   */
+  function envFor(): Record<string, string> {
+    return {
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        permission: {
+          edit: 'allow',
+          bash: options.allowBash ? 'allow' : 'deny',
+          // Everything else the harness does lands in a diff that gets judged. A
+          // fetch does not — it is the one action leaving no artefact for the
+          // gate to read, from a process holding a checkout of someone's private
+          // repository.
+          webfetch: 'deny',
+        },
+      }),
+    };
+  }
+
   return {
     id: 'opencode',
     commandFor,
+    envFor,
 
     async available(): Promise<HarnessAvailability> {
       try {
@@ -339,31 +486,48 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
         // it neither starts a session nor requires provider authentication.
         const { stdout } = await execFileAsync(bin, ['--version'], { timeout: 15_000 });
         const version = stdout.trim().split('\n')[0] ?? '';
-        return version ? { ok: true } : { ok: false, reason: `${bin} --version printed nothing` };
+        if (!version) return { ok: false, reason: `${bin} --version printed nothing` };
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
         return { ok: false, reason: `cannot run \`${bin} --version\` — ${why}` };
       }
+
+      try {
+        const { stdout } = await execFileAsync(bin, ['run', '--help'], { timeout: 15_000 });
+        supported = new Set(stdout.match(/--[a-z][a-z0-9-]*/g) ?? []);
+      } catch {
+        // Not fatal: `--version` already answered whether the binary runs. An
+        // unreadable help text costs the optional flags, not the escalation.
+        supported = new Set();
+      }
+      return { ok: true };
     },
 
     async run(dir: string, task: HarnessTask): Promise<HarnessRun> {
       const message = task.failureOutput.trim()
         ? `${task.instruction}\n\nThe build currently fails:\n\n${task.failureOutput}`
         : task.instruction;
-      try {
-        const { stdout, stderr } = await execFileAsync(bin, commandFor(dir, message), {
-          cwd: dir,
-          timeout,
-          maxBuffer: 32 * 1024 * 1024,
-        });
-        return { ok: true, log: summariseEvents(stdout) || stderr.trim() };
-      } catch (err) {
-        // opencode sets a non-zero exit imperatively on error, so stdout still
-        // holds the events that say what went wrong.
-        const e = err as { stdout?: string; stderr?: string; message?: string };
-        const log = summariseEvents(e.stdout ?? '');
-        return { ok: false, log, error: e.stderr?.trim() || e.message || 'opencode failed' };
+
+      const result = await spawnWithoutStdin(bin, commandFor(dir, message), {
+        cwd: dir,
+        env: { ...process.env, ...envFor() },
+        timeoutMs: timeout,
+      });
+
+      // opencode sets a non-zero exit imperatively on error, so stdout still
+      // holds the events that say what went wrong either way.
+      const log = summariseEvents(result.stdout);
+      if (result.timedOut) {
+        return { ok: false, log, error: `opencode timed out after ${Math.round(timeout / 1000)}s` };
       }
+      if (result.code !== 0) {
+        return {
+          ok: false,
+          log,
+          error: result.stderr.trim() || `opencode exited ${result.code}`,
+        };
+      }
+      return { ok: true, log: log || result.stderr.trim() };
     },
   };
 }

@@ -37,9 +37,12 @@ import {
   nearbySymbols,
   classifyEdits,
   selectEvidencedEdits,
+  NARROWING_RULE,
   type TextEdit,
   type EditClassification,
+  type HunkClassification,
 } from './llm/agent.ts';
+import { escalate, harnessPermitted, type Harness } from './harness.ts';
 import {
   remainingDeprecations,
   describeDeprecationGaps,
@@ -78,7 +81,36 @@ export interface FixOptions {
    * refuses to report as success.
    */
   untrusted?: boolean;
+  /**
+   * Escalate to a harness that edits the workspace directly, when everything
+   * cheaper has already failed.
+   *
+   * Opt-in and last, because the three costs are real and were priced
+   * deliberately: latency and spend rise with multi-turn exploration,
+   * reproducibility falls, and the harness becomes a dependency whose own prompt
+   * changes land in this product. It buys the one thing structured edits cannot
+   * do — going and reading the CI config, the Dockerfile, the build script.
+   */
+  harness?: Harness;
   onProgress?: (message: string) => void;
+}
+
+/** What a harness escalation did, and what the gate let through. */
+export interface HarnessEscalation {
+  id: string;
+  ok: boolean;
+  /** Why not, when `ok` is false. */
+  reason?: string;
+  log: string;
+  keptHunks: number;
+  /**
+   * Hunks the current failure did not ask for, reverted before verification.
+   *
+   * Recorded rather than discarded, for the same reason `droppedEdits` is: a
+   * reviewer is entitled to see what the harness wanted to change beyond what
+   * the upgrade required.
+   */
+  revertedHunks: HunkClassification[];
 }
 
 export interface AgentAttempt {
@@ -660,6 +692,11 @@ export async function fixPackage(
     let verification = compare(baseline, post);
     progress(`  ${verification.outcome}`);
 
+    // Every call site across the upgrade, under the first finding's package and
+    // version. A bump is atomic, so both the agent and the harness gate reason
+    // about the whole of it rather than one finding at a time.
+    const agentFinding = { ...first, sites: findings.flatMap((f) => f.sites) };
+
     // Escalate to the agent only if deterministic work was not enough. The
     // remaining errors are exactly the context the model needs.
     let agentRecord: FixResult['agent'];
@@ -671,7 +708,6 @@ export async function fixPackage(
       const config = llm.config;
       progress(`agent: ${config.model} via ${config.providerLabel}`);
       const failureOutput = verificationErrors(verification);
-      const agentFinding = { ...first, sites: findings.flatMap((f) => f.sites) };
 
       // Two hops, which is what this class of failure needs. The output names a
       // failing test; that test names the file it asserts against. a scanned repository's
@@ -899,6 +935,92 @@ export async function fixPackage(
       }
     }
 
+    // Last resort. Structured edits have had their retries and the build is
+    // still red, so what remains is the class of change they cannot express:
+    // something outside the call sites Emend found, in a file it never loaded.
+    let harnessRecord: HarnessEscalation | undefined;
+    if (
+      options.harness &&
+      verification.outcome !== 'verified' &&
+      verification.outcome !== 'typecheck-only'
+    ) {
+      const harness = options.harness;
+      const permitted = harnessPermitted({ untrusted });
+      if (!permitted.ok) {
+        progress(`declining to escalate to ${harness.id}: ${permitted.reason}`);
+        harnessRecord = {
+          id: harness.id,
+          ok: false,
+          reason: permitted.reason,
+          log: '',
+          keptHunks: 0,
+          revertedHunks: [],
+        };
+      } else {
+        progress(`escalating to ${harness.id}`);
+        const failureOutput = verificationErrors(verification);
+
+        // A deprecated call compiles, so it never produces a diagnostic and a
+        // hunk over it would be judged unrequested and reverted — cancelling
+        // exactly the repair the finding asked for. The carve-out the edit gate
+        // already has, applied to the same question in a different shape.
+        const sources = await loadSources(ws.dir, agentFinding, []);
+        const stillDeprecated = new Set(
+          findings
+            .filter((f) => f.change.kind === 'deprecated')
+            .filter((f) =>
+              f.sites.some((s) => {
+                const source = sources.get(s.file);
+                return source ? deprecationStillPresent(f.change.path, pkg, source) : false;
+              }),
+            )
+            .map((f) => f.change.path),
+        );
+
+        const escalation = await escalate(
+          harness,
+          ws.dir,
+          {
+            instruction:
+              `The dependency ${pkg} was upgraded from ${fromVersion} to ${toVersion} in this ` +
+              `repository, and the build no longer succeeds. Make the smallest set of changes ` +
+              `that gets it building and passing its own tests again.\n\n` +
+              `Change nothing the upgrade does not require. No new features, no reformatting, ` +
+              `no refactoring of code that already works.\n\n${NARROWING_RULE}`,
+            failureOutput,
+          },
+          {
+            changes: findings.map((f) => ({ change: f.change, sites: f.sites })),
+            failureOutput,
+            unresolvedDeprecations: stillDeprecated,
+          },
+        );
+
+        harnessRecord = {
+          id: harness.id,
+          ok: escalation.ok,
+          log: escalation.log,
+          keptHunks: escalation.keptHunks,
+          revertedHunks: escalation.revertedHunks,
+          ...(escalation.reason ? { reason: escalation.reason } : {}),
+        };
+
+        if (!escalation.ok) {
+          progress(`  ${escalation.reason}`);
+        } else {
+          if (escalation.revertedHunks.length > 0) {
+            progress(
+              `  reverted ${escalation.revertedHunks.length} hunk(s) no diagnostic asked for`,
+            );
+          }
+          progress(`  ${escalation.keptHunks} hunk(s) kept, re-verifying`);
+          post = await runPhase(ws.dir, phaseOpts);
+          verification = compare(baseline, post);
+          progress(`  verification: ${verification.outcome}`);
+        }
+      }
+    }
+
     const diff = await workspaceDiff(ws);
     const result: PackageFixResult = {
       pkg,
@@ -915,6 +1037,7 @@ export async function fixPackage(
       workspaceDir: ws.dir,
       workspaceMode: ws.mode,
       ...(agentRecord ? { agent: agentRecord } : {}),
+      ...(harnessRecord ? { harness: harnessRecord } : {}),
     };
 
     if (!options.keepWorkspace) {
@@ -1027,6 +1150,8 @@ export interface PackageFixResult {
   workspaceDir: string | null;
   workspaceMode: string | null;
   agent?: FixResult['agent'];
+  /** Present only when a harness was configured and the build was still red. */
+  harness?: HarnessEscalation;
 }
 
 /**
