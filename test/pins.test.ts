@@ -94,6 +94,63 @@ test('a floating tag is not a pin', () => {
 });
 
 // ---------------------------------------------------------------------------
+// API version pins — the wire protocol, which versions separately from the SDK
+// ---------------------------------------------------------------------------
+
+test('an SDK option pinning the wire API version is a pin', () => {
+  // Vendors version the protocol separately from the package. `stripe@18` and
+  // `apiVersion: '2024-06-20'` move independently, and upgrading the SDK does
+  // not touch the pin — so a `.d.ts` diff, which is all Emend had, cannot see
+  // this drift at all.
+  const source = "const stripe = new Stripe(key, { apiVersion: '2024-06-20' });";
+  const pins = extractPins(files({ 'src/billing.ts': source }));
+  const pin = pins.find((p) => p.kind === 'api-version');
+  assert.equal(pin?.version, '2024-06-20');
+  assert.equal(pin?.subject, 'stripe');
+  assert.equal(pin?.line, 1);
+  assert.ok(pin?.text.includes('2024-06-20'));
+});
+
+test('a version header pins the wire API just as an option does', () => {
+  // The other half of the same convention. Anthropic and Azure put it in a
+  // header or a query parameter rather than a constructor option.
+  const source = [
+    "await fetch('https://api.anthropic.com/v1/messages', {", // 1
+    "  headers: { 'anthropic-version': '2023-06-01' },", // 2
+    '});', // 3
+  ].join('\n');
+  const pins = extractPins(files({ 'src/llm.ts': source }));
+  const pin = pins.find((p) => p.kind === 'api-version');
+  assert.equal(pin?.version, '2023-06-01');
+  assert.equal(pin?.subject, 'anthropic');
+  assert.equal(pin?.line, 2);
+});
+
+test('a version-shaped string that is not an API pin is left alone', () => {
+  // `version` appears everywhere. Without the vendor convention around it, a
+  // date-like string is just a string, and reporting it would be the suspicion
+  // this detector exists to avoid.
+  const source = "const releasedOn = '2024-06-20';\nconst v = pkg.version;";
+  assert.deepEqual(
+    extractPins(files({ 'src/misc.ts': source })).filter((p) => p.kind === 'api-version'),
+    [],
+  );
+});
+
+test('an API version pin is reported but never repaired on its own authority', () => {
+  // Emend knows the pin exists and does not know what the current version is —
+  // that needs a vendor registry it does not have. Reporting "you pin Stripe at
+  // 2024-06-20" is useful and true; inventing a target would be the guessing the
+  // planner refuses to do everywhere else.
+  const pins = extractPins(
+    files({ 'src/billing.ts': "new Stripe(k, { apiVersion: '2024-06-20' });" }),
+  );
+  const conflicts = findPinConflicts(pins, new Map());
+  const api = conflicts.find((cf) => cf.subject === 'stripe');
+  assert.equal(api, undefined, 'nothing can arbitrate it, so it is not a conflict');
+});
+
+// ---------------------------------------------------------------------------
 // findPinConflicts — only what can be proven
 // ---------------------------------------------------------------------------
 

@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { readRepo } from './inventory.ts';
 import { scanPins, resolvedVersions } from './pins.ts';
+import { walkDir } from './callsites.ts';
 import {
   fetchPackument,
   fetchPackageDir,
@@ -327,13 +328,25 @@ export async function scanRepo(
   // Versions the repository copied out of its lockfile into places nothing keeps
   // honest. Independent of the surface diff: it needs no registry and no target
   // version, so it runs even for packages that were skipped as unanalyzable.
-  const pinConflicts = await scanPins(resolvedVersions(repo.dependencies), async (file) => {
-    try {
-      return await readFile(path.join(repoDir, file), 'utf8');
-    } catch {
-      return null;
-    }
-  });
+  // Source files carry wire-protocol pins — `apiVersion`, a version header —
+  // which no declaration diff can see, because the vendor versions its protocol
+  // separately from the package that calls it. Bounded: the same walk the call
+  // site pass already does, minus its type checking.
+  const sourceFiles = walkDir(repoDir, ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'])
+    .slice(0, 400)
+    .map((f) => path.relative(repoDir, f));
+  const pinScan = await scanPins(
+    resolvedVersions(repo.dependencies),
+    async (file) => {
+      try {
+        return await readFile(path.join(repoDir, file), 'utf8');
+      } catch {
+        return null;
+      }
+    },
+    sourceFiles,
+  );
+  const pinConflicts = pinScan.conflicts;
 
   return {
     repo: options.repoKey ?? repoDir,
@@ -342,6 +355,7 @@ export async function scanRepo(
     packages,
     warnings,
     pinConflicts,
+    apiVersionPins: pinScan.apiVersions,
     counts: {
       packagesAnalyzed: packages.filter((p) => p.status === 'analyzed').length,
       packagesSkipped: packages.filter((p) => p.status !== 'analyzed').length,

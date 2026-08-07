@@ -129,7 +129,7 @@ function buildProgram(
   return ts.createProgram(fileNames, options);
 }
 
-function walkDir(dir: string, exts: string[]): string[] {
+export function walkDir(dir: string, exts: string[]): string[] {
   const out: string[] = [];
   const skip = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', 'out']);
   const stack = [dir];

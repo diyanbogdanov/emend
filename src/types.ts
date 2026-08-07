@@ -1,4 +1,4 @@
-import type { PinConflict } from './pins.ts';
+import type { PinConflict, VersionPin } from './pins.ts';
 
 export type { PinConflict, VersionPin } from './pins.ts';
 
@@ -238,6 +238,15 @@ export interface ScanReport {
    * API, and counting it among the breaking changes would overstate both.
    */
   pinConflicts: PinConflict[];
+  /**
+   * Wire-protocol versions the repository pins in source.
+   *
+   * Reported, never repaired. A vendor versions its HTTP API separately from the
+   * SDK, so no declaration diff can see this drift — and knowing whether the pin
+   * is stale needs a vendor registry Emend does not have. Naming the pin is
+   * honest; inventing a target would not be.
+   */
+  apiVersionPins: VersionPin[];
   counts: {
     packagesAnalyzed: number;
     packagesSkipped: number;

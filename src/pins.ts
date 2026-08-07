@@ -18,7 +18,7 @@
  * and cannot say a version is "old" without knowing what current means.
  */
 
-export type PinKind = 'docker-image' | 'node-version';
+export type PinKind = 'docker-image' | 'node-version' | 'api-version';
 
 export interface VersionPin {
   /** Repo-relative path. */
@@ -87,6 +87,51 @@ function fromDockerfile(file: string, source: string): VersionPin[] {
   return pins;
 }
 
+/**
+ * Wire-protocol versions pinned in source.
+ *
+ * A vendor versions its HTTP API separately from the SDK that calls it.
+ * `stripe@18` and `apiVersion: '2024-06-20'` move independently, and upgrading
+ * the package does not touch the pin — so a `.d.ts` diff, which is the only
+ * thing Emend had, cannot see this drift at all. It is the same shape as a
+ * Dockerfile tag: a version written as a literal, in a file nothing keeps honest.
+ *
+ * Matched by the vendor's own convention rather than by looking for
+ * version-shaped strings. `version` appears everywhere and a bare date is just a
+ * date; without the surrounding convention, reporting one would be the suspicion
+ * this detector exists to avoid.
+ */
+const API_VERSION_PATTERNS: Array<{ vendor: string; pattern: RegExp }> = [
+  // `new Stripe(key, { apiVersion: '2024-06-20' })`
+  { vendor: 'stripe', pattern: /\bapiVersion:\s*['"]([\d]{4}-[\d]{2}-[\d]{2}[\w.]*)['"]/ },
+  // `'anthropic-version': '2023-06-01'`
+  { vendor: 'anthropic', pattern: /['"]anthropic-version['"]\s*:\s*['"]([\d-]+)['"]/ },
+  // `'openai-version': '...'` and the beta channel header
+  { vendor: 'openai', pattern: /['"]openai-(?:version|beta)['"]\s*:\s*['"]([\w.-]+)['"]/ },
+  // Azure and several others use a query parameter: `?api-version=2024-10-21`
+  { vendor: 'azure', pattern: /[?&]api-version=([\d]{4}-[\d]{2}-[\d]{2}[\w-]*)/ },
+];
+
+function fromSource(file: string, source: string): VersionPin[] {
+  const pins: VersionPin[] = [];
+  source.split('\n').forEach((raw, index) => {
+    for (const { vendor, pattern } of API_VERSION_PATTERNS) {
+      const match = raw.match(pattern);
+      const version = match?.[1];
+      if (!version) continue;
+      pins.push({
+        file,
+        line: index + 1,
+        subject: vendor,
+        version,
+        text: match[0],
+        kind: 'api-version',
+      });
+    }
+  });
+  return pins;
+}
+
 function fromWorkflow(file: string, source: string): VersionPin[] {
   const pins: VersionPin[] = [];
   source.split('\n').forEach((raw, index) => {
@@ -144,6 +189,7 @@ export function extractPins(files: ReadonlyMap<string, string>): VersionPin[] {
       }
     } else if (base === 'package.json') pins.push(...fromManifest(file, source));
     else if (/\.ya?ml$/.test(base)) pins.push(...fromWorkflow(file, source));
+    else if (/\.[cm]?[jt]sx?$/.test(base)) pins.push(...fromSource(file, source));
   }
   return pins;
 }
@@ -277,13 +323,41 @@ const PIN_FILES = [
 export async function scanPins(
   installed: ReadonlyMap<string, string>,
   read: (file: string) => Promise<string | null>,
-): Promise<PinConflict[]> {
+  /**
+   * Repo-relative source files to search for wire-protocol version pins.
+   *
+   * Separate from `PIN_FILES` because the two are found differently. A
+   * Dockerfile is at a known path; an `apiVersion` option is wherever the client
+   * happens to be constructed, so the caller supplies the list it already walked
+   * rather than this module walking the repository a second time.
+   */
+  sourceFiles: string[] = [],
+): Promise<{ conflicts: PinConflict[]; apiVersions: VersionPin[] }> {
   const files = new Map<string, string>();
-  for (const file of PIN_FILES) {
+  for (const file of [...PIN_FILES, ...sourceFiles]) {
+    if (files.has(file)) continue;
     const source = await read(file);
     if (source !== null) files.set(file, source);
   }
-  return findPinConflicts(extractPins(files), installed);
+  const pins = extractPins(files);
+  // Wire-protocol pins are observations, not conflicts. Nothing on this machine
+  // knows what Stripe's current API version is, so there is nothing for them to
+  // disagree with — but "you pin Stripe at 2024-06-20, here is where" is useful
+  // and true, and it is the only view of that drift Emend can offer at all.
+  return { conflicts: findPinConflicts(pins, installed), apiVersions: unarbitratedPins(pins) };
+}
+
+/**
+ * Version pins with nothing able to arbitrate them.
+ *
+ * A wire-protocol pin is one of these by construction: Emend can see that a
+ * repository pins Stripe at `2024-06-20` and has no way to know what the current
+ * version is, which would need a vendor registry it does not have. Reporting the
+ * pin is useful and true; inventing a target would be the guessing the planner
+ * refuses to do everywhere else.
+ */
+export function unarbitratedPins(pins: VersionPin[]): VersionPin[] {
+  return pins.filter((p) => p.kind === 'api-version');
 }
 
 /** One line per conflict, for a report or a prompt. */

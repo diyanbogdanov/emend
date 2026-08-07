@@ -151,6 +151,22 @@ function printScan(report: ScanReport, showAll: boolean): void {
     }
   }
 
+  // Observations, not findings. Emend can see the pin and cannot know whether it
+  // is stale — that needs a vendor registry it does not have — so this block
+  // states what is pinned and where, and claims nothing about whether it should
+  // change. It sits apart from the counts for the same reason.
+  if (report.apiVersionPins.length > 0) {
+    console.log('');
+    console.log(`  ${c.bold('Wire API versions pinned in source')}`);
+    for (const pin of report.apiVersionPins) {
+      console.log(`    ${c.cyan(pin.subject)} ${pin.version}`);
+      console.log(c.dim(`      → ${pin.file}:${pin.line}  ${pin.text}`));
+    }
+    console.log(
+      c.dim('    Reported, not checked: the current version is the vendor’s to publish.'),
+    );
+  }
+
   console.log('');
   console.log(
     `  ${c.bold('Summary')}  ${counts.breaking} breaking · ${counts.deprecation} deprecated · ${counts.callSites} call site(s)`,

@@ -961,7 +961,7 @@ export async function fixPins(
   const phaseOpts = { skipTests: untrusted };
 
   const repo = await readRepo(repoDir);
-  const conflicts = await scanPins(resolvedVersions(repo.dependencies), async (file) => {
+  const { conflicts } = await scanPins(resolvedVersions(repo.dependencies), async (file) => {
     try {
       return await readFile(path.join(repoDir, file), 'utf8');
     } catch {
