@@ -98,7 +98,16 @@ export type Severity =
    * change in anybody's public API; counting it as breaking would overstate both
    * and blunt the one number that carries the product.
    */
-  | 'drift';
+  | 'drift'
+  /**
+   * A known vulnerability in an installed package.
+   *
+   * Its own class for the same reason `drift` is. `axios@0.21.0` alone carries
+   * twenty-five advisories, measured, and folding those into `breaking` would
+   * put a number in front of a reader that means something entirely different
+   * — and would bury every API change in the scan underneath one package.
+   */
+  | 'vulnerability';
 export type Confidence = 'high' | 'medium';
 
 export interface SurfaceChange {
@@ -312,5 +321,7 @@ export interface ScanReport {
     callSites: number;
     /** Reported separately. A drifted pin is not an API break. */
     pinConflicts: number;
+    /** Reported separately too. A CVE is not a change in anybody's public API. */
+    vulnerabilities: number;
   };
 }

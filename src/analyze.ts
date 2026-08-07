@@ -11,7 +11,13 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { readRepo } from './inventory.ts';
 import { scanPins, resolvedVersions } from './pins.ts';
-import { detectorsFor, groupByDetector, runDetectors, type HttpContractOptions } from './detectors.ts';
+import {
+  detectorsFor,
+  groupByDetector,
+  runDetectors,
+  type HttpContractOptions,
+  type VulnerabilityOptions,
+} from './detectors.ts';
 import { walkDir } from './callsites.ts';
 import {
   fetchPackument,
@@ -54,6 +60,13 @@ export interface ScanOptions {
    * requests to every host in the source tree.
    */
   contracts?: HttpContractOptions;
+  /**
+   * Check the installed tree against a vulnerability database.
+   *
+   * Off unless a scanner is supplied, for the same reason contracts are: it
+   * reaches the network, and that is the caller's decision to make.
+   */
+  vulnerabilities?: VulnerabilityOptions;
   /** Progress callback for CLI output. */
   onProgress?: (message: string) => void;
   /**
@@ -355,18 +368,24 @@ export async function scanRepo(
   // Everything downstream — the store, the dashboard, the pull request renderer
   // — consumes findings. A detector that produces anything else is invisible to
   // all of it, which is what kept pin drift out of every one of them.
-  const detected = await runDetectors(detectorsFor({ ...(options.contracts ? { contracts: options.contracts } : {}) }), {
-    repoDir,
-    dependencies: repo.dependencies,
-    sourceFiles,
-    read: async (file) => {
-      try {
-        return await readFile(path.join(repoDir, file), 'utf8');
-      } catch {
-        return null;
-      }
+  const detected = await runDetectors(
+    detectorsFor({
+      ...(options.contracts ? { contracts: options.contracts } : {}),
+      ...(options.vulnerabilities ? { vulnerabilities: options.vulnerabilities } : {}),
+    }),
+    {
+      repoDir,
+      dependencies: repo.dependencies,
+      sourceFiles,
+      read: async (file) => {
+        try {
+          return await readFile(path.join(repoDir, file), 'utf8');
+        } catch {
+          return null;
+        }
+      },
     },
-  });
+  );
   // Carried into the report rather than dropped: a host whose description was
   // located and not trusted is not a host that came back clean.
   warnings.push(...detected.notes);
@@ -387,6 +406,9 @@ export async function scanRepo(
   const deprecation = packages
     .flatMap((p) => p.findings)
     .filter((f) => f.change.severity === 'deprecation').length;
+  const vulnerabilities = packages
+    .flatMap((p) => p.findings)
+    .filter((f) => f.change.severity === 'vulnerability').length;
 
   return {
     repo: options.repoKey ?? repoDir,
@@ -403,6 +425,7 @@ export async function scanRepo(
       deprecation,
       callSites: callSiteCount,
       pinConflicts: pinConflicts.length,
+      vulnerabilities,
     },
   };
 }

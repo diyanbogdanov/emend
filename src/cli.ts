@@ -22,6 +22,8 @@ import { verificationPassed } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { openCodeHarness, type Harness } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
+import { scanPackages } from './osv.ts';
+import type { VulnerabilityOptions } from './detectors.ts';
 import type { SpecCandidate } from './specs.ts';
 import { listModels } from './llm/client.ts';
 import {
@@ -134,8 +136,24 @@ function contractsFrom(args: Args): { resolve: (v: { domain: string }) => Promis
   return { resolve: (vendor) => resolveSpec(vendor, { fetch, cacheDir, github }) };
 }
 
+/**
+ * Vulnerability scanning, when it was asked for.
+ *
+ * The scanner is handed over rather than a flag set, for the same reason the
+ * spec resolver is: enabling it means choosing to send this repository's
+ * dependency list to a third party, and that belongs to whoever supplies the
+ * thing that sends it. OSV needs no key and imposes no rate limit.
+ */
+function vulnerabilitiesFrom(args: Args): VulnerabilityOptions | undefined {
+  const flag = args.flags.get('vulns');
+  if (flag === undefined || flag === false) return undefined;
+  const fetch = httpFetcher({ timeoutMs: 30_000 });
+  return { scan: (packages) => scanPackages(fetch, packages) };
+}
+
 function severityLabel(sev: string): string {
   if (sev === 'breaking') return c.red('breaking');
+  if (sev === 'vulnerability') return c.red('vulnerable');
   if (sev === 'deprecation') return c.yellow('deprecated');
   return c.dim(sev);
 }
@@ -170,6 +188,9 @@ function printScan(report: ScanReport, showAll: boolean): void {
       console.log(
         `    ${severityLabel(f.change.severity)} ${c.cyan(f.change.path)} ${c.dim(`(${f.change.kind}, ${f.confidence} confidence, id ${f.id})`)}`,
       );
+      // The most useful line a vulnerability finding carries: which advisories,
+      // what one bump clears, and what it leaves behind.
+      if (f.change.guidance) console.log(c.dim(`      ${f.change.guidance}`));
       for (const s of f.sites) {
         console.log(`      ${c.dim('→')} ${s.file}:${s.line}:${s.column}  ${c.dim(s.text)}`);
       }
@@ -231,6 +252,14 @@ function printScan(report: ScanReport, showAll: boolean): void {
   if (counts.pinConflicts > 0) {
     console.log(c.dim(`           ${counts.pinConflicts} version pin(s) disagree`));
   }
+  // Its own line, not folded into the headline. A CVE is not an API change, and
+  // a reader who sees two vulnerabilities listed above a "0 breaking" summary
+  // reasonably concludes the summary is broken.
+  if (counts.vulnerabilities > 0) {
+    console.log(
+      c.dim(`           ${counts.vulnerabilities} package(s) with known vulnerabilities`),
+    );
+  }
   console.log(
     c.dim(
       `           ${counts.packagesAnalyzed} package(s) analyzed, ${counts.packagesSkipped} skipped (skipped ≠ clean)`,
@@ -253,10 +282,12 @@ async function cmdScan(args: Args): Promise<number> {
 
   const repo = await readRepo(repoDir);
   const contracts = contractsFrom(args);
+  const vulnerabilities = vulnerabilitiesFrom(args);
   const report = await scanRepo(repoDir, {
     ...(only ? { only } : {}),
     includeDev: args.flags.get('no-dev') !== true,
     ...(contracts ? { contracts } : {}),
+    ...(vulnerabilities ? { vulnerabilities } : {}),
     onProgress: args.flags.get('json') === true ? () => {} : (m) => console.log(c.dim(`  ${m}`)),
   });
 
@@ -823,6 +854,10 @@ ${c.bold('COMMANDS')}
                     unauthenticated GitHub allows 60 requests an hour.
     --github-org o  Name the provider's GitHub organisation, for vendors whose
                     own records do not link back to their API domain.
+    --vulns         Also check the installed tree for known vulnerabilities.
+                    Screens every package in the lockfile against OSV — no key,
+                    no rate limit — and proposes the one bump that clears the
+                    most advisories per package.
     --json          Machine-readable output
 
   fix <repo>      Plan, apply, and verify migrations in an isolated workspace.

@@ -14,10 +14,14 @@
  */
 
 import { createHash } from 'node:crypto';
+import ts from 'typescript';
+import { readLockfile } from './lockfile.ts';
+import { packageOfSpecifier } from './callsites.ts';
+import { remediationTarget, type InstalledPackage, type VulnerablePackage } from './osv.ts';
 import { extractPins, findPinConflicts, resolvedVersions, PIN_FILES } from './pins.ts';
 import { checkAgainstSpec, findHttpCalls, type HttpCall } from './httpsites.ts';
 import { describeProvenance, type SpecCandidate } from './specs.ts';
-import type { Detector, Finding, InstalledDependency } from './types.ts';
+import type { CallSite, Detector, Finding, InstalledDependency } from './types.ts';
 
 /**
  * What every detector is given.
@@ -252,6 +256,8 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
 export const DETECTORS: Detector[] = [versionPinDetector];
 
 export interface DetectorSelection {
+  /** Enable the vulnerability detector by handing it a scanner. */
+  vulnerabilities?: VulnerabilityOptions;
   /**
    * Enable the contract detector by handing it a resolver.
    *
@@ -267,6 +273,7 @@ export interface DetectorSelection {
 export function detectorsFor(selection: DetectorSelection): Detector[] {
   return [
     versionPinDetector,
+    ...(selection.vulnerabilities ? [vulnerabilityDetector(selection.vulnerabilities)] : []),
     ...(selection.contracts ? [httpContractDetector(selection.contracts)] : []),
   ];
 }
@@ -281,6 +288,7 @@ export function detectorsFor(selection: DetectorSelection): Detector[] {
  */
 const DETECTOR_LABELS: Record<string, string> = {
   'version-pin': 'version pins',
+  vulnerability: 'vulnerabilities',
   'http-contract': 'http contracts',
 };
 
@@ -335,4 +343,182 @@ export async function runDetectors(
   }
 
   return { findings, notes, failures };
+}
+
+function vulnFindingId(name: string, from: string, ids: string[]): string {
+  return createHash('sha256')
+    .update(`vulnerability|${name}|${from}|${[...ids].sort().join(',')}`)
+    .digest('hex')
+    .slice(0, 12);
+}
+
+/** Where a source file imports a package, so a vulnerability can point at it. */
+function importSites(file: string, source: string, pkg: string): CallSite[] {
+  const sf = ts.createSourceFile(file, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
+  const sites: CallSite[] = [];
+
+  const record = (node: ts.Node, specifier: string): void => {
+    if (packageOfSpecifier(specifier) !== pkg) return;
+    const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+    sites.push({
+      file,
+      line: line + 1,
+      column: character + 1,
+      text: node.getText(sf).split('\n')[0]?.slice(0, 120) ?? '',
+      via: 'import',
+    });
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
+      record(node, node.moduleSpecifier.text);
+    } else if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'require' &&
+      node.arguments[0] &&
+      ts.isStringLiteralLike(node.arguments[0])
+    ) {
+      record(node, node.arguments[0].text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return sites;
+}
+
+/** The lockfile line declaring a package, so a transitive finding still has evidence. */
+function lockfileSite(lockfile: string, installPath: string): CallSite {
+  const lines = lockfile.split('\n');
+  const index = lines.findIndex((l) => l.includes(`"${installPath}"`));
+  return {
+    file: 'package-lock.json',
+    line: index === -1 ? 1 : index + 1,
+    column: 1,
+    text: installPath,
+    via: 'import',
+  };
+}
+
+export interface VulnerabilityOptions {
+  /** Injected: this detector reaches the network, and that is the caller's call. */
+  scan: (packages: InstalledPackage[]) => Promise<VulnerablePackage[]>;
+}
+
+/**
+ * Known vulnerabilities in the installed tree, with what one bump would fix.
+ *
+ * **One finding per package, not per advisory.** `axios@0.21.0` alone carries
+ * twenty-five, measured, and a finding each would bury every other finding in
+ * the scan under a single dependency — a report nobody finishes is worth less
+ * than none. It is also what the remediation actually is: one bump, verified
+ * once, clearing all of them.
+ *
+ * **Reachability is evidence, never a filter.** A package the repository
+ * imports carries those imports as its call sites, which is the thing `npm
+ * audit` cannot say. A package nothing imports carries its lockfile entry
+ * instead — it is three levels down and still runs in this process, because its
+ * parent calls it, so suppressing it would be Emend asserting something it has
+ * not established.
+ */
+export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
+  return {
+    id: 'vulnerability',
+
+    async applies(ctx: DetectorContext): Promise<boolean> {
+      // The installed tree is the input. Without one there is nothing to ask
+      // about, and answering that must not cost a request.
+      const lock = await readLockfile(ctx.repoDir);
+      return lock.tree.size > 0;
+    },
+
+    async detect(ctx: DetectorContext): Promise<{ findings: Finding[]; notes: string[] }> {
+      const notes: string[] = [];
+      const lock = await readLockfile(ctx.repoDir);
+      if (lock.unsupported) {
+        notes.push(`${lock.unsupported} could not be read, so its packages were not checked`);
+      }
+
+      // The whole tree, not the direct dependencies. Most vulnerabilities in a
+      // real repository are transitive, and screening only what package.json
+      // names would miss the majority of them.
+      const byName = new Map<string, string>();
+      const packages: InstalledPackage[] = [];
+      for (const entry of lock.tree.values()) {
+        const key = `${entry.name}@${entry.version}`;
+        if (byName.has(key)) continue;
+        byName.set(key, entry.installPath);
+        packages.push({ name: entry.name, ecosystem: 'npm', version: entry.version });
+      }
+      if (packages.length === 0) return { findings: [], notes };
+
+      let vulnerable: VulnerablePackage[];
+      try {
+        vulnerable = await options.scan(packages);
+      } catch (err) {
+        // Said, not swallowed. An empty finding list from a scan that never ran
+        // renders as a clean repository.
+        notes.push(
+          `the vulnerability database could not be reached, so ${packages.length} installed package(s) were not checked — ${(err as Error).message}`,
+        );
+        return { findings: [], notes };
+      }
+
+      const lockRaw = (await ctx.read('package-lock.json')) ?? '';
+      const findings: Finding[] = [];
+
+      for (const pkg of vulnerable) {
+        const target = remediationTarget(pkg);
+
+        const sites: CallSite[] = [];
+        for (const file of ctx.sourceFiles) {
+          if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
+          const source = await ctx.read(file);
+          if (source !== null) sites.push(...importSites(file, source, pkg.name));
+        }
+        const imported = sites.length > 0;
+        if (!imported) {
+          sites.push(lockfileSite(lockRaw, byName.get(`${pkg.name}@${pkg.version}`) ?? pkg.name));
+        }
+
+        // Deduplicated: separate advisories routinely alias the same CVE, and
+        // listing it twice reads as two problems.
+        const named = [...new Set(pkg.vulnerabilities.map((v) => v.cve ?? v.id))].join(', ');
+        const reach = imported
+          ? `imported at ${sites.length} site(s) in this repository`
+          : 'not imported from this repository’s source — it runs because a dependency calls it';
+        const leaves =
+          target.leaves.length > 0
+            ? ` ${target.leaves.length} has no published fix and survives the upgrade: ${target.leaves.join(', ')}.`
+            : '';
+        const guidance = target.version
+          ? `${named}. Upgrading to ${target.version} clears ${target.clears} of ${pkg.vulnerabilities.length}.${leaves} ${reach}.`
+          : `${named}. No published fix, so no upgrade is proposed. ${reach}.`;
+
+        findings.push({
+          id: vulnFindingId(pkg.name, pkg.version, pkg.vulnerabilities.map((v) => v.id)),
+          detector: 'vulnerability',
+          pkg: pkg.name,
+          fromVersion: pkg.version,
+          // Unfixable stays at the installed version rather than naming a
+          // target that does not exist.
+          toVersion: target.version ?? pkg.version,
+          change: {
+            path: pkg.vulnerabilities[0]?.id ?? pkg.name,
+            kind: 'version-drift',
+            severity: 'vulnerability',
+            confidence: 'high',
+            before: pkg.version,
+            after: target.version,
+            guidance,
+          },
+          sites,
+          // OSV states the affected range and the version is read from the
+          // lockfile. Neither is a guess.
+          confidence: 'high',
+        });
+      }
+      return { findings, notes };
+    },
+  };
 }
