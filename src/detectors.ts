@@ -358,39 +358,58 @@ function vulnFindingId(name: string, from: string, ids: string[]): string {
     .slice(0, 12);
 }
 
-/** Where a source file imports a package, so a vulnerability can point at it. */
-function importSites(file: string, source: string, pkg: string): CallSite[] {
-  const sf = ts.createSourceFile(file, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
-  const sites: CallSite[] = [];
+/**
+ * Every package this repository imports, and where.
+ *
+ * Built once over the whole source tree rather than once per package. The
+ * per-package version was O(files × packages) — on a repository with 19,000
+ * files and 28 vulnerable packages that is half a million parses. One pass is
+ * 19,000, measured at nine seconds, and it answers every lookup for free.
+ */
+export async function indexImports(
+  files: string[],
+  read: (file: string) => Promise<string | null>,
+): Promise<Map<string, CallSite[]>> {
+  const index = new Map<string, CallSite[]>();
 
-  const record = (node: ts.Node, specifier: string): void => {
-    if (packageOfSpecifier(specifier) !== pkg) return;
-    const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
-    sites.push({
-      file,
-      line: line + 1,
-      column: character + 1,
-      text: node.getText(sf).split('\n')[0]?.slice(0, 120) ?? '',
-      via: 'import',
-    });
-  };
+  for (const file of files) {
+    if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
+    const source = await read(file);
+    if (source === null) continue;
+    const sf = ts.createSourceFile(file, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
 
-  const visit = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
-      record(node, node.moduleSpecifier.text);
-    } else if (
-      ts.isCallExpression(node) &&
-      ts.isIdentifier(node.expression) &&
-      node.expression.text === 'require' &&
-      node.arguments[0] &&
-      ts.isStringLiteralLike(node.arguments[0])
-    ) {
-      record(node, node.arguments[0].text);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sf);
-  return sites;
+    const record = (node: ts.Node, specifier: string): void => {
+      const pkg = packageOfSpecifier(specifier);
+      if (!pkg) return;
+      const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+      const sites = index.get(pkg) ?? [];
+      sites.push({
+        file,
+        line: line + 1,
+        column: character + 1,
+        text: node.getText(sf).split('\n')[0]?.slice(0, 120) ?? '',
+        via: 'import',
+      });
+      index.set(pkg, sites);
+    };
+
+    const visit = (node: ts.Node): void => {
+      if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
+        record(node, node.moduleSpecifier.text);
+      } else if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'require' &&
+        node.arguments[0] &&
+        ts.isStringLiteralLike(node.arguments[0])
+      ) {
+        record(node, node.arguments[0].text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  return index;
 }
 
 /** The lockfile line declaring a package, so a transitive finding still has evidence. */
@@ -491,17 +510,14 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
       const ordered = facts.size > 0 ? rankVulnerable(vulnerable, facts) : vulnerable;
 
       const lockRaw = (await ctx.read('package-lock.json')) ?? '';
+      // One pass over the source tree, then a lookup per package.
+      const imports = await indexImports(ctx.sourceFiles, ctx.read);
       const findings: Finding[] = [];
 
       for (const pkg of ordered) {
         const target = remediationTarget(pkg);
 
-        const sites: CallSite[] = [];
-        for (const file of ctx.sourceFiles) {
-          if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
-          const source = await ctx.read(file);
-          if (source !== null) sites.push(...importSites(file, source, pkg.name));
-        }
+        const sites: CallSite[] = [...(imports.get(pkg.name) ?? [])];
         const imported = sites.length > 0;
         if (!imported) {
           sites.push(lockfileSite(lockRaw, byName.get(`${pkg.name}@${pkg.version}`) ?? pkg.name));

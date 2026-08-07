@@ -364,12 +364,30 @@ export async function scanRepo(
   // the walk never collected — `--lint` silently found nothing until this list
   // included them. `walkDir` matches by suffix, so a bare `Dockerfile` is named
   // in full and `api.Dockerfile` matches the same entry.
-  const sourceFiles = walkDir(repoDir, [
+  const walked = walkDir(repoDir, [
     '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',
     '.sh', '.bash', 'Dockerfile', 'Containerfile',
-  ])
-    .slice(0, 400)
-    .map((f) => path.relative(repoDir, f));
+  ]).map((f) => path.relative(repoDir, f));
+
+  // Partitioned before capping, because a flat cap drops by walk order and the
+  // walk order is arbitrary. Measured on n8n: a cap of 400 over 19,333 files
+  // hid 8 of 8 Dockerfiles and 7 of 9 shell scripts, so `--lint` reported almost
+  // nothing and read as clean. There are never many of these, so they are never
+  // the thing worth dropping.
+  const configFiles = walked.filter((f) => /(Dockerfile|Containerfile)|\.(sh|bash)$/.test(f));
+  const codeFiles = walked.filter((f) => !configFiles.includes(f));
+
+  // Ten thousand rather than four hundred, on measurement: a full TypeScript
+  // parse of 19,316 files costs nine seconds, which a scan can afford — and the
+  // alternative is asserting "not imported from this repository's source" having
+  // read two percent of it.
+  const MAX_CODE_FILES = 10_000;
+  if (codeFiles.length > MAX_CODE_FILES) {
+    warnings.push(
+      `${codeFiles.length} source files found; only the first ${MAX_CODE_FILES} were read, so call sites and reachability are incomplete`,
+    );
+  }
+  const sourceFiles = [...configFiles, ...codeFiles.slice(0, MAX_CODE_FILES)];
   const pinScan = await scanPins(
     resolvedVersions(repo.dependencies),
     async (file) => {
