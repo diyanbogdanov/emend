@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PROVENANCE_RANK,
+  SPEC_SOURCES,
   bestSpec,
   canAssertBreakage,
+  provenanceOfPointer,
   wellKnownSpecPaths,
   type SpecCandidate,
 } from '../src/specs.ts';
@@ -45,13 +47,40 @@ test('official GitHub beats a curated or community copy', () => {
 });
 
 test('the ranking runs from provider-controlled down to inferred', () => {
-  // The order is the whole model: everything above `curated` is controlled by
-  // the provider or verified as theirs; everything below is somebody's copy.
+  // The order is the whole model: the further from the provider, the less the
+  // copy in hand says about the API.
   assert.ok(PROVENANCE_RANK['official-domain'] > PROVENANCE_RANK['official-github']);
-  assert.ok(PROVENANCE_RANK['official-github'] > PROVENANCE_RANK['verified-swaggerhub']);
+  assert.ok(PROVENANCE_RANK['official-github'] > PROVENANCE_RANK['directory-apis-io']);
+  assert.ok(PROVENANCE_RANK['verified-swaggerhub'] > PROVENANCE_RANK['verified-postman']);
   assert.ok(PROVENANCE_RANK['verified-postman'] > PROVENANCE_RANK['curated']);
   assert.ok(PROVENANCE_RANK['curated'] > PROVENANCE_RANK['aggregator-apis-guru']);
   assert.ok(PROVENANCE_RANK['aggregator-apis-guru'] > PROVENANCE_RANK['extracted-from-docs']);
+});
+
+test('a directory of provider-published pointers outranks a third party’s copy', () => {
+  // An APIs.json manifest is published *by the provider*, so an apis.io entry is
+  // a pointer the provider chose. SwaggerHub and Postman hold copies — verified
+  // ones, but still somebody else's bytes on somebody else's platform. A pointer
+  // to the provider beats a copy of the provider.
+  assert.ok(PROVENANCE_RANK['directory-apis-io'] > PROVENANCE_RANK['verified-swaggerhub']);
+  assert.ok(PROVENANCE_RANK['directory-apis-io'] > PROVENANCE_RANK['verified-postman']);
+
+  const chosen = bestSpec([
+    candidate({ provenance: 'verified-swaggerhub' }),
+    candidate({ provenance: 'verified-postman' }),
+    candidate({ provenance: 'directory-apis-io' }),
+  ]);
+  assert.equal(chosen?.provenance, 'directory-apis-io');
+});
+
+test('the directory is consulted before the platforms that host copies', () => {
+  // Consult order, not just rank: following the cheapest route that tends to
+  // land on the provider avoids fetching a copy we would then have to discount.
+  const order = SPEC_SOURCES.map((s) => s.id);
+  assert.ok(order.indexOf('apis-io') < order.indexOf('swaggerhub'));
+  assert.ok(order.indexOf('apis-io') < order.indexOf('postman'));
+  // First-party still goes first — the directory is a route to it, not a rival.
+  assert.ok(order.indexOf('well-known') < order.indexOf('apis-io'));
 });
 
 test('nothing at all yields nothing, rather than a default', () => {
@@ -74,6 +103,58 @@ test('only a provider-controlled spec may assert that a call is broken', () => {
   assert.equal(canAssertBreakage(candidate({ provenance: 'curated' })), false);
   assert.equal(canAssertBreakage(candidate({ provenance: 'aggregator-apis-guru' })), false);
   assert.equal(canAssertBreakage(candidate({ provenance: 'extracted-from-docs' })), false);
+});
+
+test('preferring a source is not the same as trusting it', () => {
+  // The reorder above is why these are two questions rather than one cutoff.
+  // apis.io is the better route — it usually points at the provider — but when
+  // the pointer lands on a third-party host, following a good route does not
+  // make the destination first-party. Rank orders what to try; the authority
+  // set decides what may be claimed. Folding them into one number means any
+  // future reorder silently hands out claim rights.
+  assert.ok(PROVENANCE_RANK['directory-apis-io'] > PROVENANCE_RANK['verified-swaggerhub']);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'directory-apis-io' })), false);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'verified-swaggerhub' })), true);
+});
+
+// ---------------------------------------------------------------------------
+// Discovery source versus truth source
+// ---------------------------------------------------------------------------
+
+test('a pointer onto the provider’s own domain is first-party, whoever found it', () => {
+  // The directory's value is that it usually points home. When it does, the
+  // candidate is the provider's file — the route it arrived by does not
+  // downgrade it. This is the whole discovery-versus-truth distinction: apis.io
+  // told us where to look, stripe.com is what we read.
+  assert.equal(
+    provenanceOfPointer('https://stripe.com/openapi.json', 'stripe.com'),
+    'official-domain',
+  );
+  assert.equal(
+    provenanceOfPointer('https://api.stripe.com/v1/openapi.json', 'stripe.com'),
+    'official-domain',
+  );
+});
+
+test('a pointer onto somebody else’s host keeps the directory’s own standing', () => {
+  // Only the residual case is the directory tier: apis.io listed it, but the
+  // bytes live somewhere the provider does not control.
+  assert.equal(
+    provenanceOfPointer('https://cdn.example.net/stripe.json', 'stripe.com'),
+    'directory-apis-io',
+  );
+});
+
+test('a pointer to the provider’s GitHub is first-party too', () => {
+  assert.equal(
+    provenanceOfPointer('https://raw.githubusercontent.com/stripe/openapi/master/spec3.json', 'stripe.com', 'stripe'),
+    'official-github',
+  );
+  // …but only for the provider's own org. Anyone can host a mirror on GitHub.
+  assert.equal(
+    provenanceOfPointer('https://raw.githubusercontent.com/someone/stripe-mirror/main/spec.json', 'stripe.com', 'stripe'),
+    'directory-apis-io',
+  );
 });
 
 test('a Postman collection is never treated as a contract', () => {

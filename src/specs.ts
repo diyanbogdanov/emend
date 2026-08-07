@@ -23,6 +23,14 @@
 /**
  * Where a description came from, ordered by how close it sits to the provider.
  *
+ * `directory-apis-io` sits above the platforms that host copies because an
+ * APIs.json manifest is published *by the provider*: an apis.io entry is a
+ * pointer the provider chose, where SwaggerHub and Postman hold somebody else's
+ * bytes on somebody else's platform, verified account or not. A pointer to the
+ * provider beats a copy of the provider — and usually resolves to first-party
+ * anyway, at which point `provenanceOfPointer` says so and this tier never
+ * applies.
+ *
  * `aggregator-apis-guru` is called out by name rather than folded into a general
  * "aggregator" bucket: its README still advertises weekly refreshes while the
  * corpus is no longer actively maintained, which makes it a good bootstrap and a
@@ -31,6 +39,7 @@
 export type SpecProvenance =
   | 'official-domain'
   | 'official-github'
+  | 'directory-apis-io'
   | 'verified-swaggerhub'
   | 'verified-postman'
   | 'curated'
@@ -39,15 +48,16 @@ export type SpecProvenance =
   | 'extracted-from-docs';
 
 /**
- * Confidence, on the scale the ranking was designed against.
+ * Which candidate to prefer when several describe the same API.
  *
- * The numbers matter less than the boundary at 90: at or above it the provider
- * controls or has verified the description, and below it somebody else is
- * holding a copy.
+ * Preference only. What a candidate entitles Emend to *say* is a separate
+ * question, answered by `PROVIDER_CONTROLLED`, and the two are deliberately not
+ * the same number — see `canAssertBreakage`.
  */
 export const PROVENANCE_RANK: Record<SpecProvenance, number> = {
   'official-domain': 100,
   'official-github': 95,
+  'directory-apis-io': 92,
   'verified-swaggerhub': 90,
   'verified-postman': 85,
   curated: 75,
@@ -56,8 +66,20 @@ export const PROVENANCE_RANK: Record<SpecProvenance, number> = {
   'extracted-from-docs': 30,
 };
 
-/** The line above which a description is the provider's word rather than a copy. */
-const AUTHORITATIVE = 90;
+/**
+ * The provenances under which the provider wrote or vouched for the description.
+ *
+ * An explicit set rather than a cutoff on `PROVENANCE_RANK`, because the two
+ * orderings genuinely differ: a directory that points at third-party bytes is
+ * the best *route* to try and still not the provider's word. A cutoff makes
+ * every future reorder of the preference list silently hand out claim rights,
+ * which is precisely the kind of quiet widening this file exists to prevent.
+ */
+const PROVIDER_CONTROLLED: ReadonlySet<SpecProvenance> = new Set([
+  'official-domain',
+  'official-github',
+  'verified-swaggerhub',
+]);
 
 export interface SpecCandidate {
   vendor: string;
@@ -101,7 +123,52 @@ export function bestSpec(candidates: SpecCandidate[]): SpecCandidate | undefined
  * says nothing about whether the endpoint exists.
  */
 export function canAssertBreakage(candidate: SpecCandidate): boolean {
-  return PROVENANCE_RANK[candidate.provenance] >= AUTHORITATIVE;
+  return PROVIDER_CONTROLLED.has(candidate.provenance);
+}
+
+/** Whether `host` is `domain` or something under it — `api.stripe.com` for `stripe.com`. */
+function isUnder(host: string, domain: string): boolean {
+  return host === domain || host.endsWith(`.${domain}`);
+}
+
+const GITHUB_HOSTS = ['github.com', 'raw.githubusercontent.com', 'gist.githubusercontent.com'];
+
+/**
+ * What a directory entry is worth once its pointer is followed.
+ *
+ * A directory does not hold descriptions, it holds addresses, so its listing
+ * says where to look and the address says whose file it is. When apis.io points
+ * at the provider's own domain the candidate *is* the provider's file, and the
+ * route it arrived by neither adds to that nor takes from it. Only the residual
+ * case — listed, but hosted somewhere the provider does not control — keeps the
+ * directory's own standing.
+ *
+ * `vendorOrg` is required to credit a GitHub URL, because anyone may host a
+ * mirror there; without it a github.com address is just an address.
+ */
+export function provenanceOfPointer(
+  url: string,
+  vendorDomain: string,
+  vendorOrg?: string,
+): SpecProvenance {
+  let host: string;
+  let path: string;
+  try {
+    const parsed = new URL(url);
+    host = parsed.hostname.toLowerCase();
+    path = parsed.pathname;
+  } catch {
+    return 'directory-apis-io';
+  }
+
+  if (isUnder(host, vendorDomain.toLowerCase())) return 'official-domain';
+
+  if (vendorOrg && GITHUB_HOSTS.includes(host)) {
+    const org = path.split('/').filter(Boolean)[0];
+    if (org?.toLowerCase() === vendorOrg.toLowerCase()) return 'official-github';
+  }
+
+  return 'directory-apis-io';
 }
 
 /**
@@ -135,6 +202,35 @@ export function wellKnownSpecPaths(origin: string): string[] {
   if (base.protocol !== 'https:' && base.protocol !== 'http:') return [];
   return WELL_KNOWN.map((p) => new URL(p, base.origin).toString());
 }
+
+export interface SpecSource {
+  id: 'well-known' | 'github' | 'apis-io' | 'swaggerhub' | 'postman' | 'apis-guru';
+  /** What a hit is worth before any pointer it carries has been followed. */
+  yields: SpecProvenance;
+}
+
+/**
+ * The order to consult sources in, best route first.
+ *
+ * Distinct from `PROVENANCE_RANK`, which compares candidates already in hand.
+ * This decides what to try, and trying the cheapest route that tends to land on
+ * the provider avoids fetching a copy that would then have to be discounted.
+ */
+export const SPEC_SOURCES: readonly SpecSource[] = [
+  // The provider's own origin. Nothing is closer, and it costs one request.
+  { id: 'well-known', yields: 'official-domain' },
+  // The provider's own repository, where most specs that are versioned live.
+  { id: 'github', yields: 'official-github' },
+  // A directory of provider-published manifests: usually a pointer home.
+  { id: 'apis-io', yields: 'directory-apis-io' },
+  // Platforms holding copies, in order of how firmly the account is tied to the
+  // provider. Postman is last of the two because a collection is not a contract.
+  { id: 'swaggerhub', yields: 'verified-swaggerhub' },
+  { id: 'postman', yields: 'verified-postman' },
+  // Bootstrap only. Unmaintained, so a difference here is as likely to be drift
+  // in the mirror as in the API.
+  { id: 'apis-guru', yields: 'aggregator-apis-guru' },
+];
 
 /** One line per candidate, for a finding's evidence. */
 export function describeProvenance(candidate: SpecCandidate): string {
