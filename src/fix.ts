@@ -632,6 +632,294 @@ function verificationErrors(report: VerificationReport): string {
  *
  * So the unit of work is the package upgrade, not the individual finding.
  */
+/**
+ * The repair loop: propose, gate, apply, verify, keep or roll back.
+ *
+ * Extracted from `fixPackage` so `fixVulnerability` can use it, which is the
+ * whole point. Snyk computes which upgrade clears an advisory and stops there;
+ * when that upgrade is breaking, the breakage is handed back to you. Emend's
+ * answer to a breaking upgrade already existed — it was simply wired only to
+ * drift findings, so a security bump that broke the build was reported as a
+ * failure by the one tool in the repository that knew how to fix it.
+ *
+ * Both callers need the same subtle parts and must not be allowed to drift:
+ * the evidence gate that withholds edits the failure did not ask for, and the
+ * keep-or-roll-back rule that lets a wide migration climb instead of restarting
+ * from the original errors on every attempt.
+ *
+ * `findings` is the drift findings, used to rank candidate symbols and to seed
+ * the changes the gate judges against. A vulnerability bump has none, and both
+ * uses degrade to "whatever the compiler named", which is what that path has.
+ */
+async function runAgentRepair(input: {
+  config: LlmConfig;
+  ws: Workspace;
+  phaseOpts: { skipTests: boolean };
+  baseline: Awaited<ReturnType<typeof runPhase>>;
+  /** Package and versions, and the call sites `loadSources` starts from. */
+  finding: Finding;
+  /** Drift findings, when there are any. */
+  findings: Finding[];
+  toSymbols: Record<string, ApiSymbol>;
+  verification: VerificationReport;
+  post: Awaited<ReturnType<typeof runPhase>>;
+  progress: (message: string) => void;
+}): Promise<{
+  verification: VerificationReport;
+  post: Awaited<ReturnType<typeof runPhase>>;
+  sources: Map<string, string>;
+  collateral: string[];
+  referenced: string[];
+  candidates: string[];
+  /** Edits this loop applied and kept. The caller adds it to its own count. */
+  appliedCount: number;
+  attempts: AgentAttempt[];
+  rationale: string;
+  initialErrors: number;
+}> {
+  const { config, ws, phaseOpts, baseline, finding, findings, toSymbols, progress } = input;
+  // The body was moved verbatim; these keep its two names for the same finding.
+  const first = finding;
+  const agentFinding = finding;
+  let verification = input.verification;
+  let post = input.post;
+  // A delta, not a total: the caller has its own deterministic-edit count.
+  let appliedCount = 0;
+
+  progress(`agent: ${config.model} via ${config.providerLabel}`);
+  const failureOutput = verificationErrors(verification);
+
+  // Two hops, which is what this class of failure needs. The output names a
+  // failing test; that test names the file it asserts against. a scanned repository's
+  // Docker contract test is exactly this shape — the output never mentions
+  // the Dockerfile, only the test that reads it.
+  const collateral = await filesNamedInOutput(failureOutput, ws.dir);
+  let sources = await loadSources(ws.dir, agentFinding, collateral);
+  const referenced = (
+    await filesNamedInOutput([...sources.values()].join('\n'), ws.dir)
+  ).filter((f) => !sources.has(f));
+  if (referenced.length > 0) {
+    sources = await loadSources(ws.dir, agentFinding, [...collateral, ...referenced]);
+  }
+  const added = [...sources.keys()].filter(
+    (f) => !agentFinding.sites.some((s) => s.file === f),
+  );
+  if (added.length > 0) progress(`  including ${added.join(', ')}`);
+  // Interleave each finding's relevance-ranked candidates rather than
+  // concatenating them. Concatenation means the prompt's cutoff falls inside
+  // the first finding's list, so with nine broken symbols the model never
+  // sees a replacement for eight of them.
+  // Symbols the compiler itself named come first. The candidate list is
+  // ranked by name similarity to the *findings*, so migrating `Cell` ranked
+  // `TooltipValueType` near the bottom and the cutoff removed it — even
+  // though recharts exports it publicly and it is exactly the type the
+  // errors are about. The model, told to use only listed symbols, then had
+  // no way to name the constraint and widened to `any` instead.
+  const namedByCompiler = symbolsNamedInErrors(failureOutput, toSymbols);
+  const ranked = [
+    namedByCompiler,
+    ...findings.map((f) => nearbySymbols(f.change.path, toSymbols)),
+  ];
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < Math.max(0, ...ranked.map((r) => r.length)); i++) {
+    for (const list of ranked) {
+      const symbol = list[i];
+      if (symbol !== undefined && !seen.has(symbol)) {
+        seen.add(symbol);
+        candidates.push(symbol);
+      }
+    }
+  }
+  // One program build per distinct source set. The set can grow mid-run
+  // when a rollback pulls in more files, and an impact list computed for a
+  // different set would be quietly wrong about the new ones — the prompt
+  // tells the model that absence from a section that is present means no
+  // callers, so a stale list would be a false claim rather than a gap.
+  const repoDir = ws.dir;
+  let measuredFor = '';
+  let measured: SymbolImpact[] = [];
+  const impactOfSources = async (): Promise<SymbolImpact[]> => {
+    const key = [...sources.keys()].sort().join('\n');
+    if (key === measuredFor) return measured;
+    measuredFor = key;
+    measured = await analyseImpact(repoDir, [...sources.keys()]);
+    const constrained = measured.filter((i) => i.external.length > 0);
+    if (constrained.length > 0) {
+      progress(`  ${constrained.length} symbol(s) here are used elsewhere in the repo`);
+    }
+    return measured;
+  };
+
+  const attempts: AgentAttempt[] = [];
+  let rationale = '';
+  // What the agent was handed, before it changed anything. Kept so a run
+  // that took fourteen errors to two is distinguishable from one that took
+  // fourteen to fourteen — both fail, and they are not the same result.
+  const initialErrors = failureSize(verification);
+  let bestFailureSize = initialErrors;
+  let previousSize = bestFailureSize;
+  // The errors belonging to whatever is currently on disk. After a rollback
+  // the failed attempt's errors describe a state that no longer exists, and
+  // showing those alongside the restored sources asks the model to fix
+  // problems that are not there while hiding the one that is.
+  let bestErrors = verificationErrors(verification);
+  // The edit sets already tried, so attempt 3 cannot re-propose what attempt
+  // 1 already burned. Deliberately separate from `bestErrors`, which is what
+  // is broken *now*: one slot could not hold both, which is why it had to be
+  // handed the current failure under a heading claiming those edits had been
+  // applied.
+  const previousAttempts: Array<{ edits: TextEdit[]; errors: string }> = [];
+
+  for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
+    progress(`  attempt ${attempt}/${config.maxRetries}: requesting edits`);
+    // Recomputed each attempt: the compiler names different symbols as
+    // earlier errors are fixed, so the contract shown should follow it.
+    const explaining = await changesNamedInErrors(first, bestErrors);
+    const detected = findings.map((f) => ({ change: f.change, sites: f.sites }));
+    const known = new Set(detected.map((c) => c.change.path));
+    // Also the basis the evidence gate judges against, so a call site that
+    // only the compiler named counts the same as one the diff found.
+    const agentChanges = [
+      ...detected,
+      ...explaining.filter((c) => !known.has(c.change.path)),
+    ];
+
+    const proposal = await proposeEdits(config, {
+      // Present the whole upgrade, not one finding — a version bump is
+      // atomic and the model must see every break to produce a coherent set
+      // of edits.
+      finding: first,
+      changes: agentChanges,
+      sources,
+      candidateSymbols: candidates,
+      failureOutput: bestErrors,
+      impact: await impactOfSources(),
+      ...(previousAttempts.length > 0 ? { previousAttempts: [...previousAttempts] } : {}),
+    });
+
+    if (!proposal.ok) {
+      attempts.push({ attempt, edits: [], rationale: '', modelConfidence: 'low', outcome: 'provider-error', error: proposal.error ?? 'unknown' });
+      progress(`    provider error: ${proposal.error}`);
+      break;
+    }
+    if (proposal.edits.length === 0) {
+      attempts.push({ attempt, edits: [], rationale: proposal.rationale, modelConfidence: proposal.modelConfidence, outcome: 'declined' });
+      progress(`    model declined: ${proposal.rationale.slice(0, 160)}`);
+      break;
+    }
+
+    rationale = proposal.rationale;
+
+    // Deprecations that are still present, so the gate below does not
+    // withhold the edits that would resolve them. Recomputed each attempt
+    // against the sources as they stand: once the symbol is gone the finding
+    // is settled and further edits to that line are churn again.
+    const stillDeprecated = new Set(
+      agentChanges
+        .filter(({ change }) => change.kind === 'deprecated')
+        .filter(({ change, sites }) =>
+          sites.some((s) => {
+            const source = sources.get(s.file);
+            return source ? deprecationStillPresent(change.path, first.pkg, source) : false;
+          }),
+        )
+        .map(({ change }) => change.path),
+    );
+
+    // Withhold edits the current failure does not ask for. Nothing later can
+    // do this: an unnecessary edit that compiles and passes the tests is
+    // invisible to verification precisely because it is not wrong.
+    const classified = classifyEdits(
+      proposal.edits,
+      agentChanges,
+      bestErrors,
+      sources,
+      stillDeprecated,
+    );
+    const { keep, dropped } = selectEvidencedEdits(classified);
+    if (dropped.length > 0) {
+      progress(`    withheld ${dropped.length} edit(s) no diagnostic asked for`);
+    }
+
+    const editResult = await applyTextEdits(ws.dir, keep);
+    progress(`    ${editResult.applied.length} applied, ${editResult.failed.length} rejected`);
+
+    const record: Omit<AgentAttempt, 'outcome'> = {
+      attempt,
+      edits: keep,
+      rationale: proposal.rationale,
+      modelConfidence: proposal.modelConfidence,
+      ...(dropped.length > 0 ? { droppedEdits: dropped } : {}),
+    };
+
+    if (editResult.applied.length === 0) {
+      const why = editResult.failed.map((f) => f.reason).join('; ');
+      attempts.push({ ...record, outcome: 'all-edits-rejected', error: why });
+      previousAttempts.push({
+        edits: proposal.edits,
+        errors: `every edit was rejected — ${why}`,
+      });
+      await restoreSnapshots(ws.dir, editResult.snapshots);
+      continue;
+    }
+
+    post = await runPhase(ws.dir, phaseOpts);
+    const report = compare(baseline, post);
+    progress(`    verification: ${report.outcome}`);
+    attempts.push({ ...record, outcome: report.outcome });
+
+    appliedCount += editResult.applied.length;
+    verification = report;
+    if (verificationPassed(report.outcome)) break;
+
+    if (attempt < config.maxRetries) {
+      // Keep progress. Reverting every failed attempt made the retries three
+      // independent one-shots: an attempt that fixed ten of fourteen errors
+      // was discarded, and the next one started from fourteen again. A wide
+      // migration cannot converge that way. Edits are kept when they reduce
+      // the failure and rolled back when they do not, so the loop climbs
+      // instead of restarting.
+      const size = failureSize(report);
+      const kept = size < bestFailureSize;
+      if (kept) {
+        bestFailureSize = size;
+        bestErrors = verificationErrors(report);
+        progress(`    kept (${size} error(s) remain, was ${previousSize})`);
+        // The files on disk are no longer the ones the model was shown.
+        sources = await loadSources(ws.dir, agentFinding, [...collateral, ...referenced]);
+      } else {
+        progress(`    rolled back (${size} error(s), no improvement on ${bestFailureSize})`);
+        await restoreSnapshots(ws.dir, editResult.snapshots);
+        appliedCount -= editResult.applied.length;
+      }
+      previousSize = size;
+      // The whole proposal is recorded, including edits the gate withheld,
+      // so none of them come back. `bestErrors` already carries what is
+      // broken now; this only needs to say how the attempt ended.
+      previousAttempts.push({
+        edits: proposal.edits,
+        errors: kept
+          ? `kept — ${size} error(s) still remained`
+          : `rolled back — ${size} error(s), no improvement`,
+      });
+    }
+  }
+
+  return {
+    verification,
+    post,
+    sources,
+    collateral,
+    referenced,
+    candidates,
+    appliedCount,
+    attempts,
+    rationale,
+    initialErrors,
+  };
+}
+
 export async function fixPackage(
   repoDir: string,
   findings: Finding[],
@@ -715,225 +1003,22 @@ export async function fixPackage(
       llm?.ok
     ) {
       const config = llm.config;
-      progress(`agent: ${config.model} via ${config.providerLabel}`);
-      const failureOutput = verificationErrors(verification);
-
-      // Two hops, which is what this class of failure needs. The output names a
-      // failing test; that test names the file it asserts against. a scanned repository's
-      // Docker contract test is exactly this shape — the output never mentions
-      // the Dockerfile, only the test that reads it.
-      const collateral = await filesNamedInOutput(failureOutput, ws.dir);
-      let sources = await loadSources(ws.dir, agentFinding, collateral);
-      const referenced = (
-        await filesNamedInOutput([...sources.values()].join('\n'), ws.dir)
-      ).filter((f) => !sources.has(f));
-      if (referenced.length > 0) {
-        sources = await loadSources(ws.dir, agentFinding, [...collateral, ...referenced]);
-      }
-      const added = [...sources.keys()].filter(
-        (f) => !agentFinding.sites.some((s) => s.file === f),
-      );
-      if (added.length > 0) progress(`  including ${added.join(', ')}`);
-      // Interleave each finding's relevance-ranked candidates rather than
-      // concatenating them. Concatenation means the prompt's cutoff falls inside
-      // the first finding's list, so with nine broken symbols the model never
-      // sees a replacement for eight of them.
-      // Symbols the compiler itself named come first. The candidate list is
-      // ranked by name similarity to the *findings*, so migrating `Cell` ranked
-      // `TooltipValueType` near the bottom and the cutoff removed it — even
-      // though recharts exports it publicly and it is exactly the type the
-      // errors are about. The model, told to use only listed symbols, then had
-      // no way to name the constraint and widened to `any` instead.
-      const namedByCompiler = symbolsNamedInErrors(failureOutput, toSymbols);
-      const ranked = [
-        namedByCompiler,
-        ...findings.map((f) => nearbySymbols(f.change.path, toSymbols)),
-      ];
-      const candidates: string[] = [];
-      const seen = new Set<string>();
-      for (let i = 0; i < Math.max(0, ...ranked.map((r) => r.length)); i++) {
-        for (const list of ranked) {
-          const symbol = list[i];
-          if (symbol !== undefined && !seen.has(symbol)) {
-            seen.add(symbol);
-            candidates.push(symbol);
-          }
-        }
-      }
-      // One program build per distinct source set. The set can grow mid-run
-      // when a rollback pulls in more files, and an impact list computed for a
-      // different set would be quietly wrong about the new ones — the prompt
-      // tells the model that absence from a section that is present means no
-      // callers, so a stale list would be a false claim rather than a gap.
-      const repoDir = ws.dir;
-      let measuredFor = '';
-      let measured: SymbolImpact[] = [];
-      const impactOfSources = async (): Promise<SymbolImpact[]> => {
-        const key = [...sources.keys()].sort().join('\n');
-        if (key === measuredFor) return measured;
-        measuredFor = key;
-        measured = await analyseImpact(repoDir, [...sources.keys()]);
-        const constrained = measured.filter((i) => i.external.length > 0);
-        if (constrained.length > 0) {
-          progress(`  ${constrained.length} symbol(s) here are used elsewhere in the repo`);
-        }
-        return measured;
-      };
-
-      const attempts: AgentAttempt[] = [];
-      let rationale = '';
-      // What the agent was handed, before it changed anything. Kept so a run
-      // that took fourteen errors to two is distinguishable from one that took
-      // fourteen to fourteen — both fail, and they are not the same result.
-      const initialErrors = failureSize(verification);
-      let bestFailureSize = initialErrors;
-      let previousSize = bestFailureSize;
-      // The errors belonging to whatever is currently on disk. After a rollback
-      // the failed attempt's errors describe a state that no longer exists, and
-      // showing those alongside the restored sources asks the model to fix
-      // problems that are not there while hiding the one that is.
-      let bestErrors = verificationErrors(verification);
-      // The edit sets already tried, so attempt 3 cannot re-propose what attempt
-      // 1 already burned. Deliberately separate from `bestErrors`, which is what
-      // is broken *now*: one slot could not hold both, which is why it had to be
-      // handed the current failure under a heading claiming those edits had been
-      // applied.
-      const previousAttempts: Array<{ edits: TextEdit[]; errors: string }> = [];
-
-      for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
-        progress(`  attempt ${attempt}/${config.maxRetries}: requesting edits`);
-        // Recomputed each attempt: the compiler names different symbols as
-        // earlier errors are fixed, so the contract shown should follow it.
-        const explaining = await changesNamedInErrors(first, bestErrors);
-        const detected = findings.map((f) => ({ change: f.change, sites: f.sites }));
-        const known = new Set(detected.map((c) => c.change.path));
-        // Also the basis the evidence gate judges against, so a call site that
-        // only the compiler named counts the same as one the diff found.
-        const agentChanges = [
-          ...detected,
-          ...explaining.filter((c) => !known.has(c.change.path)),
-        ];
-
-        const proposal = await proposeEdits(config, {
-          // Present the whole upgrade, not one finding — a version bump is
-          // atomic and the model must see every break to produce a coherent set
-          // of edits.
-          finding: first,
-          changes: agentChanges,
-          sources,
-          candidateSymbols: candidates,
-          failureOutput: bestErrors,
-          impact: await impactOfSources(),
-          ...(previousAttempts.length > 0 ? { previousAttempts: [...previousAttempts] } : {}),
-        });
-
-        if (!proposal.ok) {
-          attempts.push({ attempt, edits: [], rationale: '', modelConfidence: 'low', outcome: 'provider-error', error: proposal.error ?? 'unknown' });
-          progress(`    provider error: ${proposal.error}`);
-          break;
-        }
-        if (proposal.edits.length === 0) {
-          attempts.push({ attempt, edits: [], rationale: proposal.rationale, modelConfidence: proposal.modelConfidence, outcome: 'declined' });
-          progress(`    model declined: ${proposal.rationale.slice(0, 160)}`);
-          break;
-        }
-
-        rationale = proposal.rationale;
-
-        // Deprecations that are still present, so the gate below does not
-        // withhold the edits that would resolve them. Recomputed each attempt
-        // against the sources as they stand: once the symbol is gone the finding
-        // is settled and further edits to that line are churn again.
-        const stillDeprecated = new Set(
-          agentChanges
-            .filter(({ change }) => change.kind === 'deprecated')
-            .filter(({ change, sites }) =>
-              sites.some((s) => {
-                const source = sources.get(s.file);
-                return source ? deprecationStillPresent(change.path, first.pkg, source) : false;
-              }),
-            )
-            .map(({ change }) => change.path),
-        );
-
-        // Withhold edits the current failure does not ask for. Nothing later can
-        // do this: an unnecessary edit that compiles and passes the tests is
-        // invisible to verification precisely because it is not wrong.
-        const classified = classifyEdits(
-          proposal.edits,
-          agentChanges,
-          bestErrors,
-          sources,
-          stillDeprecated,
-        );
-        const { keep, dropped } = selectEvidencedEdits(classified);
-        if (dropped.length > 0) {
-          progress(`    withheld ${dropped.length} edit(s) no diagnostic asked for`);
-        }
-
-        const editResult = await applyTextEdits(ws.dir, keep);
-        progress(`    ${editResult.applied.length} applied, ${editResult.failed.length} rejected`);
-
-        const record: Omit<AgentAttempt, 'outcome'> = {
-          attempt,
-          edits: keep,
-          rationale: proposal.rationale,
-          modelConfidence: proposal.modelConfidence,
-          ...(dropped.length > 0 ? { droppedEdits: dropped } : {}),
-        };
-
-        if (editResult.applied.length === 0) {
-          const why = editResult.failed.map((f) => f.reason).join('; ');
-          attempts.push({ ...record, outcome: 'all-edits-rejected', error: why });
-          previousAttempts.push({
-            edits: proposal.edits,
-            errors: `every edit was rejected — ${why}`,
-          });
-          await restoreSnapshots(ws.dir, editResult.snapshots);
-          continue;
-        }
-
-        post = await runPhase(ws.dir, phaseOpts);
-        const report = compare(baseline, post);
-        progress(`    verification: ${report.outcome}`);
-        attempts.push({ ...record, outcome: report.outcome });
-
-        appliedCount += editResult.applied.length;
-        verification = report;
-        if (verificationPassed(report.outcome)) break;
-
-        if (attempt < config.maxRetries) {
-          // Keep progress. Reverting every failed attempt made the retries three
-          // independent one-shots: an attempt that fixed ten of fourteen errors
-          // was discarded, and the next one started from fourteen again. A wide
-          // migration cannot converge that way. Edits are kept when they reduce
-          // the failure and rolled back when they do not, so the loop climbs
-          // instead of restarting.
-          const size = failureSize(report);
-          const kept = size < bestFailureSize;
-          if (kept) {
-            bestFailureSize = size;
-            bestErrors = verificationErrors(report);
-            progress(`    kept (${size} error(s) remain, was ${previousSize})`);
-            // The files on disk are no longer the ones the model was shown.
-            sources = await loadSources(ws.dir, agentFinding, [...collateral, ...referenced]);
-          } else {
-            progress(`    rolled back (${size} error(s), no improvement on ${bestFailureSize})`);
-            await restoreSnapshots(ws.dir, editResult.snapshots);
-            appliedCount -= editResult.applied.length;
-          }
-          previousSize = size;
-          // The whole proposal is recorded, including edits the gate withheld,
-          // so none of them come back. `bestErrors` already carries what is
-          // broken now; this only needs to say how the attempt ended.
-          previousAttempts.push({
-            edits: proposal.edits,
-            errors: kept
-              ? `kept — ${size} error(s) still remained`
-              : `rolled back — ${size} error(s), no improvement`,
-          });
-        }
-      }
+      const repaired = await runAgentRepair({
+        config,
+        ws,
+        phaseOpts,
+        baseline,
+        finding: agentFinding,
+        findings,
+        toSymbols,
+        verification,
+        post,
+        progress,
+      });
+      verification = repaired.verification;
+      post = repaired.post;
+      appliedCount += repaired.appliedCount;
+      const { collateral, referenced, candidates, attempts, rationale, initialErrors } = repaired;
 
       agentRecord = {
         model: config.model,
@@ -1247,6 +1332,12 @@ export interface VulnFixResult {
   diff: string;
   workspaceDir: string | null;
   workspaceMode: string | null;
+  /**
+   * Populated when the bump cleared the advisory but broke the build, and the
+   * agent was asked to repair it. Absent means no repair was attempted — which
+   * is the answer whenever the advisory did *not* clear.
+   */
+  agent?: FixResult['agent'];
   note?: string;
 }
 
@@ -1263,6 +1354,22 @@ export interface VulnFixResult {
  * a fix, and reporting it as one would be the most expensive kind of false
  * certainty this product can produce.
  */
+/**
+ * Whether a red build after a security bump is worth handing to the agent.
+ *
+ * Both halves matter, and the second is the dangerous one. Repairing a build
+ * whose bump did *not* clear the advisory produces a green build with the
+ * vulnerable version still installed — which `fixVulnerability`'s own note calls
+ * the failure most easily mistaken for success. Making it compile would remove
+ * the last signal that anything is wrong.
+ */
+export function repairableAfterBump(state: {
+  resolved: boolean;
+  outcome: VerificationReport['outcome'];
+}): boolean {
+  return state.resolved && !verificationPassed(state.outcome);
+}
+
 export async function fixVulnerability(
   repoDir: string,
   finding: Finding,
@@ -1365,13 +1472,69 @@ export async function fixVulnerability(
     }
     const resolved = cleared(worst, installed.length);
 
-    const verification = compare(baseline, await runPhase(ws.dir, phaseOpts));
+    let post = await runPhase(ws.dir, phaseOpts);
+    let verification = compare(baseline, post);
     progress(`  ${verification.outcome}`);
+
+    // The advisory is gone and the build is red: a breaking upgrade, which is
+    // exactly what the migration loop is for. This is the case a scanner has to
+    // hand back to you — it can say which upgrade clears the advisory and
+    // nothing about making that upgrade land.
+    let agentRecord: FixResult['agent'];
+    const llm = options.useAgent ? resolveLlmConfig() : null;
+    if (llm && !llm.ok) progress(`agent requested but unavailable: ${llm.reason}`);
+
+    if (repairableAfterBump({ resolved, outcome: verification.outcome }) && llm?.ok) {
+      // Which package's API actually moved. Rung one moved the vulnerable
+      // package itself; rung two moved its parents, and the break is theirs —
+      // the child is a version older than the parent that dragged it in.
+      const moved =
+        remediation.kind === 'parent' ? (remediation.parents[0] ?? finding.pkg) : finding.pkg;
+      const movedFrom =
+        moved === finding.pkg ? finding.fromVersion : (repo.dependencies.find((d) => d.name === moved)?.installed ?? '');
+      const movedTo =
+        moved === finding.pkg ? (worst ?? finding.toVersion) : ((await readLockfile(ws.dir)).tree.get(moved)?.version ?? '');
+
+      if (movedFrom && movedTo && movedFrom !== movedTo) {
+        progress(`the advisory cleared but the build did not — repairing ${moved} ${movedFrom} → ${movedTo}`);
+        // A finding describing the upgrade that broke things, not the advisory
+        // that motivated it. `runAgentRepair` derives the API diff and the
+        // candidate symbols from this alone.
+        const repairFinding: Finding = { ...finding, pkg: moved, fromVersion: movedFrom, toVersion: movedTo };
+        const repaired = await runAgentRepair({
+          config: llm.config,
+          ws,
+          phaseOpts,
+          baseline,
+          finding: repairFinding,
+          // No drift findings: nothing scanned this upgrade for API changes, so
+          // the compiler output is the only account of what broke. The prompt
+          // already treats the change list as possibly incomplete.
+          findings: [],
+          toSymbols: await targetSymbols(repairFinding).catch(() => ({})),
+          verification,
+          post,
+          progress,
+        });
+        verification = repaired.verification;
+        post = repaired.post;
+        agentRecord = {
+          model: llm.config.model,
+          provider: llm.config.providerLabel,
+          attempts: repaired.attempts,
+          rationale: repaired.rationale,
+          initialErrors: repaired.initialErrors,
+          finalErrors: verificationPassed(verification.outcome) ? 0 : failureSize(verification),
+        };
+        progress(`  after repair: ${verification.outcome}`);
+      }
+    }
 
     const result: VulnFixResult = {
       ...base,
       resolved,
       overrode,
+      ...(agentRecord ? { agent: agentRecord } : {}),
       installedAfter: worst,
       verification,
       diff: await workspaceDiff(ws),

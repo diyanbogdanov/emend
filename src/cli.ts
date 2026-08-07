@@ -454,6 +454,10 @@ async function cmdFix(args: Args): Promise<number> {
     );
     const vulnResult = await fixVulnerability(repoDir, finding, {
       keepWorkspace: args.flags.get('keep') === true,
+      // Without this the repair loop is unreachable and a security bump that
+      // breaks the build is reported as unfixable by the one tool here that
+      // knows how to fix it.
+      useAgent: args.flags.get('agent') === true,
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
     // Why this package is in the tree at all — the first thing a reviewer asks
@@ -463,6 +467,17 @@ async function cmdFix(args: Args): Promise<number> {
       for (const route of vulnResult.remediation.paths) {
         console.log(c.dim(`    via  ${route.join(' → ')}`));
       }
+    }
+    // A repaired fix and a fix that never needed repair are not the same result,
+    // and a reviewer reading the diff is entitled to know which one this is.
+    if (vulnResult.agent) {
+      const { attempts, finalErrors } = vulnResult.agent;
+      console.log(
+        c.dim(
+          `    repaired the breaking upgrade in ${attempts.length} attempt(s), ` +
+            `${vulnResult.agent.initialErrors} → ${finalErrors} error(s)`,
+        ),
+      );
     }
     const verified =
       vulnResult.verification !== null && verificationPassed(vulnResult.verification.outcome);
