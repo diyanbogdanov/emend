@@ -32,17 +32,24 @@ export interface VulnerableTarget {
 
 export type Remediation =
   | { kind: 'direct'; pkg: string; to: string }
-  | { kind: 'parent'; child: string; parents: string[]; to: string }
+  /** `paths` is why each parent is being bumped: its route down to `child`. */
+  | { kind: 'parent'; child: string; parents: string[]; paths: string[][]; to: string }
   | { kind: 'none'; reason: string };
 
 /**
- * Which of the repository's own dependencies lead to this package.
+ * The route from each of the repository's own dependencies down to this package.
  *
  * A breadth-first walk from each direct dependency through the lockfile's
  * dependency maps. Cycles are ordinary — two packages depending on each other
  * is legal and not rare — so visited nodes are tracked.
+ *
+ * The walk always knew the route and used to discard it, keeping only which
+ * direct dependency to bump. That left the first question a reviewer asks of a
+ * transitive advisory unanswered: `express` is being bumped for a CVE in `qs`,
+ * and nothing said why those two are related. The route is the answer, and it
+ * costs a predecessor map over a walk that was happening anyway.
  */
-export function dependentsOf(lockRaw: string, child: string, directs: Set<string>): string[] {
+export function pathsTo(lockRaw: string, child: string, directs: Set<string>): string[][] {
   let lock: LockPackages;
   try {
     lock = JSON.parse(lockRaw) as LockPackages;
@@ -60,11 +67,23 @@ export function dependentsOf(lockRaw: string, child: string, directs: Set<string
     return Object.keys(entry?.dependencies ?? {});
   };
 
-  const reaching: string[] = [];
+  const routes: string[][] = [];
   for (const direct of directs) {
-    if (direct === child) continue;
+    // A direct dependency is its own route. Rung one still has to answer "why is
+    // this here", and the answer is that the repository asked for it.
+    if (direct === child) {
+      routes.push([direct]);
+      continue;
+    }
+    // Breadth-first with a predecessor map, so the route that comes back is the
+    // shortest one. A real tree reaches a popular package many ways, and listing
+    // every route means listing a combinatorial number of them; the shortest is
+    // the one that explains the dependency most directly.
+    const cameFrom = new Map<string, string>();
     const seen = new Set<string>([direct]);
-    const queue = depsOf(direct);
+    const queue = [...depsOf(direct)];
+    for (const dep of queue) cameFrom.set(dep, direct);
+
     let found = false;
     while (queue.length > 0 && !found) {
       const next = queue.shift() as string;
@@ -74,11 +93,33 @@ export function dependentsOf(lockRaw: string, child: string, directs: Set<string
       }
       if (seen.has(next)) continue;
       seen.add(next);
-      queue.push(...depsOf(next));
+      for (const dep of depsOf(next)) {
+        if (!cameFrom.has(dep)) cameFrom.set(dep, next);
+        queue.push(dep);
+      }
     }
-    if (found) reaching.push(direct);
+    if (!found) continue;
+
+    const route = [child];
+    for (let at = cameFrom.get(child); at !== undefined; at = cameFrom.get(at)) {
+      route.unshift(at);
+      if (at === direct) break;
+    }
+    routes.push(route);
   }
-  return reaching;
+  return routes;
+}
+
+/**
+ * Which direct dependencies to bump — the first step of each route.
+ *
+ * Derived rather than computed separately, because two walks over the same tree
+ * answering two halves of one question is how they come to disagree.
+ */
+export function dependentsOf(lockRaw: string, child: string, directs: Set<string>): string[] {
+  return pathsTo(lockRaw, child, directs)
+    .map((route) => route[0])
+    .filter((name): name is string => name !== undefined && name !== child);
 }
 
 /**
@@ -102,7 +143,10 @@ export function planRemediation(
     return { kind: 'direct', pkg: vulnerable.name, to: vulnerable.target };
   }
 
-  const parents = dependentsOf(lockRaw, vulnerable.name, directs);
+  const paths = pathsTo(lockRaw, vulnerable.name, directs);
+  const parents = paths
+    .map((route) => route[0])
+    .filter((name): name is string => name !== undefined);
   if (parents.length === 0) {
     // Rung three — an override — is the answer here, and it is a separate
     // decision because it forces a version on a parent that asked for another.
@@ -111,7 +155,7 @@ export function planRemediation(
       reason: `no direct dependency's tree reaches ${vulnerable.name}, so nothing can be bumped to move it`,
     };
   }
-  return { kind: 'parent', child: vulnerable.name, parents, to: vulnerable.target };
+  return { kind: 'parent', child: vulnerable.name, parents, paths, to: vulnerable.target };
 }
 
 /**

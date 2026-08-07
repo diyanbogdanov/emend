@@ -441,6 +441,14 @@ async function cmdFix(args: Args): Promise<number> {
       keepWorkspace: args.flags.get('keep') === true,
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
+    // Why this package is in the tree at all — the first thing a reviewer asks
+    // of a transitive advisory, and the reason bumping `express` for a CVE in
+    // `qs` is an instruction rather than a non sequitur.
+    if (vulnResult.remediation.kind === 'parent') {
+      for (const route of vulnResult.remediation.paths) {
+        console.log(c.dim(`    via  ${route.join(' → ')}`));
+      }
+    }
     const verified =
       vulnResult.verification !== null && verificationPassed(vulnResult.verification.outcome);
     // Two conditions, and both must hold. A green build with the vulnerable

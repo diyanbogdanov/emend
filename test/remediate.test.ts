@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dependentsOf, planRemediation } from '../src/remediate.ts';
+import { dependentsOf, pathsTo, planRemediation } from '../src/remediate.ts';
 
 /**
  * A realistic lockfile: npm hoists, so `qs` sits flat at `node_modules/qs`
@@ -99,4 +99,71 @@ test('a transitive package nothing reaches gets no plan rather than a guess', ()
 test('an unreadable lockfile yields no plan rather than a wrong one', () => {
   const plan = planRemediation({ name: 'qs', version: '6.7.0', target: '6.7.3' }, DIRECT, '<html>');
   assert.equal(plan.kind, 'none');
+});
+
+// ---------------------------------------------------------------------------
+// Why the vulnerable package is here at all
+// ---------------------------------------------------------------------------
+
+test('the route from the direct dependency down to the package is kept', () => {
+  // The BFS already walks it and threw it away, so the first question a reviewer
+  // asks of a transitive advisory — why is this even in my tree — had no answer
+  // in the output. Bumping `express` for a CVE in `qs` is an unexplained
+  // instruction until the chain between them is shown.
+  assert.deepEqual(pathsTo(LOCK, 'qs', DIRECT), [['express', 'qs']]);
+});
+
+test('an intermediate package is named, not skipped over', () => {
+  const twoHop = JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      '': { dependencies: { express: '^4' } },
+      'node_modules/express': { version: '4.17.1', dependencies: { 'body-parser': '1.19.0' } },
+      'node_modules/body-parser': { version: '1.19.0', dependencies: { qs: '6.7.0' } },
+      'node_modules/qs': { version: '6.7.0' },
+    },
+  });
+  assert.deepEqual(pathsTo(twoHop, 'qs', new Set(['express'])), [
+    ['express', 'body-parser', 'qs'],
+  ]);
+});
+
+test('the shortest route is reported when a package is reachable two ways', () => {
+  // LOCK has both `express -> qs` and `express -> body-parser -> qs`. Listing
+  // every route means listing a combinatorial number of them on a real tree, and
+  // the shortest is the one that explains the dependency most directly.
+  const routes = pathsTo(LOCK, 'qs', DIRECT);
+  assert.equal(routes.length, 1);
+  assert.deepEqual(routes[0], ['express', 'qs']);
+});
+
+test('a direct dependency is its own one-element route', () => {
+  // Rung one still has to answer "why is this here": because you asked for it.
+  assert.deepEqual(pathsTo(LOCK, 'lodash', DIRECT), [['lodash']]);
+});
+
+test('a cycle on the way down still terminates', () => {
+  const cyclic = JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      '': { dependencies: { a: '^1' } },
+      'node_modules/a': { version: '1.0.0', dependencies: { b: '1.0.0' } },
+      'node_modules/b': { version: '1.0.0', dependencies: { a: '1.0.0', bad: '1.0.0' } },
+      'node_modules/bad': { version: '1.0.0' },
+    },
+  });
+  assert.deepEqual(pathsTo(cyclic, 'bad', new Set(['a'])), [['a', 'b', 'bad']]);
+});
+
+test('who-to-bump is derived from the routes, so the two can never disagree', () => {
+  // One BFS, two questions. Computing them separately is how they drift.
+  const routes = pathsTo(LOCK, 'qs', DIRECT);
+  assert.deepEqual(dependentsOf(LOCK, 'qs', DIRECT), routes.map((r) => r[0]));
+});
+
+test('a parent remediation carries the routes that justify it', () => {
+  const plan = planRemediation({ name: 'qs', version: '6.7.0', target: '6.7.1' }, DIRECT, LOCK);
+  assert.equal(plan.kind, 'parent');
+  if (plan.kind !== 'parent') return;
+  assert.deepEqual(plan.paths, [['express', 'qs']]);
 });
