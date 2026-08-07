@@ -235,9 +235,9 @@ test('the target clears every advisory, not just the first one', () => {
     ecosystem: 'npm',
     version: '4.17.15',
     vulnerabilities: [
-      { id: 'a', cve: null, summary: '', fixedIn: '4.17.19', cvssVector: null },
-      { id: 'b', cve: null, summary: '', fixedIn: '4.17.23', cvssVector: null },
-      { id: 'c', cve: null, summary: '', fixedIn: '4.17.21', cvssVector: null },
+      { id: 'a', aliases: [], cve: null, summary: '', fixedIn: '4.17.19', cvssVector: null },
+      { id: 'b', aliases: [], cve: null, summary: '', fixedIn: '4.17.23', cvssVector: null },
+      { id: 'c', aliases: [], cve: null, summary: '', fixedIn: '4.17.21', cvssVector: null },
     ],
   });
   assert.equal(target.version, '4.17.23');
@@ -254,8 +254,8 @@ test('advisories with no fix are named as what the bump will not clear', () => {
     ecosystem: 'npm',
     version: '1.0.0',
     vulnerabilities: [
-      { id: 'fixed', cve: null, summary: '', fixedIn: '2.0.0', cvssVector: null },
-      { id: 'unpatched', cve: 'CVE-2026-1', summary: '', fixedIn: null, cvssVector: null },
+      { id: 'fixed', aliases: [], cve: null, summary: '', fixedIn: '2.0.0', cvssVector: null },
+      { id: 'unpatched', aliases: [], cve: 'CVE-2026-1', summary: '', fixedIn: null, cvssVector: null },
     ],
   });
   assert.equal(target.version, '2.0.0');
@@ -268,7 +268,7 @@ test('a package where nothing is patched has no target at all', () => {
     name: 'thing',
     ecosystem: 'npm',
     version: '1.0.0',
-    vulnerabilities: [{ id: 'x', cve: null, summary: '', fixedIn: null, cvssVector: null }],
+    vulnerabilities: [{ id: 'x', aliases: [], cve: null, summary: '', fixedIn: null, cvssVector: null }],
   });
   assert.equal(target.version, null);
   assert.deepEqual(target.leaves, ['x']);

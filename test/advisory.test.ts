@@ -24,6 +24,7 @@ function pkg(name: string, ids: string[]): VulnerablePackage {
     version: '1.0.0',
     vulnerabilities: ids.map((id) => ({
       id,
+      aliases: [],
       cve: null,
       summary: '',
       fixedIn: '2.0.0',

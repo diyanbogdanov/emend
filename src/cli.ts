@@ -23,7 +23,8 @@ import { verificationPassed } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { openCodeHarness, type Harness } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
-import { scanPackages } from './osv.ts';
+import { scanPackages, goSymbolRecord } from './osv.ts';
+import { goSymbolSites, symbolTargets } from './goreach.ts';
 import { LINT_ADAPTERS } from './lint.ts';
 import { enrichAdvisories } from './advisory.ts';
 import type { VulnerabilityOptions } from './detectors.ts';
@@ -38,7 +39,7 @@ import {
   renderSummary,
   type CaseOutcome,
 } from './eval.ts';
-import type { Finding, ScanReport } from './types.ts';
+import type { CallSite, Finding, ScanReport } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -158,6 +159,24 @@ function vulnerabilitiesFrom(args: Args): VulnerabilityOptions | undefined {
   return {
     scan: (packages) => scanPackages(fetch, packages),
     enrich: (ids) => enrichAdvisories(fetch, ids, { ...(token ? { token } : {}) }),
+    // Go only. The GHSA record carries no symbols; the GO-xxxx record it aliases
+    // does, so this is one more request per advisory in exchange for knowing
+    // whether the vulnerable *function* is reached rather than only the module.
+    goSymbols: async (pkg, ctx) => {
+      const sites: CallSite[] = [];
+      for (const vuln of pkg.vulnerabilities) {
+        const record = await goSymbolRecord(fetch, vuln.aliases);
+        if (!record) continue;
+        for (const target of symbolTargets(record, pkg.name)) {
+          for (const file of ctx.sourceFiles) {
+            if (!file.endsWith('.go')) continue;
+            const source = await ctx.read(file);
+            if (source !== null) sites.push(...goSymbolSites(file, source, target));
+          }
+        }
+      }
+      return sites;
+    },
   };
 }
 

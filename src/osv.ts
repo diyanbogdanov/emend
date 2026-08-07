@@ -52,6 +52,11 @@ export interface OsvRange {
 export interface OsvAffected {
   package?: { name?: string; ecosystem?: string };
   ranges?: OsvRange[];
+  /**
+   * Per-ecosystem extras. For Go this carries the affected *symbols*, which is
+   * what makes symbol-level reachability possible there and nowhere else.
+   */
+  ecosystem_specific?: { imports?: Array<{ path?: string; symbols?: string[] }> };
 }
 
 export interface OsvRecord {
@@ -65,6 +70,8 @@ export interface OsvRecord {
 export interface Vulnerability {
   /** OSV's own id, usually a GHSA. */
   id: string;
+  /** Every id this advisory is known by, so a better record can be found. */
+  aliases: string[];
   /** The CVE, when the advisory has one. What people search by. */
   cve: string | null;
   summary: string;
@@ -200,6 +207,7 @@ export function readVulnerability(
   const cvss = (record.severity ?? []).find((s) => typeof s.score === 'string');
   return {
     id: record.id,
+    aliases: record.aliases ?? [],
     cve,
     summary: record.summary ?? '',
     fixedIn: fixedVersionFor(record, name, ecosystem, installed),
@@ -338,4 +346,21 @@ export function remediationTarget(pkg: VulnerablePackage): RemediationTarget {
     if (version === null || compareVersions(vuln.fixedIn, version) > 0) version = vuln.fixedIn;
   }
   return { version, clears, leaves };
+}
+
+/**
+ * The record that actually carries a Go advisory's affected symbols.
+ *
+ * Measured: the GHSA record for a Go module has no `ecosystem_specific`, and the
+ * `GO-xxxx` record it aliases does. One extra request per advisory, and only for
+ * Go — the same shape as following an `x-origin` to the source that knows more.
+ */
+export async function goSymbolRecord(
+  fetch: Fetcher,
+  aliases: string[],
+): Promise<OsvRecord | null> {
+  const id = aliases.find((a) => a.startsWith('GO-'));
+  if (!id) return null;
+  const record = (await getJson(fetch, `${API}/vulns/${encodeURIComponent(id)}`)) as OsvRecord | null;
+  return record?.id ? record : null;
 }

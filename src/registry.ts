@@ -59,8 +59,12 @@ export async function fetchPackument(pkg: string): Promise<Packument> {
 
 /** Numeric-aware semver compare. Returns <0, 0, >0. Prerelease sorts before release. */
 export function compareVersions(a: string, b: string): number {
-  const [aCore = '', aPre = ''] = a.split('-', 2);
-  const [bCore = '', bPre = ''] = b.split('-', 2);
+  // Go writes `v1.6.0`, Docker tags are often `v18`, and `parseInt('v1')` is
+  // NaN — which fell through to 0, so every major version compared as zero and
+  // `v2.0.0` equalled `v1.0.0`. The Go scan was correct by luck on the pair it
+  // happened to meet.
+  const [aCore = '', aPre = ''] = a.replace(/^v/, '').split('-', 2);
+  const [bCore = '', bPre = ''] = b.replace(/^v/, '').split('-', 2);
   const aParts = aCore.split('.').map((n) => Number.parseInt(n, 10) || 0);
   const bParts = bCore.split('.').map((n) => Number.parseInt(n, 10) || 0);
   for (let i = 0; i < 3; i++) {

@@ -20,6 +20,7 @@ import { packageOfSpecifier } from './callsites.ts';
 import { remediationTarget, type InstalledPackage, type VulnerablePackage } from './osv.ts';
 import { ordinal, rankVulnerable, type AdvisoryFacts } from './advisory.ts';
 import type { LintAdapter } from './lint.ts';
+import { goInventory } from './goreach.ts';
 import { extractPins, findPinConflicts, resolvedVersions, PIN_FILES } from './pins.ts';
 import { checkAgainstSpec, findHttpCalls, type HttpCall } from './httpsites.ts';
 import { describeProvenance, type SpecCandidate } from './specs.ts';
@@ -429,6 +430,13 @@ export interface VulnerabilityOptions {
   /** Injected: this detector reaches the network, and that is the caller's call. */
   scan: (packages: InstalledPackage[]) => Promise<VulnerablePackage[]>;
   /**
+   * Where a Go module's *affected symbols* are actually called.
+   *
+   * Injected because it takes another OSV request per advisory — the GHSA record
+   * carries no symbols and the `GO-xxxx` record it aliases does.
+   */
+  goSymbols?: (pkg: VulnerablePackage, ctx: DetectorContext) => Promise<CallSite[]>;
+  /**
    * Optional second opinion: numeric severity, and how likely exploitation is.
    *
    * Ordering without it is arbitrary, and arbitrary ordering on a list of forty
@@ -461,8 +469,12 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
     async applies(ctx: DetectorContext): Promise<boolean> {
       // The installed tree is the input. Without one there is nothing to ask
       // about, and answering that must not cost a request.
+      //
+      // Every ecosystem, not only npm: gating on `package-lock.json` meant a Go
+      // module was never scanned at all, however many `go.sum` entries it had.
       const lock = await readLockfile(ctx.repoDir);
-      return lock.tree.size > 0;
+      if (lock.tree.size > 0) return true;
+      return (await ctx.read('go.sum')) !== null || (await ctx.read('go.mod')) !== null;
     },
 
     async detect(ctx: DetectorContext): Promise<{ findings: Finding[]; notes: string[] }> {
@@ -471,6 +483,14 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
       if (lock.unsupported) {
         notes.push(`${lock.unsupported} could not be read, so its packages were not checked`);
       }
+
+      // A second ecosystem costs an inventory reader and nothing else, which was
+      // the claim about OSV being ecosystem-keyed. Go also carries affected
+      // symbols, which npm does not — see `goreach.ts`.
+      const goPackages = goInventory(
+        (await ctx.read('go.sum')) ?? '',
+        (await ctx.read('go.mod')) ?? '',
+      );
 
       // The whole tree, not the direct dependencies. Most vulnerabilities in a
       // real repository are transitive, and screening only what package.json
@@ -483,6 +503,7 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
         byName.set(key, entry.installPath);
         packages.push({ name: entry.name, ecosystem: 'npm', version: entry.version });
       }
+      packages.push(...goPackages);
       if (packages.length === 0) return { findings: [], notes };
 
       let vulnerable: VulnerablePackage[];
@@ -518,6 +539,13 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
         const target = remediationTarget(pkg);
 
         const sites: CallSite[] = [...(imports.get(pkg.name) ?? [])];
+        // Go advisories name the affected functions, so reachability there can
+        // be a symbol rather than a module. Nothing else offers this.
+        let symbolSites: CallSite[] = [];
+        if (pkg.ecosystem === 'Go' && options.goSymbols) {
+          symbolSites = await options.goSymbols(pkg, ctx);
+          sites.push(...symbolSites);
+        }
         const imported = sites.length > 0;
         if (!imported) {
           sites.push(lockfileSite(lockRaw, byName.get(`${pkg.name}@${pkg.version}`) ?? pkg.name));
@@ -526,9 +554,11 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
         // Deduplicated: separate advisories routinely alias the same CVE, and
         // listing it twice reads as two problems.
         const named = [...new Set(pkg.vulnerabilities.map((v) => v.cve ?? v.id))].join(', ');
-        const reach = imported
-          ? `imported at ${sites.length} site(s) in this repository`
-          : 'not imported from this repository’s source — it runs because a dependency calls it';
+        const reach = symbolSites.length > 0
+          ? `the affected symbol appears at ${symbolSites.length} site(s) — a strong lead, not proof, because resolving a method receiver needs a Go type checker`
+          : imported
+            ? `imported at ${sites.length} site(s) in this repository`
+            : 'not imported from this repository’s source — it runs because a dependency calls it';
         const leaves =
           target.leaves.length > 0
             ? ` ${target.leaves.length} has no published fix and survives the upgrade: ${target.leaves.join(', ')}.`
