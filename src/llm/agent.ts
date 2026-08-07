@@ -781,9 +781,21 @@ export function parseDiffHunks(diff: string): DiffHunk[] {
   const hunks: DiffHunk[] = [];
   let file = '';
   for (const line of diff.split('\n')) {
+    // Cleared per file, so one that carries no hunks — a rename, a mode change —
+    // cannot lend its name to the next file's.
+    if (line.startsWith('diff --git ')) {
+      file = '';
+      continue;
+    }
     const target = line.match(/^\+\+\+ b\/(.+)$/);
     if (target?.[1]) {
       file = target[1];
+      continue;
+    }
+    // A deletion has no new side, so its old side is the only name it has.
+    const source = line.match(/^--- a\/(.+)$/);
+    if (source?.[1]) {
+      file = source[1];
       continue;
     }
     const header = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);

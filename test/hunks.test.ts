@@ -56,6 +56,50 @@ test('a diff touching nothing yields no hunks', () => {
   assert.deepEqual(parseDiffHunks('diff --git a/x b/x\nindex 1..2 100644\n'), []);
 });
 
+test('a deleted file is named by its old side, not by whatever came before it', () => {
+  // A deletion has no new side to read the name from. Carrying the previous
+  // file's name forward attributes the deletion to a file that was never
+  // touched — and the gate reverts by `(file, line)`, so the key it computes
+  // would match nothing and an unjustified deletion would land unopposed.
+  const diff = `diff --git a/src/keep.ts b/src/keep.ts
+--- a/src/keep.ts
++++ b/src/keep.ts
+@@ -1,3 +1,3 @@
+ a
+-b
++c
+ d
+diff --git a/src/gone.ts b/src/gone.ts
+deleted file mode 100644
+--- a/src/gone.ts
++++ /dev/null
+@@ -1,2 +0,0 @@
+-x
+-y
+`;
+  const hunks = parseDiffHunks(diff);
+  assert.deepEqual(hunks.map((h) => h.file), ['src/keep.ts', 'src/gone.ts']);
+});
+
+test('a file with a header but no hunks does not lend its name to the next one', () => {
+  // A mode change or a pure rename carries no hunks. Leaving the name in place
+  // is how the next file's hunks end up filed under it.
+  const diff = `diff --git a/src/renamed.ts b/src/moved.ts
+similarity index 100%
+rename from src/renamed.ts
+rename to src/moved.ts
+diff --git a/src/real.ts b/src/real.ts
+--- a/src/real.ts
++++ b/src/real.ts
+@@ -7,3 +7,3 @@
+ a
+-b
++c
+ d
+`;
+  assert.deepEqual(parseDiffHunks(diff).map((h) => h.file), ['src/real.ts']);
+});
+
 // ---------------------------------------------------------------------------
 // classifyHunks — the same rule the edit gate uses, on a different input
 //
