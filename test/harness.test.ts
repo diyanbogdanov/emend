@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -220,6 +220,33 @@ test('a hunk the failure did not ask for is reverted before anyone sees the diff
     assert.ok(after.includes('LINE02'), 'the diagnostic-backed repair stayed');
     assert.ok(!after.includes('LINE25'), 'the unrequested rewrite did not');
     assert.ok(!result.diff.includes('LINE25'), 'and the reported diff reflects disk');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('a gitignored node_modules does not stop the baseline being taken', async () => {
+  // Found by the first run of the `fixPackage` integration test, and it meant
+  // escalation had never worked on a real repository. Staging with an explicit
+  // `.` pathspec makes git refuse — "the following paths are ignored by one of
+  // your .gitignore files" — and the escalation gave up before running.
+  //
+  // Every earlier end-to-end check used a scratch repository with no .gitignore,
+  // so the bug was invisible exactly where it mattered: everywhere real.
+  const f = await gitFixture({ 'a.txt': BASE, '.gitignore': 'node_modules\n' });
+  try {
+    mkdirSync(path.join(f.dir, 'node_modules', 'pkg'), { recursive: true });
+    writeFileSync(path.join(f.dir, 'node_modules', 'pkg', 'index.js'), 'module.exports = 1;\n');
+
+    const harness = fakeHarness({ 'a.txt': BASE.replace('line02', 'LINE02') });
+    const result = await escalate(
+      harness,
+      f.dir,
+      { instruction: 'x', failureOutput: GATE.failureOutput },
+      GATE,
+    );
+    assert.equal(result.ok, true, `expected a baseline to be established, got: ${result.reason}`);
+    assert.equal(result.keptHunks, 1);
   } finally {
     f.cleanup();
   }

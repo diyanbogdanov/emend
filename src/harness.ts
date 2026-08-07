@@ -229,7 +229,14 @@ export async function escalate(
   // precisely what the condition of adoption forbids, so failing to establish a
   // baseline stops the escalation rather than waiving the rule.
   try {
-    await execFileAsync('git', ['-C', dir, 'add', '-A', '--', '.', ...NOT_SOURCE]);
+    // No pathspec. Naming `.` explicitly makes git refuse the whole command when
+    // anything matching it is gitignored — "the following paths are ignored by
+    // one of your .gitignore files" — and every real repository ignores
+    // `node_modules`, so the baseline could never be taken and the escalation
+    // gave up before it started. `.gitignore` already does this job; the
+    // exclusions that remain are on the *diff*, where they decide what is shown
+    // rather than what is staged.
+    await execFileAsync('git', ['-C', dir, 'add', '-A']);
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);
     return refused(`cannot establish a git baseline to judge ${harness.id} against — ${why}`);
