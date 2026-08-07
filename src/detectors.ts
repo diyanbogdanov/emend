@@ -19,6 +19,7 @@ import { readLockfile } from './lockfile.ts';
 import { packageOfSpecifier } from './callsites.ts';
 import { remediationTarget, type InstalledPackage, type VulnerablePackage } from './osv.ts';
 import { ordinal, rankVulnerable, type AdvisoryFacts } from './advisory.ts';
+import type { LintAdapter } from './lint.ts';
 import { extractPins, findPinConflicts, resolvedVersions, PIN_FILES } from './pins.ts';
 import { checkAgainstSpec, findHttpCalls, type HttpCall } from './httpsites.ts';
 import { describeProvenance, type SpecCandidate } from './specs.ts';
@@ -257,6 +258,8 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
 export const DETECTORS: Detector[] = [versionPinDetector];
 
 export interface DetectorSelection {
+  /** Enable the external linters by handing over the adapters to run. */
+  lint?: ExternalLintOptions;
   /** Enable the vulnerability detector by handing it a scanner. */
   vulnerabilities?: VulnerabilityOptions;
   /**
@@ -275,6 +278,7 @@ export function detectorsFor(selection: DetectorSelection): Detector[] {
   return [
     versionPinDetector,
     ...(selection.vulnerabilities ? [vulnerabilityDetector(selection.vulnerabilities)] : []),
+    ...(selection.lint ? [externalLintDetector(selection.lint)] : []),
     ...(selection.contracts ? [httpContractDetector(selection.contracts)] : []),
   ];
 }
@@ -290,6 +294,7 @@ export function detectorsFor(selection: DetectorSelection): Detector[] {
 const DETECTOR_LABELS: Record<string, string> = {
   'version-pin': 'version pins',
   vulnerability: 'vulnerabilities',
+  'external-lint': 'lint',
   'http-contract': 'http contracts',
 };
 
@@ -552,6 +557,102 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
           // lockfile. Neither is a guess.
           confidence: 'high',
         });
+      }
+      return { findings, notes };
+    },
+  };
+}
+
+function lintFindingId(file: string, code: string, line: number): string {
+  return createHash('sha256').update(`lint|${file}|${code}|${line}`).digest('hex').slice(0, 12);
+}
+
+export interface ExternalLintOptions {
+  /** Injected: these are external binaries, and running them is the caller's call. */
+  adapters: LintAdapter[];
+}
+
+/**
+ * What hadolint and shellcheck object to in this repository.
+ *
+ * A Dockerfile and a shell script are as much a part of "does this still work"
+ * as the TypeScript, and neither has a type checker. Each finding carries the
+ * file and line the tool reported, so it has a call site like everything else
+ * here — and `severity` is `lint`, kept out of the breaking count.
+ *
+ * A tool that is not installed is reported as absent rather than passing over
+ * in silence. Asking for a check and quietly not getting one is the failure this
+ * codebase spends most of its effort avoiding.
+ */
+export function externalLintDetector(options: ExternalLintOptions): Detector {
+  return {
+    id: 'external-lint',
+
+    async applies(ctx: DetectorContext): Promise<boolean> {
+      // Purely a question about filenames, so it costs no process.
+      return options.adapters.some((a) => a.applies(ctx.sourceFiles).length > 0);
+    },
+
+    async detect(ctx: DetectorContext): Promise<{ findings: Finding[]; notes: string[] }> {
+      const findings: Finding[] = [];
+      const notes: string[] = [];
+
+      for (const adapter of options.adapters) {
+        const files = adapter.applies(ctx.sourceFiles);
+        if (files.length === 0) continue;
+
+        const status = await adapter.available();
+        if (!status.ok) {
+          notes.push(`${files.length} file(s) were not linted: ${status.reason}`);
+          continue;
+        }
+
+        const { findings: raw, error } = await adapter.run(ctx.repoDir, files);
+        if (error) {
+          notes.push(`${adapter.id} could not lint ${files.length} file(s) — ${error}`);
+          continue;
+        }
+
+        // The offending line itself, so a site shows the code rather than
+        // repeating the message printed directly above it.
+        const lines = new Map<string, string[]>();
+        for (const file of new Set(raw.map((f) => f.file))) {
+          const source = await ctx.read(file);
+          if (source !== null) lines.set(file, source.split('\n'));
+        }
+
+        for (const f of raw) {
+          findings.push({
+            id: lintFindingId(f.file, f.code, f.line),
+            detector: 'external-lint',
+            pkg: f.tool,
+            fromVersion: f.level,
+            toVersion: f.level,
+            change: {
+              path: f.code,
+              kind: 'lint',
+              severity: 'lint',
+              confidence: 'high',
+              before: f.level,
+              after: null,
+              guidance: f.message,
+            },
+            // The tool gave a file and a line, which is exactly the evidence
+            // every other finding here is required to carry.
+            sites: [
+              {
+                file: f.file,
+                line: f.line,
+                column: f.column,
+                text: (lines.get(f.file)?.[f.line - 1] ?? '').trim().slice(0, 120),
+                via: 'import',
+              },
+            ],
+            // The tool's own judgement, reported rather than re-litigated. What
+            // Emend cannot know is whether this particular rule matters here.
+            confidence: 'medium',
+          });
+        }
       }
       return { findings, notes };
     },

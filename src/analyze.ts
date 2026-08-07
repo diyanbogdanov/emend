@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { readRepo } from './inventory.ts';
+import { freshnessFindings } from './freshness.ts';
 import { scanPins, resolvedVersions } from './pins.ts';
 import {
   detectorsFor,
@@ -17,6 +18,7 @@ import {
   runDetectors,
   type HttpContractOptions,
   type VulnerabilityOptions,
+  type ExternalLintOptions,
 } from './detectors.ts';
 import { walkDir } from './callsites.ts';
 import {
@@ -67,6 +69,14 @@ export interface ScanOptions {
    * reaches the network, and that is the caller's decision to make.
    */
   vulnerabilities?: VulnerabilityOptions;
+  /**
+   * Report packages that are simply behind, where nothing this repository calls
+   * changed. Off by default: they are unbounded, and the spec keeps them out of
+   * the way of proven findings.
+   */
+  freshness?: boolean;
+  /** Run external linters over Dockerfiles and shell scripts. */
+  lint?: ExternalLintOptions;
   /** Progress callback for CLI output. */
   onProgress?: (message: string) => void;
   /**
@@ -349,7 +359,15 @@ export async function scanRepo(
   // which no declaration diff can see, because the vendor versions its protocol
   // separately from the package that calls it. Bounded: the same walk the call
   // site pass already does, minus its type checking.
-  const sourceFiles = walkDir(repoDir, ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'])
+  // Not only the TypeScript. A Dockerfile and a shell script are as much part
+  // of "does this repository still work", and a detector cannot be offered files
+  // the walk never collected — `--lint` silently found nothing until this list
+  // included them. `walkDir` matches by suffix, so a bare `Dockerfile` is named
+  // in full and `api.Dockerfile` matches the same entry.
+  const sourceFiles = walkDir(repoDir, [
+    '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',
+    '.sh', '.bash', 'Dockerfile', 'Containerfile',
+  ])
     .slice(0, 400)
     .map((f) => path.relative(repoDir, f));
   const pinScan = await scanPins(
@@ -372,6 +390,7 @@ export async function scanRepo(
     detectorsFor({
       ...(options.contracts ? { contracts: options.contracts } : {}),
       ...(options.vulnerabilities ? { vulnerabilities: options.vulnerabilities } : {}),
+      ...(options.lint ? { lint: options.lint } : {}),
     }),
     {
       repoDir,
@@ -397,18 +416,37 @@ export async function scanRepo(
     packages.push({ ...group, status: 'analyzed', unlocatedBreaking: 0 });
   }
 
+  // Last, and in its own group: a freshness finding says nothing this
+  // repository calls changed, so it can only be computed once every package has
+  // been analysed and every other detector has had its say.
+  if (options.freshness) {
+    const fresh = freshnessFindings(packages);
+    if (fresh.length > 0) {
+      packages.push({
+        pkg: 'behind latest',
+        status: 'analyzed',
+        fromVersion: null,
+        toVersion: null,
+        findings: fresh,
+        unlocatedBreaking: 0,
+      });
+    }
+  }
+
   // Derived here rather than before the detectors ran. A contract finding is
   // `breaking`, and counting only the packages would have left it out of the one
   // line of a scan anybody reads.
-  const breaking = packages
-    .flatMap((p) => p.findings)
-    .filter((f) => f.change.severity === 'breaking').length;
-  const deprecation = packages
-    .flatMap((p) => p.findings)
-    .filter((f) => f.change.severity === 'deprecation').length;
-  const vulnerabilities = packages
-    .flatMap((p) => p.findings)
-    .filter((f) => f.change.severity === 'vulnerability').length;
+  //
+  // `inHeadline` is the single rule, rather than a filter per severity: every
+  // class added since — drift, vulnerability, lint, freshness — is real and is
+  // not an API break, and each new one must stay out by default rather than by
+  // somebody remembering to exclude it here.
+  const allFindings = packages.flatMap((p) => p.findings);
+  const breaking = allFindings.filter((f) => f.change.severity === 'breaking').length;
+  const deprecation = allFindings.filter((f) => f.change.severity === 'deprecation').length;
+  const vulnerabilities = allFindings.filter((f) => f.change.severity === 'vulnerability').length;
+  const lint = allFindings.filter((f) => f.change.severity === 'lint').length;
+  const freshness = allFindings.filter((f) => f.change.severity === 'freshness').length;
 
   return {
     repo: options.repoKey ?? repoDir,
@@ -426,6 +464,8 @@ export async function scanRepo(
       callSites: callSiteCount,
       pinConflicts: pinConflicts.length,
       vulnerabilities,
+      lint,
+      freshness,
     },
   };
 }

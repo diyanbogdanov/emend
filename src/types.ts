@@ -84,7 +84,9 @@ export type ChangeKind =
   | 'deprecated'
   | 'added'
   /** A version written down in one file disagreeing with its source of truth. */
-  | 'version-drift';
+  | 'version-drift'
+  /** An external tool's objection to a line, in a file with no type checker. */
+  | 'lint';
 export type Severity =
   | 'breaking'
   | 'deprecation'
@@ -107,7 +109,27 @@ export type Severity =
    * put a number in front of a reader that means something entirely different
    * — and would bury every API change in the scan underneath one package.
    */
-  | 'vulnerability';
+  | 'vulnerability'
+  /**
+   * Something an external linter objects to in a Dockerfile or a shell script.
+   *
+   * Its own class for the same reason the others have one. A shellcheck warning
+   * is real and is not a change in anybody's public API, and a repository with
+   * three scripts can produce dozens — folding them into `breaking` would put a
+   * number in front of a reader that means something else entirely.
+   */
+  | 'lint'
+  /**
+   * A dependency that is simply behind, with nothing in this repository that
+   * the upgrade would break.
+   *
+   * Excluded from the headline count by design (spec §6): these are unbounded —
+   * every repository has some, and producing them requires no analysis at all.
+   * Pouring them in beside proven findings inverts the signal-to-noise ratio
+   * that makes a scan worth reading, which the alert-fatigue literature names as
+   * the main cause of people disengaging from exactly this kind of tool.
+   */
+  | 'freshness';
 export type Confidence = 'high' | 'medium';
 
 export interface SurfaceChange {
@@ -323,5 +345,15 @@ export interface ScanReport {
     pinConflicts: number;
     /** Reported separately too. A CVE is not a change in anybody's public API. */
     vulnerabilities: number;
+    /** An external tool's objection is not an API break either. */
+    lint: number;
+    /**
+     * Packages simply behind, where nothing this repository calls changed.
+     *
+     * Never in the headline. Spec §6: unbounded, requiring no analysis to
+     * produce, and counting them beside proven findings is what makes a scan
+     * stop being read.
+     */
+    freshness: number;
   };
 }

@@ -24,6 +24,7 @@ import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { openCodeHarness, type Harness } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
 import { scanPackages } from './osv.ts';
+import { LINT_ADAPTERS } from './lint.ts';
 import { enrichAdvisories } from './advisory.ts';
 import type { VulnerabilityOptions } from './detectors.ts';
 import type { SpecCandidate } from './specs.ts';
@@ -160,9 +161,18 @@ function vulnerabilitiesFrom(args: Args): VulnerabilityOptions | undefined {
   };
 }
 
+/** The external linters, when they were asked for. */
+function lintFrom(args: Args): { adapters: typeof LINT_ADAPTERS } | undefined {
+  return args.flags.get('lint') === undefined || args.flags.get('lint') === false
+    ? undefined
+    : { adapters: LINT_ADAPTERS };
+}
+
 function severityLabel(sev: string): string {
   if (sev === 'breaking') return c.red('breaking');
   if (sev === 'vulnerability') return c.red('vulnerable');
+  if (sev === 'lint') return c.yellow('lint');
+  if (sev === 'freshness') return c.dim('behind');
   if (sev === 'deprecation') return c.yellow('deprecated');
   return c.dim(sev);
 }
@@ -269,6 +279,14 @@ function printScan(report: ScanReport, showAll: boolean): void {
       c.dim(`           ${counts.vulnerabilities} package(s) with known vulnerabilities`),
     );
   }
+  if (counts.lint > 0) {
+    console.log(c.dim(`           ${counts.lint} lint finding(s) in Dockerfiles and shell scripts`));
+  }
+  if (counts.freshness > 0) {
+    console.log(
+      c.dim(`           ${counts.freshness} package(s) behind latest with nothing that would break`),
+    );
+  }
   console.log(
     c.dim(
       `           ${counts.packagesAnalyzed} package(s) analyzed, ${counts.packagesSkipped} skipped (skipped ≠ clean)`,
@@ -302,6 +320,8 @@ async function cmdScan(args: Args): Promise<number> {
     includeDev: args.flags.get('no-dev') !== true,
     ...(contracts ? { contracts } : {}),
     ...(vulnerabilities ? { vulnerabilities } : {}),
+    ...(lintFrom(args) ? { lint: lintFrom(args)! } : {}),
+    freshness: args.flags.get('freshness') === true,
     onProgress: args.flags.get('json') === true ? () => {} : (m) => console.log(c.dim(`  ${m}`)),
   });
 
@@ -939,6 +959,13 @@ ${c.bold('COMMANDS')}
                     unauthenticated GitHub allows 60 requests an hour.
     --github-org o  Name the provider's GitHub organisation, for vendors whose
                     own records do not link back to their API domain.
+    --freshness     Also list packages that are behind their latest version where
+                    nothing this repository calls changed. Never counted in the
+                    headline: every repository has some, and producing them
+                    requires no analysis.
+    --lint          Also run hadolint over Dockerfiles and shellcheck over shell
+                    scripts. Reports what is not installed rather than passing
+                    over it in silence.
     --vulns         Also check the installed tree for known vulnerabilities.
                     Screens every package in the lockfile against OSV — no key,
                     no rate limit — and proposes the one bump that clears the
