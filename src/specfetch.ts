@@ -44,6 +44,9 @@ export interface FetchResponse {
 export interface FetchInit {
   /** Extra request headers — an API token, an accept type. */
   headers?: Record<string, string>;
+  /** `GET` unless given. OSV screens a whole tree with one POST. */
+  method?: string;
+  body?: string;
 }
 
 /**
@@ -537,6 +540,8 @@ export function httpFetcher(options: { timeoutMs?: number } = {}): Fetcher {
       const res = await globalThis.fetch(target, {
         signal: controller.signal,
         redirect: 'follow',
+        ...(init?.method ? { method: init.method } : {}),
+        ...(init?.body === undefined ? {} : { body: init.body }),
         headers: {
           accept: 'application/json, application/yaml, text/yaml, */*',
           ...init?.headers,
