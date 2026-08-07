@@ -64,6 +64,7 @@ test('does not move a member into a different container', () => {
 
 const finding: Finding = {
   id: 'test1',
+  detector: 'npm-surface',
   pkg: 'zod',
   fromVersion: '3.22.4',
   toVersion: '4.4.3',

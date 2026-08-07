@@ -418,6 +418,7 @@ test('reports no locations for output that carries no diagnostics', () => {
 
 const FINDING: Finding = {
   id: 'test',
+  detector: 'npm-surface',
   pkg: 'zod',
   fromVersion: '3.22.4',
   toVersion: '4.4.3',

@@ -307,7 +307,7 @@ export function resolvedVersions(
  * convention, and globbing a repository for anything version-shaped is how a
  * detector starts reporting suspicion instead of evidence.
  */
-const PIN_FILES = [
+export const PIN_FILES = [
   'Dockerfile',
   'Dockerfile.dev',
   'Dockerfile.prod',

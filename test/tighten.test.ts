@@ -45,6 +45,7 @@ function tighteningContext(sources: Map<string, string>, errors: string): Tighte
   return {
     finding: {
       id: 'f1',
+      detector: 'npm-surface',
       pkg: 'recharts',
       fromVersion: '2.15.0',
       toVersion: '3.10.1',

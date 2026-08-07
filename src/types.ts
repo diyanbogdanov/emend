@@ -78,8 +78,27 @@ export interface ApiSurface {
   note?: string;
 }
 
-export type ChangeKind = 'removed' | 'signature-changed' | 'deprecated' | 'added';
-export type Severity = 'breaking' | 'deprecation' | 'feature' | 'safe';
+export type ChangeKind =
+  | 'removed'
+  | 'signature-changed'
+  | 'deprecated'
+  | 'added'
+  /** A version written down in one file disagreeing with its source of truth. */
+  | 'version-drift';
+export type Severity =
+  | 'breaking'
+  | 'deprecation'
+  | 'feature'
+  | 'safe'
+  /**
+   * A pin that has drifted from what the repository installs or declares.
+   *
+   * Its own severity rather than `breaking`, because the headline count is what
+   * makes a scan worth reading. A stale Dockerfile tag is real and is not a
+   * change in anybody's public API; counting it as breaking would overstate both
+   * and blunt the one number that carries the product.
+   */
+  | 'drift';
 export type Confidence = 'high' | 'medium';
 
 export interface SurfaceChange {
@@ -125,12 +144,41 @@ export interface CallSite {
 export interface Finding {
   /** Stable fingerprint; see spec §4.1. Excludes file/line by design. */
   id: string;
+  /**
+   * Which detector produced this, and the discriminator for everything
+   * downstream.
+   *
+   * The design spec proposed a `Subject` union instead. With the code in front
+   * of you all four of its variants are `{name, from, to}` plus a tag, which is
+   * what the three fields below already carry — so the union would rename
+   * fields across two dozen sites to express what this one field expresses.
+   */
+  detector: string;
+  /**
+   * What the finding is about: an npm package, a tool pinned in a Dockerfile, a
+   * vendor whose wire API is pinned in source.
+   */
   pkg: string;
   fromVersion: string;
   toVersion: string;
   change: SurfaceChange;
   sites: CallSite[];
   confidence: Confidence;
+}
+
+/**
+ * A source of drift.
+ *
+ * The contract is deliberately narrow: given a repository, produce findings.
+ * What a detector reads, and whether it needs the network, is its own business —
+ * which is what lets the surface diff, the version pins and anything added later
+ * share one pipeline instead of each growing a private path to the surface.
+ */
+export interface Detector {
+  id: string;
+  /** Cheap precondition. Answering it must not cost what detecting costs. */
+  applies(ctx: unknown): Promise<boolean>;
+  detect(ctx: unknown): Promise<Finding[]>;
 }
 
 /** A single concrete text edit the planner is confident about. */

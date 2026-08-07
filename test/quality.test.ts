@@ -15,6 +15,7 @@ import type { Finding } from '../src/types.ts';
 function deprecationFinding(files: string[]): Finding {
   return {
     id: '5f6f9004bebe',
+    detector: 'npm-surface',
     pkg: 'recharts',
     fromVersion: '2.15.4',
     toVersion: '3.10.1',

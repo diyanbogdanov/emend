@@ -105,7 +105,12 @@ function printScan(report: ScanReport, showAll: boolean): void {
     if (p.status === 'analyzed' && p.findings.length === 0 && !showAll) continue;
     if (p.status === 'up-to-date' && !showAll) continue;
 
-    const header = `  ${c.bold(p.pkg)} ${c.dim(`${p.fromVersion ?? '?'} → ${p.toVersion ?? '?'}`)}`;
+    // A detector's findings are not an upgrade and have no version pair, so the
+    // arrow would render as "? → ?" and read like missing data.
+    const header =
+      p.fromVersion || p.toVersion
+        ? `  ${c.bold(p.pkg)} ${c.dim(`${p.fromVersion ?? '?'} → ${p.toVersion ?? '?'}`)}`
+        : `  ${c.bold(p.pkg)}`;
     if (p.status !== 'analyzed') {
       console.log(`${header}  ${c.yellow(`[${p.status}]`)}`);
       if (p.note) console.log(`    ${c.dim(p.note)}`);
@@ -132,19 +137,15 @@ function printScan(report: ScanReport, showAll: boolean): void {
     console.log(c.green('  No findings: no tracked API change intersects this codebase.'));
   }
 
-  // Reported in its own block, above the summary but never inside its counts. A
-  // drifted Dockerfile tag is real and worth fixing, and it is not a change in
-  // anybody's public API — folding it into "breaking" would overstate both and
-  // blunt the one number that makes a scan worth reading.
-  if (report.pinConflicts.length > 0) {
+  // Only the ones nothing can arbitrate. A drift with an authority is a finding
+  // now, printed with every other finding above; repeating it here was the
+  // duplication the seam exists to remove.
+  const unresolvable = report.pinConflicts.filter((cf) => cf.expected === null);
+  if (unresolvable.length > 0) {
     console.log('');
-    console.log(`  ${c.bold('Version pins that disagree')}`);
-    for (const conflict of report.pinConflicts) {
-      console.log(
-        conflict.expected
-          ? `    ${c.yellow('drift')}      ${conflict.subject} should be ${conflict.expected} (${conflict.authority})`
-          : `    ${c.yellow('conflict')}   ${conflict.subject} is pinned inconsistently and nothing declares the intent`,
-      );
+    console.log(`  ${c.bold('Version pins that disagree, with nothing to arbitrate')}`);
+    for (const conflict of unresolvable) {
+      console.log(`    ${c.yellow('conflict')}   ${conflict.subject} — no declared intent, so this one needs a human`);
       for (const pin of conflict.pins) {
         console.log(c.dim(`      → ${pin.file}:${pin.line}  ${pin.text}`));
       }
@@ -242,10 +243,17 @@ async function cmdFix(args: Args): Promise<number> {
     }
   }
 
+  // Route by detector, which is what the field is for. A version-pin finding
+  // names its subject in `pkg` — `node`, `playwright` — and handing that to the
+  // package path would run `npm install node@22`, which is nonsense and would
+  // half-succeed in ways that are hard to unpick.
+  const pinTargets = targets.filter((f) => f.detector === 'version-pin');
+  const packageTargets = targets.filter((f) => f.detector !== 'version-pin');
+
   // Group by package: a version bump is atomic, so every finding for one
   // package must be fixed together in one workspace and land as one PR.
   const byPackage = new Map<string, Finding[]>();
-  for (const f of targets) {
+  for (const f of packageTargets) {
     const list = byPackage.get(f.pkg) ?? [];
     list.push(f);
     byPackage.set(f.pkg, list);
@@ -253,6 +261,21 @@ async function cmdFix(args: Args): Promise<number> {
 
   console.log('');
   let anyVerified = false;
+
+  if (pinTargets.length > 0) {
+    console.log(c.bold(`  version pins`) + c.dim(`  (${pinTargets.length} drifted)`));
+    const pinResult = await fixPins(repoDir, {
+      keepWorkspace: args.flags.get('keep') === true,
+      onProgress: (m) => console.log(c.dim(`    ${m}`)),
+    });
+    const ok = verificationPassed(pinResult.verification.outcome);
+    console.log(
+      `    ${ok ? c.green('VERIFIED') : c.red(pinResult.verification.outcome.toUpperCase())}` +
+        `  ${pinResult.appliedEdits} pin edit(s)`,
+    );
+    if (ok && pinResult.appliedEdits > 0) anyVerified = true;
+    console.log('');
+  }
 
   for (const [pkg, findings] of byPackage) {
     const first = findings[0];

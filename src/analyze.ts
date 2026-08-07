@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { readRepo } from './inventory.ts';
 import { scanPins, resolvedVersions } from './pins.ts';
+import { DETECTORS, runDetectors } from './detectors.ts';
 import { walkDir } from './callsites.ts';
 import {
   fetchPackument,
@@ -300,6 +301,7 @@ export async function scanRepo(
         callSiteCount += sites.length;
         findings.push({
           id: findingId(a.report.pkg, a.report.fromVersion ?? '', a.report.toVersion ?? '', change),
+          detector: 'npm-surface',
           pkg: a.report.pkg,
           fromVersion: a.report.fromVersion ?? '',
           toVersion: a.report.toVersion ?? '',
@@ -347,6 +349,36 @@ export async function scanRepo(
     sourceFiles,
   );
   const pinConflicts = pinScan.conflicts;
+
+  // Everything downstream — the store, the dashboard, the pull request renderer
+  // — consumes findings. A detector that produces anything else is invisible to
+  // all of it, which is what kept pin drift out of every one of them.
+  const detected = await runDetectors(DETECTORS, {
+    repoDir,
+    dependencies: repo.dependencies,
+    sourceFiles,
+    read: async (file) => {
+      try {
+        return await readFile(path.join(repoDir, file), 'utf8');
+      } catch {
+        return null;
+      }
+    },
+  });
+  for (const failure of detected.failures) {
+    // Never silent. A missing finding is indistinguishable from a clean result.
+    warnings.push(`detector "${failure.detector}" failed: ${failure.reason}`);
+  }
+  if (detected.findings.length > 0) {
+    packages.push({
+      pkg: 'version pins',
+      status: 'analyzed',
+      fromVersion: null,
+      toVersion: null,
+      findings: detected.findings,
+      unlocatedBreaking: 0,
+    });
+  }
 
   return {
     repo: options.repoKey ?? repoDir,
