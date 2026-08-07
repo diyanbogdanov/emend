@@ -32,14 +32,15 @@
  * this tier never applies. What is left is the residual case the tier is for:
  * listed by a directory, hosted somewhere the provider does not control.
  *
- * Named for what it is rather than for one directory. It is reached from apis.io
- * listings, from an APIs.json entry pointing off-domain, and from an apis.guru
- * `x-origin` naming a repository we cannot credit to the provider.
+ * Named for what it is rather than for one directory: it is reached from an
+ * apis.io listing and from an APIs.json entry pointing off-domain, and any
+ * future directory lands here too.
  *
- * `aggregator-apis-guru` is called out by name rather than folded into a general
- * "aggregator" bucket: its README still advertises weekly refreshes while the
- * corpus is no longer actively maintained, which makes it a good bootstrap and a
- * bad authority. Naming it keeps that judgement visible at the point of use.
+ * There is no aggregator tier. apis.guru held one until its weekly refresh
+ * stopped running in March while its README went on advertising one — and a
+ * source that claims to be current when it is not is worse than no source,
+ * because it makes a stale description look like a checked one. Nothing else
+ * currently mirrors descriptions at that scale, so the tier went with it.
  */
 export type SpecProvenance =
   | 'official-domain'
@@ -48,7 +49,6 @@ export type SpecProvenance =
   | 'verified-swaggerhub'
   | 'verified-postman'
   | 'curated'
-  | 'aggregator-apis-guru'
   | 'community'
   | 'extracted-from-docs';
 
@@ -66,7 +66,6 @@ export const PROVENANCE_RANK: Record<SpecProvenance, number> = {
   'verified-swaggerhub': 90,
   'verified-postman': 85,
   curated: 75,
-  'aggregator-apis-guru': 60,
   community: 50,
   'extracted-from-docs': 30,
 };
@@ -217,7 +216,7 @@ export function wellKnownSpecPaths(origin: string): string[] {
 }
 
 export interface SpecSource {
-  id: 'well-known' | 'github' | 'apis-io' | 'swaggerhub' | 'postman' | 'apis-guru';
+  id: 'well-known' | 'github' | 'apis-io' | 'swaggerhub' | 'postman';
   /** What a hit is worth before any pointer it carries has been followed. */
   yields: SpecProvenance;
 }
@@ -234,15 +233,14 @@ export const SPEC_SOURCES: readonly SpecSource[] = [
   { id: 'well-known', yields: 'official-domain' },
   // The provider's own repository, where most specs that are versioned live.
   { id: 'github', yields: 'official-github' },
-  // A directory of provider-published manifests: usually a pointer home.
+  // The directory: one manifest per provider, listing descriptions, docs,
+  // changelogs and the rest. For anything published after about 2022 it is the
+  // only index that has heard of it.
   { id: 'apis-io', yields: 'directory' },
   // Platforms holding copies, in order of how firmly the account is tied to the
   // provider. Postman is last of the two because a collection is not a contract.
   { id: 'swaggerhub', yields: 'verified-swaggerhub' },
   { id: 'postman', yields: 'verified-postman' },
-  // Bootstrap only. Unmaintained, so a difference here is as likely to be drift
-  // in the mirror as in the API.
-  { id: 'apis-guru', yields: 'aggregator-apis-guru' },
 ];
 
 /** One line per candidate, for a finding's evidence. */

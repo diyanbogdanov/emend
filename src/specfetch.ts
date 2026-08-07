@@ -21,6 +21,7 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import YAML from 'yaml';
 import { MAX_SPEC_BYTES, parseSpec } from './specdiff.ts';
 import {
   PROVENANCE_RANK,
@@ -226,15 +227,9 @@ async function candidateFrom(
   };
 }
 
-interface AggregatorLead {
-  url: string;
-  /** Set only for the aggregator's own copy; a pointer is judged by where it lands. */
-  floor?: SpecProvenance;
-}
-
 const APIS_IO = 'https://apis.io/api/v1';
 
-/** Stripe alone publishes 159 APIs there; following all of them is not a resolution. */
+/** Stripe publishes 159 APIs there; the listing fallback follows only a few. */
 const MAX_LISTINGS = 5;
 
 /** `api.stripe.com` -> `stripe.com`. Good enough to check a link against. */
@@ -257,23 +252,31 @@ function linksBackTo(record: Doc, domain: string): boolean {
   return false;
 }
 
+/** Anything the directory knows about a vendor: descriptions, docs, and the rest. */
+export interface VendorArtifact {
+  /** `OpenAPI`, `Documentation`, `Changelog`, `GraphQL`, `AsyncAPI`, `MCPServer`… */
+  type: string;
+  url: string;
+  /** Whether it lives on the vendor's own domain rather than a curator's. */
+  firstParty: boolean;
+}
+
 /**
- * What apis.io lists for this vendor.
+ * Everything apis.io indexes for this vendor, from its provider manifest.
  *
- * The directory is keyed by a slug — `stripe` — where every call site hands us a
- * host. There is no domain field on its records to bridge that: `baseURL` and
- * `humanURL` are empty on all of them. So the slug is derived from the domain
- * and then **verified**, by requiring the provider record to link back to the
- * vendor's own domain somewhere. Attribution by guess is how one company's API
- * ends up reported as another's, and `stripe` is a plausible slug for a dozen
- * things.
+ * The manifest rather than the per-API endpoints, because it is one request for
+ * all of it: Anthropic's is 43KB and carries all twenty-four of its APIs with
+ * every artifact type, where walking `/apis/{aid}` cost a request each and
+ * returned strictly less.
  *
- * Nothing here is authoritative — its artifacts are third-party republications,
- * so `canAssertBreakage` refuses them regardless. That bounds the damage a wrong
- * slug could do, which is what makes a derived-then-checked slug acceptable at
- * all rather than a guess dressed up.
+ * The directory is keyed by a slug — `stripe` — while every call site hands us a
+ * host, and its records carry no domain field to bridge that. So the slug is
+ * derived from the domain and then **verified**, by requiring the provider
+ * record to link back to the vendor's own domain. No link, no attribution and no
+ * further requests: `stripe` is a plausible slug for a dozen things, and
+ * attribution by guess is how one company's API is reported as another's.
  */
-async function apisIoLeads(fetch: Fetcher, domain: string): Promise<AggregatorLead[]> {
+export async function apisIoArtifacts(fetch: Fetcher, domain: string): Promise<VendorArtifact[]> {
   const registrable = registrableDomain(domain);
   const slug = registrable.split('.')[0];
   if (!slug) return [];
@@ -289,93 +292,99 @@ async function apisIoLeads(fetch: Fetcher, domain: string): Promise<AggregatorLe
   };
 
   const provider = await json(`${APIS_IO}/providers/${encodeURIComponent(slug)}`);
-  // No link back to the vendor, no attribution — and no further requests.
-  if (!provider || !linksBackTo(provider, registrable)) return [];
+  if (!provider) return [];
+  // Verification is deferred until the artifacts are in hand, because neither
+  // signal alone is enough. Measured across four vendors: Stripe's record links
+  // home through its logo and its listings carry no `humanURL`, while Anthropic,
+  // Linear and Supabase are the exact reverse. Requiring only the record
+  // rejected three of the four.
+  let confirmed = linksBackTo(provider, registrable);
 
+  const collected: VendorArtifact[] = [];
+  const seen = new Set<string>();
+  const take = (type: unknown, url: unknown, base: string): void => {
+    if (typeof type !== 'string' || typeof url !== 'string') return;
+    let absolute: string;
+    let host: string;
+    try {
+      // Artifact URLs in a manifest are relative to it —
+      // `openapi/acme-openapi.yml` — so taking them verbatim yields nothing
+      // fetchable and the directory silently contributes zero.
+      const resolved = new URL(url, base);
+      absolute = resolved.toString();
+      host = resolved.hostname.toLowerCase();
+    } catch {
+      return;
+    }
+    if (seen.has(absolute)) return;
+    seen.add(absolute);
+    const firstParty = host === registrable || host.endsWith(`.${registrable}`);
+    // An artifact on the vendor's own domain confirms this listing is theirs,
+    // and is better evidence than a logo URL.
+    if (firstParty) confirmed = true;
+    collected.push({ type, url: absolute, firstParty });
+  };
+
+  // The manifest first: one request for every API and every artifact type.
+  // Anthropic's is 43KB and carries all twenty-four of its APIs.
+  const manifestUrl = provider['url'];
+  if (typeof manifestUrl === 'string') {
+    let res: FetchResponse | null = null;
+    try {
+      res = await fetch(manifestUrl);
+    } catch {
+      res = null;
+    }
+    if (res?.ok) {
+      let doc: unknown;
+      try {
+        // APIs.json, served as JSON or YAML depending on the curator.
+        doc = res.body.trimStart().startsWith('{')
+          ? JSON.parse(res.body)
+          : YAML.parse(res.body, { logLevel: 'silent' });
+      } catch {
+        doc = null;
+      }
+      const apis = (doc as { apis?: unknown } | null)?.apis;
+      if (Array.isArray(apis)) {
+        for (const api of apis) {
+          const props = (api as { properties?: unknown })?.properties;
+          if (!Array.isArray(props)) continue;
+          for (const prop of props) {
+            take((prop as Doc)['type'], (prop as Doc)['url'], res.url || manifestUrl);
+          }
+        }
+      }
+    }
+  }
+  if (collected.length > 0) return confirmed ? collected : [];
+
+  // The manifest is not dependable. Measured: Stripe's `url` names an `apis.md`
+  // that answers 404 while Anthropic's names a working `apis.yml`, so half the
+  // directory's providers would otherwise resolve to nothing, silently. The
+  // listing endpoints cost a request per API and always answer.
   const listing = await json(`${APIS_IO}/providers/${encodeURIComponent(slug)}/apis`);
   const data = listing?.['data'];
   if (!Array.isArray(data)) return [];
 
-  const leads: AggregatorLead[] = [];
   for (const entry of data.slice(0, MAX_LISTINGS)) {
     const aid = (entry as Doc | undefined)?.['aid'];
     if (typeof aid !== 'string') continue;
-    // The colon stays literal. `stripe:stripe-account-api` answers 200 and
+    // `humanURL` is on the listing rather than in `properties`, and for the
+    // newer vendors it is the only thing pointing at the provider at all.
+    take('Documentation', (entry as Doc)['humanURL'], `${APIS_IO}/`);
+    // The colon stays literal: `stripe:stripe-account-api` answers 200 and
     // `stripe%3Astripe-account-api` answers 404, so encoding it made every
-    // detail lookup fail — silently, and while still spending the requests.
+    // lookup fail while still spending the requests.
     const detail = await json(`${APIS_IO}/apis/${encodeURIComponent(aid).replace(/%3A/gi, ':')}`);
     const props = detail?.['properties'];
     if (!Array.isArray(props)) continue;
-    for (const prop of props) {
-      const p = prop as Doc;
-      if (typeof p['type'] !== 'string' || typeof p['url'] !== 'string') continue;
-      // Judged by where the pointer lands, like every other directory entry.
-      if (/^(openapi|swagger)$/i.test(p['type'])) leads.push({ url: p['url'] });
-    }
+    for (const prop of props) take((prop as Doc)['type'], (prop as Doc)['url'], `${APIS_IO}/`);
   }
-  return leads;
-}
-
-/**
- * What apis.guru's entry for a domain points at, best route first.
- *
- * Two hops rather than one, because the description sits under a version
- * segment — `/v2/specs/stripe.com/2022-11-15/openapi.json` — that cannot be
- * guessed. The per-domain endpoint names it for about a kilobyte, against 8.8MB
- * for `list.json`.
- *
- * The reason this source earns its place is `x-origin`: the entry records where
- * the provider *actually publishes*, which for Stripe is their own GitHub
- * repository. So the aggregator can be used purely to discover, and the
- * description still comes from a first-party source — the aggregator's own copy
- * is the fallback rather than the point. Measured today, that copy is dated
- * 2022-11-15, four years stale, which is precisely why it must not be the point.
- */
-async function aggregatorLeads(fetch: Fetcher, domain: string): Promise<AggregatorLead[]> {
-  let res: FetchResponse;
-  try {
-    res = await fetch(`https://api.apis.guru/v2/${domain}.json`);
-  } catch {
-    return [];
-  }
-  if (!res.ok) return [];
-
-  let apis: unknown;
-  try {
-    apis = (JSON.parse(res.body) as { apis?: unknown }).apis;
-  } catch {
-    return [];
-  }
-  if (typeof apis !== 'object' || apis === null) return [];
-
-  const pointers: AggregatorLead[] = [];
-  const mirrors: AggregatorLead[] = [];
-
-  for (const entry of Object.values(apis as Doc)) {
-    if (typeof entry !== 'object' || entry === null) continue;
-    const e = entry as Doc;
-
-    const info = (typeof e['info'] === 'object' && e['info'] !== null ? e['info'] : {}) as Doc;
-    const origins = info['x-origin'];
-    if (Array.isArray(origins)) {
-      for (const origin of origins) {
-        const url = (origin as Doc | undefined)?.['url'];
-        if (typeof url !== 'string') continue;
-        pointers.push({ url });
-        // The JSON sibling is tried first where one exists: both forms parse
-        // now, but JSON is markedly cheaper — 6.4MB of Stripe YAML costs about
-        // a second. Accepted only if it parses as a description, so it stays a
-        // check rather than a guess, and the YAML is still there if it does not.
-        if (/\.ya?ml$/i.test(url)) pointers.push({ url: url.replace(/\.ya?ml$/i, '.json') });
-      }
-    }
-
-    if (typeof e['swaggerUrl'] === 'string') {
-      mirrors.push({ url: e['swaggerUrl'], floor: 'aggregator-apis-guru' });
-    }
-  }
-
-  return [...pointers, ...mirrors];
+  // No link back to the vendor from anywhere: the slug was derived, nothing
+  // confirmed it, and attribution by guess is how one company's API is reported
+  // as another's.
+  return confirmed ? collected : [];
 }
 
 /**
@@ -405,8 +414,8 @@ export async function resolveSpec(
 
   const now = new Date(clock).toISOString();
   // A call site hands us a host — `api.stripe.com` — while the directories key on
-  // the registrable domain. Asking apis.guru about the host returned nothing and
-  // Stripe resolved to zero candidates, while asking about `stripe.com` had
+  // the registrable domain. Asking a directory about the host returned nothing
+  // and Stripe resolved to zero candidates, while asking about `stripe.com` had
   // worked all along. Both are tried, host first: that is where the API actually
   // lives, so a description served there is the more specific answer.
   const domains = [...new Set([vendor.domain.toLowerCase(), registrableDomain(vendor.domain)])];
@@ -449,38 +458,19 @@ export async function resolveSpec(
     }
   }
 
-  //    apis.guru, through its index entry rather than a guessed URL: the spec
-  //    lives under a version segment no fixed pattern can produce, and the
-  //    per-domain entry names it for one small request instead of the 8.8MB
-  //    `list.json`.
+  // 3. apis.io. The only directory left: apis.guru's weekly refresh stopped
+  //    running in March while its README still advertises one, and a source
+  //    claiming to be current when it is not is worse than no source at all —
+  //    it makes a stale description look like a checked one.
   //
-  //    A good bootstrap and a bad authority. Measured today, its preferred
-  //    Stripe description is dated 2022-11-15 — four years old — so a difference
-  //    against it is far likelier to be drift in the mirror than in the API.
-  //    `specs.ts` already refuses to let it assert breakage; this only has to
-  //    record the tier truthfully.
-  // 3. apis.io, the directory. Consulted before the aggregator, because a
-  //    directory holds addresses and an aggregator holds copies. It can never
-  //    settle the walk — its listings are third-party republications, so nothing
-  //    from it is the provider's own word — which is exactly why consulting it
-  //    first cannot produce a worse answer than not having it: the walk carries
-  //    on, and the ranking puts a first-party description in front if one turns
-  //    up later.
+  //    Nothing from here is the provider's own word, so it cannot settle the
+  //    walk and `canAssertBreakage` refuses it. It is a lead, and for anything
+  //    published after about 2022 it is the only lead there is.
   if (!settled()) {
-    for (const lead of await apisIoLeads(options.fetch, registrableDomain(vendor.domain))) {
-      add(await candidateFrom(options.fetch, lead.url, vendor, now, lead.floor));
+    for (const artifact of await apisIoArtifacts(options.fetch, vendor.domain)) {
+      if (!/^(openapi|swagger)$/i.test(artifact.type)) continue;
+      add(await candidateFrom(options.fetch, artifact.url, vendor, now));
       if (settled()) break;
-    }
-  }
-
-  // 4. apis.guru, the aggregator.
-  for (const domain of domains) {
-    if (settled()) break;
-    for (const lead of await aggregatorLeads(options.fetch, domain)) {
-      add(await candidateFrom(options.fetch, lead.url, vendor, now, lead.floor));
-      // A first-party pointer settles it; the mirrors after it add nothing but
-      // an older copy of the same API.
-      if (settled() || found.some((c) => c.provenance === 'official-github')) break;
     }
   }
 
@@ -541,4 +531,20 @@ export function httpFetcher(options: { timeoutMs?: number } = {}): Fetcher {
       clearTimeout(timer);
     }
   };
+}
+
+/**
+ * Everything known about a vendor beyond its description.
+ *
+ * A changelog and a documentation page are where an upgrade is *explained*, and
+ * neither is expressible in a spec diff. Measured on the live directory: 59 of
+ * Anthropic's 127 documentation entries are on `docs.anthropic.com` — the
+ * provider's own words about their own API, which is worth more than any third
+ * party's copy of them.
+ */
+export async function resolveArtifacts(
+  vendor: Vendor,
+  options: { fetch: Fetcher },
+): Promise<VendorArtifact[]> {
+  return apisIoArtifacts(options.fetch, vendor.domain);
 }

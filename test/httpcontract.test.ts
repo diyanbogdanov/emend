@@ -54,7 +54,7 @@ test('nothing is claimed from a description that is not the provider’s word', 
   // years stale is the false certainty every honesty rule here prevents, and to
   // a reader it is indistinguishable from a real finding.
   const source = `await fetch('https://api.acme.com/v1/invoices/upcoming');`;
-  const result = checkAgainstSpec(calls(source), 'api.acme.com', candidate({ provenance: 'aggregator-apis-guru' }));
+  const result = checkAgainstSpec(calls(source), 'api.acme.com', candidate({ provenance: 'community' }));
   assert.deepEqual(result.gone, []);
   assert.match(result.note ?? '', /not authoritative/i);
 });

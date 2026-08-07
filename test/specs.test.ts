@@ -30,7 +30,7 @@ test('a first-party spec outranks every aggregator copy of it', () => {
   // between them is as likely to be staleness as a real API change. Only the
   // provider controls the truth.
   const chosen = bestSpec([
-    candidate({ provenance: 'aggregator-apis-guru', url: 'https://apis.guru/stripe.json' }),
+    candidate({ provenance: 'community', url: 'https://someone.example/stripe.json' }),
     candidate({ provenance: 'curated', url: 'https://konfig/stripe.json' }),
     candidate({ provenance: 'official-domain', url: 'https://stripe.com/openapi.json' }),
   ]);
@@ -53,8 +53,8 @@ test('the ranking runs from provider-controlled down to inferred', () => {
   assert.ok(PROVENANCE_RANK['official-github'] > PROVENANCE_RANK['directory']);
   assert.ok(PROVENANCE_RANK['verified-swaggerhub'] > PROVENANCE_RANK['verified-postman']);
   assert.ok(PROVENANCE_RANK['verified-postman'] > PROVENANCE_RANK['curated']);
-  assert.ok(PROVENANCE_RANK['curated'] > PROVENANCE_RANK['aggregator-apis-guru']);
-  assert.ok(PROVENANCE_RANK['aggregator-apis-guru'] > PROVENANCE_RANK['extracted-from-docs']);
+  assert.ok(PROVENANCE_RANK['curated'] > PROVENANCE_RANK['community']);
+  assert.ok(PROVENANCE_RANK['community'] > PROVENANCE_RANK['extracted-from-docs']);
 });
 
 test('a directory of provider-published pointers outranks a third party’s copy', () => {
@@ -101,7 +101,6 @@ test('only a provider-controlled spec may assert that a call is broken', () => {
   assert.equal(canAssertBreakage(candidate({ provenance: 'verified-swaggerhub' })), true);
   assert.equal(canAssertBreakage(candidate({ provenance: 'verified-postman' })), false);
   assert.equal(canAssertBreakage(candidate({ provenance: 'curated' })), false);
-  assert.equal(canAssertBreakage(candidate({ provenance: 'aggregator-apis-guru' })), false);
   assert.equal(canAssertBreakage(candidate({ provenance: 'extracted-from-docs' })), false);
 });
 
