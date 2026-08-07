@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import YAML from 'yaml';
 import { MAX_SPEC_BYTES, parseSpec } from './specdiff.ts';
+import { githubSpecUrls, type GithubOptions } from './github.ts';
 import {
   PROVENANCE_RANK,
   provenanceOfPointer,
@@ -40,11 +41,16 @@ export interface FetchResponse {
   contentType: string;
 }
 
+export interface FetchInit {
+  /** Extra request headers — an API token, an accept type. */
+  headers?: Record<string, string>;
+}
+
 /**
  * Injected rather than called directly, so the resolution order and the
  * acceptance rules are testable without a network.
  */
-export type Fetcher = (url: string) => Promise<FetchResponse>;
+export type Fetcher = (url: string, init?: FetchInit) => Promise<FetchResponse>;
 
 export interface Vendor {
   /** The provider's own domain, e.g. `stripe.com`. */
@@ -58,6 +64,14 @@ export interface ResolveOptions {
   cacheDir: string;
   /** How long a cached copy stays usable. A day by default. */
   maxAgeMs?: number;
+  /**
+   * Look in the provider's own GitHub organisation.
+   *
+   * Opt-in, because it is the only source that can produce a description Emend
+   * may assert breakage from, and because GitHub allows sixty unauthenticated
+   * requests an hour — a budget a hosted scan exhausts in minutes.
+   */
+  github?: GithubOptions;
 }
 
 type Doc = Record<string, unknown>;
@@ -206,6 +220,8 @@ async function candidateFrom(
   vendor: Vendor,
   now: string,
   floor?: SpecProvenance,
+  /** An organisation established by the source that produced this URL. */
+  org?: string,
 ): Promise<SpecCandidate | null> {
   let res: FetchResponse;
   try {
@@ -221,7 +237,8 @@ async function candidateFrom(
     url: res.url,
     // Against the registrable domain, so a description for `api.stripe.com`
     // served from `stripe.com` is still the provider's own file.
-    provenance: floor ?? provenanceOfPointer(res.url, registrableDomain(vendor.domain), vendor.org),
+    provenance:
+      floor ?? provenanceOfPointer(res.url, registrableDomain(vendor.domain), org ?? vendor.org),
     fetchedAt: now,
     body: res.body,
   };
@@ -458,7 +475,17 @@ export async function resolveSpec(
     }
   }
 
-  // 3. apis.io. The only directory left: apis.guru's weekly refresh stopped
+  // 3. The provider's own GitHub organisation. Between their origin and the
+  //    directory, because it is first-party — and the only source that can yield
+  //    a description Emend may assert breakage from.
+  if (!settled() && options.github) {
+    for (const hit of await githubSpecUrls(options.fetch, vendor.domain, options.github)) {
+      add(await candidateFrom(options.fetch, hit.url, vendor, now, undefined, hit.org));
+      if (settled() || found.some((c) => c.provenance === 'official-github')) break;
+    }
+  }
+
+  // 4. apis.io. The only directory left: apis.guru's weekly refresh stopped
   //    running in March while its README still advertises one, and a source
   //    claiming to be current when it is not is worse than no source at all —
   //    it makes a stale description look like a checked one.
@@ -493,7 +520,7 @@ export async function resolveSpec(
  */
 export function httpFetcher(options: { timeoutMs?: number } = {}): Fetcher {
   const timeoutMs = options.timeoutMs ?? 15_000;
-  return async (url: string): Promise<FetchResponse> => {
+  return async (url: string, init?: FetchInit): Promise<FetchResponse> => {
     const empty = { ok: false, status: 0, url, body: '', contentType: '' };
     let target: URL;
     try {
@@ -510,7 +537,10 @@ export function httpFetcher(options: { timeoutMs?: number } = {}): Fetcher {
       const res = await globalThis.fetch(target, {
         signal: controller.signal,
         redirect: 'follow',
-        headers: { accept: 'application/json, application/yaml, text/yaml, */*' },
+        headers: {
+          accept: 'application/json, application/yaml, text/yaml, */*',
+          ...init?.headers,
+        },
       });
       const length = Number(res.headers.get('content-length') ?? '0');
       if (length > MAX_SPEC_BYTES) {

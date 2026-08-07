@@ -118,7 +118,20 @@ function contractsFrom(args: Args): { resolve: (v: { domain: string }) => Promis
   const cacheDir =
     typeof flag === 'string' ? flag : path.join(os.tmpdir(), 'emend-specs');
   const fetch = httpFetcher();
-  return { resolve: (vendor) => resolveSpec(vendor, { fetch, cacheDir }) };
+
+  // GitHub is the only source that can yield a description Emend may assert
+  // breakage from, so it is worth reaching for — but sixty unauthenticated
+  // requests an hour is exhausted by a handful of vendors, measured. A token
+  // raises it to five thousand.
+  const token = process.env['GITHUB_TOKEN'] ?? process.env['GH_TOKEN'];
+  const orgFlag = args.flags.get('github-org');
+  const github = {
+    ...(token ? { token } : {}),
+    // Named by the operator when no automatic check can connect the two:
+    // Stripe's organisation records `stripe.dev` as its site, not `stripe.com`.
+    ...(typeof orgFlag === 'string' ? { org: orgFlag } : {}),
+  };
+  return { resolve: (vendor) => resolveSpec(vendor, { fetch, cacheDir, github }) };
 }
 
 function severityLabel(sev: string): string {
@@ -798,6 +811,11 @@ ${c.bold('COMMANDS')}
                     published API description. Makes network requests — one
                     resolution per host found in your source. Optionally names a
                     directory to cache descriptions in.
+                    Set GITHUB_TOKEN: only a description from the provider's own
+                    repository may be used to assert a call is broken, and
+                    unauthenticated GitHub allows 60 requests an hour.
+    --github-org o  Name the provider's GitHub organisation, for vendors whose
+                    own records do not link back to their API domain.
     --json          Machine-readable output
 
   fix <repo>      Plan, apply, and verify migrations in an isolated workspace.
