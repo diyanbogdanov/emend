@@ -19,7 +19,7 @@ import { planFinding } from './plan.ts';
 import { findWorkspaces } from './workspaces.ts';
 import { readRepo } from './inventory.ts';
 import { scanPins, resolvedVersions, planPinRepair } from './pins.ts';
-import { planRemediation, type Remediation } from './remediate.ts';
+import { planOverride, planRemediation, type Remediation } from './remediate.ts';
 import { readLockfile } from './lockfile.ts';
 import { compareVersions } from './registry.ts';
 import {
@@ -1214,6 +1214,8 @@ export interface VulnFixResult {
   remediation: Remediation;
   /** Whether the vulnerable version actually left the tree. */
   resolved: boolean;
+  /** True when an override was needed, because no bump would move it. */
+  overrode: boolean;
   /** What the package resolves to now, read back from the lockfile. */
   installedAfter: string | null;
   verification: VerificationReport | null;
@@ -1259,6 +1261,7 @@ export async function fixVulnerability(
     finding,
     remediation,
     resolved: false,
+    overrode: false,
     installedAfter: null,
     verification: null,
     diff: '',
@@ -1294,19 +1297,48 @@ export async function fixVulnerability(
 
     // Read back rather than assume. A parent bump may resolve a patched child,
     // a still-vulnerable one, or the same one — and only the lockfile knows.
-    const after = await readLockfile(ws.dir);
-    const installed = [...after.tree.values()]
-      .filter((e) => e.name === finding.pkg)
-      .map((e) => e.version);
-    const worst = installed.sort(compareVersions)[0] ?? null;
-    const resolved =
-      installed.length === 0 ||
-      (worst !== null && compareVersions(worst, finding.toVersion) >= 0);
+    const stillAffected = async (): Promise<{ versions: string[]; worst: string | null }> => {
+      const after = await readLockfile(ws!.dir);
+      const versions = [...after.tree.values()]
+        .filter((e) => e.name === finding.pkg)
+        .map((e) => e.version)
+        .sort(compareVersions);
+      return { versions, worst: versions[0] ?? null };
+    };
+    const cleared = (worst: string | null, count: number): boolean =>
+      count === 0 || (worst !== null && compareVersions(worst, finding.toVersion) >= 0);
+
+    let { versions: installed, worst } = await stillAffected();
     progress(
       installed.length === 0
         ? `  ${finding.pkg} is no longer installed`
         : `  ${finding.pkg} now resolves to ${installed.join(', ')}`,
     );
+
+    // Rung three. A bump that did not move it means no dependency's own range
+    // selects a patched version, so the only remaining lever is to force one —
+    // which tells npm to override a constraint a parent declared deliberately.
+    // The parent may genuinely break, and that is what the verification below
+    // is for.
+    let overrode = false;
+    if (!cleared(worst, installed.length)) {
+      const manifestPath = path.join(ws.dir, 'package.json');
+      const manifestRaw = await readFile(manifestPath, 'utf8').catch(() => '');
+      const edit = planOverride(manifestRaw, finding.pkg, finding.toVersion);
+      if (edit) {
+        progress(`  the bump did not move it; forcing ${finding.pkg} to ${finding.toVersion}`);
+        const applied = await applyTextEdits(ws.dir, [edit]);
+        if (applied.applied.length > 0) {
+          overrode = true;
+          await bumpDependency(ws.dir, finding.pkg, finding.toVersion, {
+            ignoreScripts: untrusted,
+          }).catch(() => null);
+          ({ versions: installed, worst } = await stillAffected());
+          progress(`  ${finding.pkg} now resolves to ${installed.join(', ') || '(absent)'}`);
+        }
+      }
+    }
+    const resolved = cleared(worst, installed.length);
 
     const verification = compare(baseline, await runPhase(ws.dir, phaseOpts));
     progress(`  ${verification.outcome}`);
@@ -1314,6 +1346,7 @@ export async function fixVulnerability(
     const result: VulnFixResult = {
       ...base,
       resolved,
+      overrode,
       installedAfter: worst,
       verification,
       diff: await workspaceDiff(ws),

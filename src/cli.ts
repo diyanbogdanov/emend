@@ -14,6 +14,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
+import { reintroduced } from './remediate.ts';
 import { fixFinding, fixPackage, fixPins, fixVulnerability } from './fix.ts';
 import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
@@ -291,6 +292,11 @@ async function cmdScan(args: Args): Promise<number> {
   const repo = await readRepo(repoDir);
   const contracts = contractsFrom(args);
   const vulnerabilities = vulnerabilitiesFrom(args);
+  // What this repository has already had fixed, so a package that slipped back
+  // is reported as a reintroduction rather than as something newly discovered.
+  const previouslyFixed = new Store();
+  const fixedBefore = previouslyFixed.fixedVulnerabilities(repoDir);
+  previouslyFixed.close();
   const report = await scanRepo(repoDir, {
     ...(only ? { only } : {}),
     includeDev: args.flags.get('no-dev') !== true,
@@ -298,6 +304,22 @@ async function cmdScan(args: Args): Promise<number> {
     ...(vulnerabilities ? { vulnerabilities } : {}),
     onProgress: args.flags.get('json') === true ? () => {} : (m) => console.log(c.dim(`  ${m}`)),
   });
+
+  // Checked against what is installed now, not against the findings: a package
+  // can slip back below the version that fixed it without any advisory being
+  // rediscovered, and that is exactly the case worth catching.
+  if (fixedBefore.length > 0) {
+    const installed = new Map(
+      (await readRepo(repoDir)).dependencies
+        .filter((d) => d.installed !== null)
+        .map((d) => [d.name, d.installed as string]),
+    );
+    for (const back of reintroduced(fixedBefore, installed)) {
+      report.warnings.push(
+        `${back.pkg} was fixed at ${back.was} and now resolves to ${back.now} — a vulnerability this repository already dealt with has come back (${back.advisories.join(', ')})`,
+      );
+    }
+  }
 
   if (args.flags.get('json') === true) {
     console.log(JSON.stringify(report, null, 2));
@@ -379,7 +401,17 @@ async function cmdFix(args: Args): Promise<number> {
     // Two conditions, and both must hold. A green build with the vulnerable
     // version still installed is the failure most easily mistaken for success.
     const fixed = verified && vulnResult.resolved;
-    if (fixed) anyVerified = true;
+    if (fixed) {
+      anyVerified = true;
+      // Only on a verified fix. Recording an attempt would make the regression
+      // guard fire on a package that was never actually repaired.
+      store.recordVulnerabilityFixed(
+        repoDir,
+        finding.pkg,
+        vulnResult.installedAfter ?? finding.toVersion,
+        [finding.change.path],
+      );
+    }
     console.log(
       `    ${
         fixed
@@ -389,6 +421,15 @@ async function cmdFix(args: Args): Promise<number> {
             : c.red('NOT FIXED')
       }  ${c.dim(vulnResult.verification?.summary ?? vulnResult.note ?? '')}`,
     );
+    // Never silent. An override forces a version a dependency did not ask for,
+    // and a reviewer has to know a constraint was overridden rather than met.
+    if (vulnResult.overrode) {
+      console.log(
+        c.yellow(
+          `    forced via an overrides entry — no dependency's own range selects ${finding.toVersion}`,
+        ),
+      );
+    }
     if (vulnResult.note && !fixed) console.log(c.yellow(`    ${vulnResult.note}`));
     if (vulnResult.workspaceDir) {
       console.log(c.dim(`    workspace kept at ${vulnResult.workspaceDir}`));

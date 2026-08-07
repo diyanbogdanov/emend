@@ -118,3 +118,50 @@ test('migrating twice is a no-op rather than an error', () => {
     cleanup();
   }
 });
+
+test('a fixed vulnerability is remembered, so a revert is not a new finding', () => {
+  // The regression guard's memory. Without it a revert, a bad merge, or a
+  // lockfile regenerated from a stale branch arrives looking brand new, and the
+  // fact that it was already dealt with is lost.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-store-'));
+  try {
+    const store = new Store(path.join(dir, 'emend.db'));
+    store.recordVulnerabilityFixed('/repo', 'lodash', '4.18.0', ['GHSA-a', 'GHSA-b']);
+    const fixed = store.fixedVulnerabilities('/repo');
+    assert.equal(fixed.length, 1);
+    assert.equal(fixed[0]?.fixedAt, '4.18.0');
+    assert.deepEqual(fixed[0]?.advisories, ['GHSA-a', 'GHSA-b']);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fixing the same package again updates the record rather than duplicating it', () => {
+  // Two rows for one package would make the guard compare against whichever it
+  // read first, which is a coin toss.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-store-'));
+  try {
+    const store = new Store(path.join(dir, 'emend.db'));
+    store.recordVulnerabilityFixed('/repo', 'lodash', '4.18.0', ['GHSA-a']);
+    store.recordVulnerabilityFixed('/repo', 'lodash', '4.19.0', ['GHSA-c']);
+    const fixed = store.fixedVulnerabilities('/repo');
+    assert.equal(fixed.length, 1);
+    assert.equal(fixed[0]?.fixedAt, '4.19.0');
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('another repository’s fixes are not this one’s', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-store-'));
+  try {
+    const store = new Store(path.join(dir, 'emend.db'));
+    store.recordVulnerabilityFixed('/other', 'lodash', '4.18.0', []);
+    assert.deepEqual(store.fixedVulnerabilities('/repo'), []);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -8,6 +8,7 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
+import type { FixedRecord } from './remediate.ts';
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -170,6 +171,19 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_runs_finding ON runs(finding_id);
 
       -- Hosted service. A local CLI install simply leaves these empty.
+      -- Vulnerabilities that were fixed once, so a later scan can tell a
+      -- reintroduction from a new finding. Without it a revert or a lockfile
+      -- regenerated from a stale branch arrives looking brand new, and the fact
+      -- that it was already dealt with is lost.
+      CREATE TABLE IF NOT EXISTS fixed_vulnerabilities (
+        repo_dir   TEXT NOT NULL,
+        pkg        TEXT NOT NULL,
+        fixed_at   TEXT NOT NULL,
+        advisories TEXT NOT NULL,
+        recorded   TEXT NOT NULL,
+        PRIMARY KEY (repo_dir, pkg)
+      );
+
       CREATE TABLE IF NOT EXISTS installations (
         installation_id INTEGER PRIMARY KEY,
         account         TEXT NOT NULL,
@@ -319,6 +333,41 @@ export class Store {
   // ---------------------------------------------------------------------------
   // Hosted service: installations, repositories, and the job queue.
   // ---------------------------------------------------------------------------
+
+  /**
+   * Record that a vulnerability was cleared, and at which version.
+   *
+   * Only ever called after a verified fix. Recording an attempt would make the
+   * regression guard fire on a package that was never actually repaired.
+   */
+  recordVulnerabilityFixed(repoDir: string, pkg: string, fixedAt: string, advisories: string[]): void {
+    this.#db
+      .prepare(
+        `INSERT INTO fixed_vulnerabilities (repo_dir, pkg, fixed_at, advisories, recorded)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(repo_dir, pkg) DO UPDATE SET
+           fixed_at   = excluded.fixed_at,
+           advisories = excluded.advisories,
+           recorded   = excluded.recorded`,
+      )
+      .run(repoDir, pkg, fixedAt, JSON.stringify(advisories), new Date().toISOString());
+  }
+
+  /** Everything this repository has had fixed, for the regression guard. */
+  fixedVulnerabilities(repoDir: string): FixedRecord[] {
+    const rows = this.#db
+      .prepare('SELECT pkg, fixed_at, advisories FROM fixed_vulnerabilities WHERE repo_dir = ?')
+      .all(repoDir) as Array<{ pkg: string; fixed_at: string; advisories: string }>;
+    return rows.map((r) => {
+      let advisories: string[] = [];
+      try {
+        advisories = JSON.parse(r.advisories) as string[];
+      } catch {
+        advisories = [];
+      }
+      return { pkg: r.pkg, fixedAt: r.fixed_at, advisories };
+    });
+  }
 
   upsertInstallation(installationId: number, account: string): void {
     this.#db
