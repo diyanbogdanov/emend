@@ -43,6 +43,7 @@ import {
   nearbySymbols,
   classifyEdits,
   selectEvidencedEdits,
+  selectReviewEdits,
   NARROWING_RULE,
   type TextEdit,
   type EditClassification,
@@ -360,10 +361,14 @@ async function reviewMigration(
     progress(`  review: ${gaps.length} deprecation(s) not finished by the migration`);
   }
 
+  // The migration's own diff, which is both what the review is asked to judge
+  // and — below — the boundary of what it may change.
+  const migrationDiff = await workspaceDiff(ws);
+  const sources = await loadSources(ws.dir, finding, extraFiles);
   const proposal = await proposeReview(config, {
     finding,
-    sources: await loadSources(ws.dir, finding, extraFiles),
-    diff: await workspaceDiff(ws),
+    sources,
+    diff: migrationDiff,
     deprecationGaps: describeDeprecationGaps(gaps),
     candidateSymbols,
   });
@@ -376,12 +381,45 @@ async function reviewMigration(
     progress(`    review found nothing to change: ${proposal.rationale.slice(0, 160)}`);
     return null;
   }
-  const applied = await applyTextEdits(ws.dir, proposal.edits);
-  if (applied.applied.length === 0) {
-    progress(`    review: none of ${proposal.edits.length} edit(s) matched the source`);
+  // The review's evidence gate. Every other stage has one; this was the gap, and
+  // it showed on a live run — an unanchored review rewrote a working
+  // `cancelToken` into an `AbortSignal`, changing an exported signature to
+  // modernise an API carrying no deprecation marker. Green build, cleared
+  // advisory, nothing downstream objected, because an unnecessary edit that
+  // compiles and passes is invisible to verification precisely by being right.
+  //
+  // Anchors: what the migration changed, plus the call sites of deprecations it
+  // reported and did not finish. Rule 4 outranks rule 6, so that repair stays in
+  // scope wherever it lives.
+  const stillDeprecated = new Set(gaps.map((g) => g.symbol));
+  const deprecatedSites = findings
+    .filter(
+      (f) =>
+        f.change.kind === 'deprecated' &&
+        stillDeprecated.has(f.change.path.split('.').pop() ?? f.change.path),
+    )
+    .flatMap((f) => f.sites.map((s) => ({ file: s.file, line: s.line })));
+
+  const { keep, dropped } = selectReviewEdits(
+    proposal.edits,
+    migrationDiff,
+    deprecatedSites,
+    sources,
+  );
+  if (dropped.length > 0) {
+    progress(`    review: withheld ${dropped.length} edit(s) outside the migration's diff`);
+  }
+  if (keep.length === 0) {
+    progress(`    review: nothing in scope of ${proposal.edits.length} proposed edit(s)`);
     return null;
   }
-  progress(`    review: applied ${applied.applied.length} of ${proposal.edits.length} edit(s)`);
+
+  const applied = await applyTextEdits(ws.dir, keep);
+  if (applied.applied.length === 0) {
+    progress(`    review: none of ${keep.length} edit(s) matched the source`);
+    return null;
+  }
+  progress(`    review: applied ${applied.applied.length} of ${keep.length} edit(s)`);
 
   const report = compare(baseline, await runPhase(ws.dir, phaseOpts));
   if (verificationPassed(report.outcome)) {
@@ -1579,25 +1617,18 @@ export async function fixVulnerability(
           );
           if (tightened) verification = tightened;
 
-          // No review pass here, and the reason is measured rather than assumed.
-          //
-          // The review is anchored by the findings the migration reported: rule
-          // 4 tells it to finish the deprecations it was handed, rule 6 forbids
-          // touching anything else. A vulnerability repair reports none — there
-          // was no drift scan — so both the anchor and the boundary are empty
-          // and it free-runs.
-          //
-          // Observed on this path's first run with it enabled: it rewrote a
-          // working `cancelToken: CancelTokenSource` to `signal: AbortSignal`,
-          // changing an *exported* function's signature. `cancelToken` is not
-          // marked deprecated in axios 0.33.0's declarations, so this was not a
-          // migration being finished. The build stayed green and the advisory
-          // stayed cleared, which is exactly why it is dangerous: an unnecessary
-          // edit that compiles and passes is invisible to verification precisely
-          // because it is not wrong.
-          //
-          // Tightening above is kept: it is bounded to removing `any`, and it
-          // restores the annotations if the result does not verify.
+          // Runs here now that the review has a gate. It was disabled on this
+          // path after a live run showed it free-running — it rewrote a working
+          // `cancelToken: CancelTokenSource` into `signal: AbortSignal`, an
+          // exported signature change to modernise an API carrying no
+          // deprecation marker. The boundary was in the prompt and nothing
+          // enforced it; `selectReviewEdits` enforces it, anchored to the repair
+          // diff, which is the right anchor whether or not drift was scanned.
+          const reviewed = await reviewMigration(
+            llm.config, ws, phaseOpts, baseline, repairFinding, [],
+            extraFiles, repaired.candidates, progress,
+          );
+          if (reviewed) verification = reviewed.report;
           if (agentRecord) {
             agentRecord.finalErrors = verificationPassed(verification.outcome)
               ? 0

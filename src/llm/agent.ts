@@ -210,12 +210,16 @@ Rules you must follow:
 2. Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.
 3. Behaviour must not change. This is a restructuring pass. The one exception: replacing a deprecated API with its supported equivalent is the migration finishing its job, not a behaviour change.
 4. Finish the migration first. If you are told a deprecated symbol is still imported, removing it is the highest-priority edit in this pass. A migration that reports "X is deprecated" and still uses X has not done what it said. Use the package's supported replacement; if there is none, leave it and say so in "rationale".
-5. Then look for the move that deletes complexity rather than rearranging it:
+5. Then look for the move that deletes complexity rather than rearranging it. Work this list in order — a structural regression outranks every simplification below it, and naming a nit while a structural problem stands is a wasted pass:
+   - Ad-hoc branching added to an existing flow, or a "temporary" special case that will become permanent. Spaghetti growth is the regression that compounds.
    - The same edit repeated at three or more call sites is a missing helper. Extract it once, in the layer that owns that boundary, and call it.
    - Conditionals, flags or special cases the diff added where a better shape would need none.
-   - Casts, \`any\`, \`unknown\` or new optionality that hides an invariant instead of stating it.
+   - Independent \`await\`s the diff made sequential. If two operations do not depend on each other, \`Promise.all\` is both faster and clearer; only leave them sequential when ordering is load-bearing.
+   - Logic applied in steps that can leave state half-updated if one step throws. Either make it atomic or make the partial state impossible to observe.
+   - Casts, \`any\`, \`unknown\` or new optionality that hides an invariant instead of stating it. A loosely-shaped ad-hoc object where an explicit type belongs is the same problem.
    - A wrapper or indirection that does not earn the extra hop.
 6. Do not reformat, rename, or restructure code the migration did not touch. Out-of-scope churn buries the change under noise and is the fastest way for a reviewer to reject an otherwise good pull request.
+   This boundary is ENFORCED, not requested: every edit you return is checked against the migration's own diff, and one that does not overlap a line the migration changed is discarded before it is applied. You have a single attempt, so spending it on code outside the diff spends it on nothing. Repository-wide concerns — a file grown too long, feature logic that belongs in a different module — are real and are not this pass's job; say them in "rationale" instead, where they reach a human.
    Comments are the exception, and only when the migration made one false. A comment naming the old version, or describing behaviour the migration changed, is now wrong and correcting it finishes the job. Rewrite it to describe what the code does now, in a form that reads correctly on its own — do not repeat a sentence that already appears beside it, and do not leave a fragment of the old one. A comment the migration did not falsify stays exactly as it is.
 7. When a coercion has to stand in for missing data, prefer a value the caller can detect over one it cannot. \`Number(x ?? 0)\` renders a real string as "0", which no test objects to and no reader spots; returning null, or a sentinel the formatter understands, keeps the absence visible.
 8. If the diff is already good, return an empty "edits" array and say why. That is a valid and useful answer — a pass that invents work to look busy is worse than one that declines.
@@ -995,7 +999,43 @@ export function selectLintEdits(
   findings: Array<{ file: string; line: number }>,
   sources: Map<string, string>,
 ): { keep: TextEdit[]; dropped: EditClassification[] } {
-  const WINDOW = 3;
+  return selectNearAnchors(
+    edits,
+    findings,
+    sources,
+    (edit, span) => `${edit.file} lines ${span.start}-${span.end} carry no linter finding`,
+    3,
+  );
+}
+
+/**
+ * Keep only the edits that land near a line something already points at.
+ *
+ * Shared by the lint and review gates, which differ solely in what counts as an
+ * anchor and how the refusal is worded. Two copies of this drift, and the drift
+ * would be silent — both gates fail open, so a bug here withholds nothing and
+ * looks exactly like a gate that had nothing to withhold.
+ *
+ * The window is generous by a few lines because a tool reports the head of a
+ * construct while the fix often spans its continuations.
+ */
+function selectNearAnchors(
+  edits: TextEdit[],
+  anchors: Array<{ file: string; line: number }>,
+  sources: Map<string, string>,
+  refusal: (edit: TextEdit, span: { start: number; end: number }) => string,
+  /**
+   * Slack either side of an anchor.
+   *
+   * Lint needs it: a linter names the head of a construct while the fix spans
+   * its continuations. Review does not: the anchor there is the migration's own
+   * edit, and a review improving that edit overlaps it — `spanOf` already covers
+   * the multi-line case. Slack would licence the drift the gate exists to stop,
+   * since three lines is enough to reach the next statement.
+   */
+  window: number,
+): { keep: TextEdit[]; dropped: EditClassification[] } {
+  const WINDOW = window;
   const keep: TextEdit[] = [];
   const dropped: EditClassification[] = [];
 
@@ -1008,20 +1048,79 @@ export function selectLintEdits(
       keep.push(edit);
       continue;
     }
-    const flagged = findings.filter((f) => sameFile(f.file, edit.file));
-    const touches = flagged.some(
-      (f) => f.line >= span.start - WINDOW && f.line <= span.end + WINDOW,
+    const here = anchors.filter((a) => sameFile(a.file, edit.file));
+    const touches = here.some(
+      (a) => a.line >= span.start - WINDOW && a.line <= span.end + WINDOW,
     );
     if (touches) keep.push(edit);
-    else {
-      dropped.push({
-        edit,
-        evidence: 'unrequested',
-        reason: `${edit.file} lines ${span.start}-${span.end} carry no linter finding`,
-      });
-    }
+    else dropped.push({ edit, evidence: 'unrequested', reason: refusal(edit, span) });
   }
   return { keep, dropped };
+}
+
+/**
+ * The lines a diff added, numbered against the file as it now stands.
+ *
+ * Deletions consume no line on the new side and context lines do; getting that
+ * backwards shifts every anchor after the first hunk. The `+++ b/file` header
+ * also begins with `+` and must not be counted, or every file anchors at line 0
+ * and the gate is quietly off.
+ */
+export function touchedLines(diff: string): Array<{ file: string; line: number }> {
+  const out: Array<{ file: string; line: number }> = [];
+  let file = '';
+  let next = 0;
+
+  for (const line of diff.split('\n')) {
+    const header = line.match(/^\+\+\+ (?:b\/)?(.+)$/);
+    if (header?.[1]) {
+      file = header[1].trim();
+      continue;
+    }
+    if (line.startsWith('--- ')) continue;
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk?.[1]) {
+      next = Number(hunk[1]);
+      continue;
+    }
+    if (!file) continue;
+    if (line.startsWith('+')) out.push({ file, line: next++ });
+    else if (line.startsWith(' ') || line === '') next += 1;
+  }
+  return out;
+}
+
+/**
+ * The review's evidence gate: it may change what the migration changed.
+ *
+ * The review is the one stage with no gate, and it showed. Measured on a live
+ * security repair, an unanchored review rewrote a working
+ * `cancelToken: CancelTokenSource` into `signal: AbortSignal` — altering an
+ * *exported* function's signature to modernise an API that carries no
+ * deprecation marker. The build stayed green and the advisory stayed cleared,
+ * which is precisely why nothing downstream objected: an unnecessary edit that
+ * compiles and passes tests is invisible to verification because it is not
+ * wrong.
+ *
+ * The rule is the review prompt's own rule 6, enforced rather than requested.
+ * Rule 4 outranks it and is the `deprecated` exemption: a migration that reports
+ * "X is deprecated" and ships with X still in the code has not done what it
+ * said, and that repair is the review's highest-priority job wherever it lives.
+ */
+export function selectReviewEdits(
+  edits: TextEdit[],
+  migrationDiff: string,
+  deprecated: Array<{ file: string; line: number }>,
+  sources: Map<string, string>,
+): { keep: TextEdit[]; dropped: EditClassification[] } {
+  return selectNearAnchors(
+    edits,
+    [...touchedLines(migrationDiff), ...deprecated],
+    sources,
+    (edit, span) =>
+      `${edit.file} lines ${span.start}-${span.end}: the migration did not touch this, and no reported deprecation lives here`,
+    0,
+  );
 }
 
 export function selectEvidencedEdits(classified: EditClassification[]): {
