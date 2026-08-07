@@ -22,6 +22,8 @@
  */
 
 import ts from 'typescript';
+import { canAssertBreakage, describeProvenance, type SpecCandidate } from './specs.ts';
+import { readOperations } from './specdiff.ts';
 import type { CallSite, SurfaceChange } from './types.ts';
 
 export interface HttpCall {
@@ -193,6 +195,82 @@ export interface ContractHit {
    * it could read, and says how much that was.
    */
   unresolvedCalls: number;
+}
+
+export interface ContractCheck {
+  /** Calls reaching an endpoint the current description does not contain. */
+  gone: HttpCall[];
+  /** How many of this host's calls the description accounted for. */
+  matched: number;
+  unresolvedCalls: number;
+  /** Why nothing is claimed, when nothing is. */
+  note?: string;
+}
+
+/**
+ * Check a host's calls against the description of it, without needing a previous
+ * one to compare against.
+ *
+ * `diffSpecs` answers "what changed"; this answers the question a customer
+ * actually has — *is my integration still valid?* — which needs only today's
+ * description and needs no baseline, so it works on a first scan.
+ *
+ * Two things stop it being confidently wrong.
+ *
+ * A description that is not the provider's own word claims nothing. That is
+ * `specs.ts`'s rule applied where it bites: telling somebody their integration
+ * is broken on the strength of a copy that may be years stale is exactly the
+ * false certainty every honesty rule here exists to prevent, and a reader cannot
+ * tell it from a real finding.
+ *
+ * And if *no* call matches anything in the description, the conclusion is that
+ * the two could not be aligned — a base path, a host convention, a versioned
+ * prefix — not that every endpoint the customer calls has been deleted. Without
+ * that guard the worst case is a page of confident nonsense; with it, the
+ * detector has to demonstrate it can find this API before it may say anything is
+ * missing from it.
+ */
+export function checkAgainstSpec(
+  calls: HttpCall[],
+  host: string,
+  spec: SpecCandidate,
+): ContractCheck {
+  const mine = calls.filter((c) => c.resolved && c.host === host);
+  const unresolvedCalls = calls.filter((c) => !c.resolved).length;
+  const empty = { gone: [], matched: 0, unresolvedCalls };
+
+  if (!spec.body) return { ...empty, note: 'the description was located but not fetched' };
+  if (!canAssertBreakage(spec)) {
+    return {
+      ...empty,
+      note: `not authoritative, so nothing is claimed from it — ${describeProvenance(spec)}`,
+    };
+  }
+
+  let ops: ReturnType<typeof readOperations>;
+  try {
+    ops = readOperations(JSON.parse(spec.body));
+  } catch {
+    return { ...empty, note: 'the description could not be read as OpenAPI or Swagger' };
+  }
+  if (ops.size === 0) return { ...empty, note: 'the description could not be read as OpenAPI or Swagger' };
+
+  const described = [...ops.keys()].map((key) => endpointOf(key)).filter((e) => e !== null);
+  const present = (call: HttpCall): boolean =>
+    described.some((e) => e.method === call.method && call.route && sameRoute(call.route, e.route));
+
+  const matched = mine.filter(present).length;
+  if (matched === 0) {
+    return {
+      ...empty,
+      note:
+        mine.length === 0
+          ? 'no readable call reaches this host'
+          : 'the description could not be aligned with any call in this repository, so nothing is claimed',
+    };
+  }
+
+  return { gone: mine.filter((c) => !present(c)), matched, unresolvedCalls };
 }
 
 /** `POST /v1/charges query:x` and `POST /v1/charges` both name that endpoint. */

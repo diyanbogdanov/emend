@@ -15,6 +15,8 @@
 
 import { createHash } from 'node:crypto';
 import { extractPins, findPinConflicts, resolvedVersions, PIN_FILES } from './pins.ts';
+import { checkAgainstSpec, findHttpCalls, type HttpCall } from './httpsites.ts';
+import { describeProvenance, type SpecCandidate } from './specs.ts';
 import type { Detector, Finding, InstalledDependency } from './types.ts';
 
 /**
@@ -123,6 +125,114 @@ export const versionPinDetector: Detector = {
       );
   },
 };
+
+function httpFindingId(host: string, method: string, route: string): string {
+  return createHash('sha256')
+    .update(`http-contract|${host}|${method}|${route}`)
+    .digest('hex')
+    .slice(0, 12);
+}
+
+/** Everything this detector needs beyond the ordinary context. */
+export interface HttpContractOptions {
+  resolve: (vendor: { domain: string }) => Promise<SpecCandidate[]>;
+  /** Where a scan is willing to spend its network budget. */
+  maxHosts?: number;
+}
+
+/**
+ * Calls reaching endpoints their vendor's own description no longer contains.
+ *
+ * The detector the whole `http-contract` step exists for. A raw `fetch` has no
+ * types, so nothing in a TypeScript build has any opinion about whether
+ * `POST /v1/charges` is still a real endpoint — the request compiles, ships, and
+ * fails in production. The description is the only surface it can be checked
+ * against.
+ *
+ * Off by default, and injected rather than importing the resolver: this is the
+ * only detector that reaches the network, and a `scan` that quietly starts
+ * making outbound requests to every host in someone's source tree is not a thing
+ * to switch on for them.
+ *
+ * `severity` is `breaking` and `confidence` is `medium`. The endpoint really is
+ * gone from the provider's own description — that part is high — but whether
+ * this particular call is the one that breaks depends on things no description
+ * records, and `checkAgainstSpec` has already refused to speak at all where the
+ * description was not authoritative or could not be aligned.
+ */
+export function httpContractDetector(options: HttpContractOptions): Detector {
+  const maxHosts = options.maxHosts ?? 8;
+
+  async function callsIn(ctx: DetectorContext): Promise<HttpCall[]> {
+    const calls: HttpCall[] = [];
+    for (const file of ctx.sourceFiles) {
+      if (!/\.[cm]?tsx?$/.test(file)) continue;
+      const source = await ctx.read(file);
+      if (source !== null) calls.push(...findHttpCalls(file, source));
+    }
+    return calls;
+  }
+
+  return {
+    id: 'http-contract',
+
+    async applies(ctx: DetectorContext): Promise<boolean> {
+      // Cheap enough to be a precondition: the first resolved outbound call
+      // anywhere is the answer, and most repositories have one in the first file
+      // that has any.
+      for (const file of ctx.sourceFiles) {
+        if (!/\.[cm]?tsx?$/.test(file)) continue;
+        const source = await ctx.read(file);
+        if (source === null) continue;
+        if (findHttpCalls(file, source).some((c) => c.resolved)) return true;
+      }
+      return false;
+    },
+
+    async detect(ctx: DetectorContext): Promise<Finding[]> {
+      const calls = await callsIn(ctx);
+      const hosts = [...new Set(calls.filter((c) => c.resolved && c.host).map((c) => c.host as string))];
+
+      const findings: Finding[] = [];
+      // Bounded, and the bound is stated rather than silent: a repository
+      // talking to thirty services should not turn one scan into thirty
+      // resolutions without somebody choosing that.
+      for (const host of hosts.slice(0, maxHosts)) {
+        const candidates = await options.resolve({ domain: host });
+        const spec = candidates[0];
+        // No description located means exactly that. The detector reports the
+        // call sites it found and says the description was unavailable; it never
+        // reports that there is no problem.
+        if (!spec) continue;
+
+        const check = checkAgainstSpec(calls, host, spec);
+        for (const call of check.gone) {
+          findings.push({
+            id: httpFindingId(host, call.method, call.route ?? ''),
+            detector: 'http-contract',
+            pkg: host,
+            // A wire API has no version pair to bump between. The description is
+            // the target, and where it came from is what the reader needs.
+            fromVersion: 'in use',
+            toVersion: spec.provenance,
+            change: {
+              path: `${call.method} ${call.route}`,
+              kind: 'removed',
+              severity: 'breaking',
+              confidence: 'medium',
+              before: 'present',
+              after: null,
+              guidance: `not in ${describeProvenance(spec)}`,
+            },
+            sites: [{ file: call.file, line: call.line, column: call.column, text: call.text, via: 'import' }],
+            confidence: 'medium',
+          });
+        }
+      }
+      return findings;
+    },
+  };
+}
 
 export const DETECTORS: Detector[] = [versionPinDetector];
 
