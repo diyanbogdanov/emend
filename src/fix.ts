@@ -461,6 +461,39 @@ async function changesNamedInErrors(
  * which is the difference between annotating the real constraint and reaching
  * for `any`.
  */
+/**
+ * Symbols the compiler says are gone, as opposed to symbols it merely names.
+ *
+ * The candidate list is ranked by similarity to whatever broke. Drift findings
+ * supply that; a vulnerability repair has none, so the compiler output is the
+ * only source — and `symbolsNamedInErrors` cannot help, because it matches names
+ * against the *new* version's symbols and a removed one matches nothing.
+ *
+ * Measured live: axios 0.33.0 removes `AxiosTransformer`, tsc says so and
+ * suggests only a default import, and `AxiosResponseTransformer` — which axios
+ * exports and is the actual replacement — never reached the prompt. The agent
+ * dropped the annotation rather than name a type it had not been shown.
+ *
+ * Only errors that mean *this identifier no longer exists*. An arity or
+ * assignability error is about a symbol that is still there, and ranking the
+ * list by similarity to it would be worse than not ranking it at all.
+ */
+const GONE = [
+  /has no exported member '([^']+)'/g,
+  /Cannot find name '([^']+)'/g,
+  /Property '([^']+)' does not exist on type/g,
+];
+
+export function missingSymbols(errors: string): string[] {
+  const found = new Set<string>();
+  for (const pattern of GONE) {
+    for (const match of errors.matchAll(pattern)) {
+      if (match[1]) found.add(match[1]);
+    }
+  }
+  return [...found];
+}
+
 function symbolsNamedInErrors(
   errors: string,
   toSymbols: Record<string, ApiSymbol>,
@@ -718,6 +751,11 @@ async function runAgentRepair(input: {
   const namedByCompiler = symbolsNamedInErrors(failureOutput, toSymbols);
   const ranked = [
     namedByCompiler,
+    // What the compiler says has *gone*, ranked by what most resembles it. On a
+    // vulnerability repair `findings` is empty, so without this the only source
+    // is `namedByCompiler` — which matches against the new version's symbols, so
+    // a removed symbol matches nothing and its replacement is never offered.
+    ...missingSymbols(failureOutput).map((name) => nearbySymbols(name, toSymbols)),
     ...findings.map((f) => nearbySymbols(f.change.path, toSymbols)),
   ];
   const candidates: string[] = [];
@@ -1527,6 +1565,45 @@ export async function fixVulnerability(
           finalErrors: verificationPassed(verification.outcome) ? 0 : failureSize(verification),
         };
         progress(`  after repair: ${verification.outcome}`);
+
+        // Green, and now the question verification cannot answer: is it worth
+        // merging? The measured case is this path's own first live run, where
+        // the repair dropped an annotation instead of naming the type axios
+        // exports. It compiled, it passed, and it left the code worse typed —
+        // which is exactly and only what a review pass catches.
+        if (verificationPassed(verification.outcome)) {
+          const extraFiles = [...repaired.collateral, ...repaired.referenced];
+          const dir = ws.dir;
+          const tightened = await tightenAny(dir, phaseOpts, baseline, progress, (errors) =>
+            repairTightening(llm.config, dir, repairFinding, extraFiles, progress, errors),
+          );
+          if (tightened) verification = tightened;
+
+          // No review pass here, and the reason is measured rather than assumed.
+          //
+          // The review is anchored by the findings the migration reported: rule
+          // 4 tells it to finish the deprecations it was handed, rule 6 forbids
+          // touching anything else. A vulnerability repair reports none — there
+          // was no drift scan — so both the anchor and the boundary are empty
+          // and it free-runs.
+          //
+          // Observed on this path's first run with it enabled: it rewrote a
+          // working `cancelToken: CancelTokenSource` to `signal: AbortSignal`,
+          // changing an *exported* function's signature. `cancelToken` is not
+          // marked deprecated in axios 0.33.0's declarations, so this was not a
+          // migration being finished. The build stayed green and the advisory
+          // stayed cleared, which is exactly why it is dangerous: an unnecessary
+          // edit that compiles and passes is invisible to verification precisely
+          // because it is not wrong.
+          //
+          // Tightening above is kept: it is bounded to removing `any`, and it
+          // restores the annotations if the result does not verify.
+          if (agentRecord) {
+            agentRecord.finalErrors = verificationPassed(verification.outcome)
+              ? 0
+              : failureSize(verification);
+          }
+        }
       }
     }
 

@@ -534,3 +534,41 @@ test('the rule names the section it governs, by the name the section actually ha
     'the rule must cite the section by its real heading',
   );
 });
+
+test('a replacement formed by inserting a word is ranked above unrelated siblings', () => {
+  // Measured live: axios 0.33.0 removes `AxiosTransformer` and exports
+  // `AxiosResponseTransformer` in its place. Neither name contains the other as
+  // a substring, so both `includes` tests miss and the real answer landed in the
+  // bottom bucket with every other export. The agent could not name it and
+  // dropped the annotation instead — a fix that compiles and is weaker than the
+  // one the package offered.
+  const candidates = nearbySymbols(
+    'AxiosTransformer',
+    targetSymbols([
+      ['AxiosAdapter'],
+      ['AxiosBasicCredentials'],
+      ['AxiosResponseTransformer'],
+      ['AxiosRequestTransformer'],
+      ['CancelTokenSource'],
+    ]),
+  );
+  assert.ok(
+    candidates.indexOf('AxiosResponseTransformer') < candidates.indexOf('AxiosAdapter'),
+    `the replacement must outrank unrelated exports; got ${JSON.stringify(candidates)}`,
+  );
+  // Both transformer halves are genuine replacements — request and response —
+  // and which one is right depends on the call site, so both are offered.
+  assert.ok(
+    candidates.indexOf('AxiosRequestTransformer') < candidates.indexOf('AxiosBasicCredentials'),
+  );
+});
+
+test('an inserted-word match still ranks below a real name match', () => {
+  // The new rule is additive. Anything the measured ranking already placed well
+  // must keep its place, or this trades one buried answer for another.
+  const candidates = nearbySymbols(
+    'record',
+    targetSymbols([['partialRecord'], ['recordOfThings'], ['object']]),
+  );
+  assert.equal(candidates[0], 'partialRecord', 'substring match still wins');
+});

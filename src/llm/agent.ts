@@ -565,9 +565,35 @@ export function nearbySymbols(
   const parent = dot === -1 ? '' : changedPath.slice(0, dot);
   const leaf = (dot === -1 ? changedPath : changedPath.slice(dot + 1)).toLowerCase();
 
-  const leafOf = (p: string): string => {
+  const leafOfRaw = (p: string): string => {
     const i = p.lastIndexOf('.');
-    return (i === -1 ? p : p.slice(i + 1)).toLowerCase();
+    return i === -1 ? p : p.slice(i + 1);
+  };
+  const leafOf = (p: string): string => leafOfRaw(p).toLowerCase();
+
+  // camelCase and snake_case both split into the words a reader would say.
+  const words = (s: string): string[] =>
+    s.split(/(?=[A-Z])|[._\-\s]/).filter(Boolean).map((w) => w.toLowerCase());
+  const leafWords = words(leafOfRaw(changedPath));
+
+  /**
+   * Whether the missing name's words all appear, in order, inside a candidate.
+   *
+   * `AxiosTransformer` -> `AxiosResponseTransformer` is the shape: a word added
+   * in the middle, which no substring test detects.
+   *
+   * The single-word case returns early because it decides nothing — a lone word
+   * matching as a word always matches as a substring too, so bucket 2 has
+   * already claimed it. That is a short-circuit, not a rule, and no test guards
+   * it: removing the line changes no ranking.
+   */
+  const insertsInto = (candidateLeaf: string): boolean => {
+    if (leafWords.length < 2) return false;
+    let i = 0;
+    for (const word of words(candidateLeaf)) {
+      if (word === leafWords[i]) i += 1;
+    }
+    return i === leafWords.length;
   };
 
   // Same-container siblings, *plus* any symbol elsewhere carrying the same leaf
@@ -599,7 +625,13 @@ export function nearbySymbols(
     if (name === leaf) return sibling ? 0 : 1; // same name, here or relocated
     if (name.includes(leaf)) return 2; // record -> partialRecord, looseRecord
     if (leaf.includes(name)) return 3;
-    return 4;
+    // A word inserted in the middle, which neither `includes` test can see.
+    // Measured live: axios 0.33.0 removes `AxiosTransformer` and exports
+    // `AxiosResponseTransformer`, and neither name contains the other, so the
+    // real replacement sat in the bottom bucket with every unrelated export. The
+    // agent could not name it and weakened the annotation instead.
+    if (insertsInto(leafOfRaw(candidatePath))) return 4;
+    return 5;
   };
 
   return out.sort((a, b) => {
