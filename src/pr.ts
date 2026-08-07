@@ -192,8 +192,11 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
     lines.push(
       'The model was given the API contract diff, the located call sites, and the ' +
         'set of symbols that exist in the new version. It proposed text edits; Emend ' +
-        'located and applied them, rejecting anything ambiguous, then verified the result. ' +
-        'The model never had filesystem or shell access.',
+        'located and applied them, rejecting anything ambiguous, then verified the result.' +
+        // True of every PR the structured path produces, and false the moment a
+        // harness runs. Leaving it in place would be a false statement about how
+        // the change was made, in the section explaining how it was made.
+        (result.harness ? '' : ' The model never had filesystem or shell access.'),
     );
     lines.push('');
     if (result.agent.rationale) lines.push(`> ${result.agent.rationale}`);
@@ -247,6 +250,58 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
     lines.push('**Edits that were refused:**');
     for (const f of result.failedEdits) {
       lines.push(`- \`${f.file}${f.line ? `:${f.line}` : ''}\` — ${f.reason}`);
+    }
+  }
+
+  // What a harness did, when one was reached for. Collected all along and never
+  // shown, which left a reviewer unable to tell a diff written by an agent with
+  // write access from one produced by pattern substitution — the difference that
+  // decides how closely they should read it.
+  if (result.harness) {
+    const h = result.harness;
+    lines.push('');
+    lines.push('### Harness escalation');
+    lines.push('');
+    if (!h.ok) {
+      // The most expensive step in the pipeline. A run that declined to happen
+      // looks identical to one that tried, unless it is written down.
+      lines.push(`Emend escalated to \`${h.id}\`, which did not run: ${h.reason ?? 'no reason given'}.`);
+    } else {
+      lines.push(
+        `Structured edits did not settle this upgrade, so Emend escalated to \`${h.id}\` — ` +
+          'an agent working directly in the throwaway workspace, with read and write ' +
+          'access to it. Everything it wrote was held to the same evidence rule as a ' +
+          'proposed edit: a changed region the failure did not ask for is reverted ' +
+          'before anything is verified.',
+      );
+      lines.push('');
+      lines.push(`**${h.keptHunks}** changed region(s) kept, **${h.revertedHunks.length}** reverted.`);
+      if (h.log.trim()) {
+        lines.push('');
+        lines.push(`<details><summary>What \`${h.id}\` reported</summary>`);
+        lines.push('');
+        lines.push('```');
+        lines.push(h.log.trim().slice(0, 2000));
+        lines.push('```');
+        lines.push('');
+        lines.push('</details>');
+      }
+    }
+
+    // Named rather than counted, for the same reason the withheld edits above
+    // are: they are usually valid code, which is exactly why verification cannot
+    // be what catches them.
+    if (h.revertedHunks.length > 0) {
+      lines.push('');
+      lines.push(
+        `<details><summary>${h.revertedHunks.length} region(s) reverted as not required by this upgrade</summary>`,
+      );
+      lines.push('');
+      for (const r of h.revertedHunks) {
+        lines.push(`- \`${r.hunk.file}:${r.hunk.start}\` — ${r.reason}`);
+      }
+      lines.push('');
+      lines.push('</details>');
     }
   }
   lines.push('');

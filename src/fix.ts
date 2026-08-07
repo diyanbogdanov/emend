@@ -152,6 +152,8 @@ export interface FixResult {
     /** Outstanding errors when it stopped. Zero once the build passes. */
     finalErrors: number;
   };
+  /** Populated when the run escalated to a harness. */
+  harness?: HarnessEscalation;
 }
 
 /**
@@ -1194,6 +1196,7 @@ export async function fixFinding(
     workspaceDir: pkgResult.workspaceDir,
     workspaceMode: pkgResult.workspaceMode,
     ...(pkgResult.agent ? { agent: pkgResult.agent } : {}),
+    ...(pkgResult.harness ? { harness: pkgResult.harness } : {}),
   };
 }
 
