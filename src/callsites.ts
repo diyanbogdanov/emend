@@ -71,7 +71,7 @@ function accessSegments(node: ts.Node): string[] {
   return segments;
 }
 
-function buildProgram(
+export function buildProgram(
   repoDir: string,
   warnings: string[],
 ): ts.Program | null {

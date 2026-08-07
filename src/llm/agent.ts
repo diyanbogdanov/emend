@@ -18,6 +18,7 @@
  */
 
 import type { CallSite, Finding, SurfaceChange } from '../types.ts';
+import { renderImpact, type SymbolImpact } from '../impact.ts';
 import type { LlmConfig } from './providers.ts';
 import { chat, extractJson, type ChatMessage } from './client.ts';
 
@@ -76,6 +77,19 @@ export interface AgentContext {
     edits: TextEdit[];
     errors: string;
   }>;
+  /**
+   * What else in the repository depends on the symbols in `sources`.
+   *
+   * Every other section here describes the *dependency's* API — where the break
+   * arrived. This is the reach of the model's own edit, which nothing described
+   * before: change a helper's signature to satisfy one error and its other
+   * callers break, and the only way that was learned was the next red build.
+   *
+   * Optional because it is a best effort. A language with no analyzer, or a
+   * repository whose program will not build, yields nothing — and nothing must
+   * read as "not looked at", never as "nothing depends on this".
+   */
+  impact?: SymbolImpact[];
 }
 
 /**
@@ -170,6 +184,7 @@ Rules you must follow:
 7. The list of API changes is derived from a type-declaration diff and can be incomplete. If the compiler reports an error the list does not explain, fix it anyway using the error's own description of the expected type. Do not decline solely because an error is absent from the list.
 8. Prefer the strongest type that compiles, in this order. First, name the constraint with a type the package exports — the error text usually names it and it is usually in the available-symbols list, sometimes under a different export name; prefer (value: TooltipValueType | undefined) => Number(value ?? 0).toFixed(1). Second, omit the annotation and let it be inferred from context. Only if neither compiles, use any or a cast, and say so in that edit's "reason". Never use @ts-ignore or @ts-expect-error. Getting to green matters more than getting there elegantly, but try the stronger forms first.
 9. ${NARROWING_RULE}
+10. A "Code that depends on your edit" section, when present, lists symbols in these files that other files call, and the places that call them. Changing such a symbol's shape — its parameters, its return type, its name — breaks every place listed there. Prefer a fix that leaves those signatures alone; adapt inside the body instead. If one genuinely must change, the edit set is not finished until every listed site changes with it. A symbol absent from a section that is present had no callers found outside its own file — reflection and dynamic property access are invisible to that analysis, so treat it as probably free to reshape, not certainly. If the section is absent entirely, nothing was measured at all.
 
 ${RESPONSE_SHAPE}`;
 
@@ -298,6 +313,13 @@ export function buildUserPrompt(ctx: AgentContext): string {
     parts.push('```typescript');
     parts.push(content);
     parts.push('```');
+    parts.push('');
+  }
+
+  const impact = renderImpact(ctx.impact ?? []);
+  if (impact) {
+    parts.push('# Code that depends on your edit');
+    parts.push(impact);
     parts.push('');
   }
 

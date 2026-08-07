@@ -49,6 +49,7 @@ import {
   type HunkClassification,
 } from './llm/agent.ts';
 import { escalate, harnessPermitted, type Harness } from './harness.ts';
+import { analyseImpact, type SymbolImpact } from './impact.ts';
 import {
   remainingDeprecations,
   describeDeprecationGaps,
@@ -759,6 +760,26 @@ export async function fixPackage(
           }
         }
       }
+      // One program build per distinct source set. The set can grow mid-run
+      // when a rollback pulls in more files, and an impact list computed for a
+      // different set would be quietly wrong about the new ones — the prompt
+      // tells the model that absence from a section that is present means no
+      // callers, so a stale list would be a false claim rather than a gap.
+      const repoDir = ws.dir;
+      let measuredFor = '';
+      let measured: SymbolImpact[] = [];
+      const impactOfSources = async (): Promise<SymbolImpact[]> => {
+        const key = [...sources.keys()].sort().join('\n');
+        if (key === measuredFor) return measured;
+        measuredFor = key;
+        measured = await analyseImpact(repoDir, [...sources.keys()]);
+        const constrained = measured.filter((i) => i.external.length > 0);
+        if (constrained.length > 0) {
+          progress(`  ${constrained.length} symbol(s) here are used elsewhere in the repo`);
+        }
+        return measured;
+      };
+
       const attempts: AgentAttempt[] = [];
       let rationale = '';
       // What the agent was handed, before it changed anything. Kept so a run
@@ -802,6 +823,7 @@ export async function fixPackage(
           sources,
           candidateSymbols: candidates,
           failureOutput: bestErrors,
+          impact: await impactOfSources(),
           ...(previousAttempts.length > 0 ? { previousAttempts: [...previousAttempts] } : {}),
         });
 

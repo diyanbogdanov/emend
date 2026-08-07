@@ -463,3 +463,74 @@ test('the prompt carries every prior attempt, not just the most recent', () => {
   assert.ok(prompt.includes('FIRST_TRY'), 'the earliest attempt must remain visible');
   assert.ok(prompt.includes('SECOND_TRY'), 'the most recent attempt must remain visible');
 });
+
+// ---------------------------------------------------------------------------
+// Blast radius: what the edit reaches beyond the file it lands in
+// ---------------------------------------------------------------------------
+
+test('the prompt names the code that depends on what the model is about to edit', () => {
+  // The gap this closes: every other section of this prompt is about call sites
+  // of the *dependency's* API — where the break arrived. Nothing described the
+  // reach of the model's own edit. A migration that changes a helper's signature
+  // to satisfy one error breaks its other callers, and the model learns that
+  // from a red build on the next attempt, with no more information than it had
+  // on this one.
+  const prompt = buildUserPrompt({
+    finding: FINDING,
+    changes: CHANGES,
+    sources: SOURCES,
+    candidateSymbols: [],
+    impact: [
+      {
+        name: 'formatPrice',
+        declaredIn: 'src/helpers.ts',
+        external: [
+          { file: 'src/cart.ts', line: 4, column: 1, text: 'formatPrice(total)' },
+          { file: 'src/invoice.ts', line: 9, column: 1, text: 'formatPrice(sum)' },
+        ],
+      },
+    ],
+  });
+  assert.match(prompt, /formatPrice/);
+  assert.match(prompt, /src\/cart\.ts:4/);
+  assert.match(prompt, /2 places/);
+});
+
+test('a file whose symbols nothing else uses gets no section at all', () => {
+  // An empty heading reads as "checked, and the answer is none", which is a
+  // claim. Absence has to stay absence.
+  const prompt = buildUserPrompt({
+    finding: FINDING,
+    changes: CHANGES,
+    sources: SOURCES,
+    candidateSymbols: [],
+    impact: [{ name: 'onlyUsedHere', declaredIn: 'src/helpers.ts', external: [] }],
+  });
+  assert.ok(!prompt.includes('onlyUsedHere'));
+  assert.ok(!/depends on these symbols/.test(prompt), 'no heading without content');
+});
+
+test('the rule names the section it governs, by the name the section actually has', () => {
+  // A section the prompt never refers to is decoration, and a rule that cites a
+  // section by a stale name is worse — it reads as a constraint and governs
+  // nothing. Renaming one without the other has to fail here.
+  const prompt = buildUserPrompt({
+    finding: FINDING,
+    changes: CHANGES,
+    sources: SOURCES,
+    candidateSymbols: [],
+    impact: [
+      {
+        name: 'formatPrice',
+        declaredIn: 'src/helpers.ts',
+        external: [{ file: 'src/cart.ts', line: 4, column: 1, text: 'formatPrice(total)' }],
+      },
+    ],
+  });
+  const heading = prompt.split('\n').find((l) => l.startsWith('# ') && /depends on/.test(l));
+  assert.ok(heading, 'the section must exist to be governed');
+  assert.ok(
+    MIGRATION_SYSTEM_PROMPT.includes(heading.replace(/^# /, '')),
+    'the rule must cite the section by its real heading',
+  );
+});
