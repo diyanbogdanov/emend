@@ -750,6 +750,112 @@ export function classifyEdits(
   });
 }
 
+/** A changed region of a file, as a unified diff describes it. */
+export interface DiffHunk {
+  file: string;
+  /** 1-indexed, counted in the new file — the state on disk. */
+  start: number;
+  end: number;
+}
+
+export interface HunkClassification {
+  hunk: DiffHunk;
+  evidence: EditEvidence;
+  reason: string;
+}
+
+/**
+ * The changed regions of a unified diff.
+ *
+ * A harness with filesystem access cannot be gated by inspecting proposed
+ * `find`/`replace` pairs, because it never proposes any — it writes. The only
+ * artefact it leaves behind is the diff, so the gate reads that instead. This is
+ * the precondition the design spec puts on adopting one: the fail-closed
+ * property is what an agent with write access costs, and it is only recoverable
+ * if the gate can judge a diff.
+ *
+ * Line numbers come from the `+` side of the `@@` header, because that is the
+ * state on disk and the state the compiler reports against.
+ */
+export function parseDiffHunks(diff: string): DiffHunk[] {
+  const hunks: DiffHunk[] = [];
+  let file = '';
+  for (const line of diff.split('\n')) {
+    const target = line.match(/^\+\+\+ b\/(.+)$/);
+    if (target?.[1]) {
+      file = target[1];
+      continue;
+    }
+    const header = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+    if (!header || !file) continue;
+    const start = Number(header[1]);
+    const span = header[2] === undefined ? 1 : Number(header[2]);
+    if (!Number.isFinite(start)) continue;
+    hunks.push({ file, start, end: start + Math.max(0, span - 1) });
+  }
+  return hunks;
+}
+
+/**
+ * Judge changed regions by the rule `classifyEdits` applies to proposed edits.
+ *
+ * Same question, same evidence, different shape — which is what lets the gate
+ * survive a harness that writes files instead of proposing text. A diagnostic
+ * inside a hunk says the upgrade required it; a known call site inside it with
+ * nothing outstanding says the compiler is content with that line; anything else
+ * has no evidence either way and is left alone.
+ */
+export function classifyHunks(
+  hunks: DiffHunk[],
+  changes: Array<{ change: SurfaceChange; sites: CallSite[] }>,
+  failureOutput: string,
+  unresolvedDeprecations: ReadonlySet<string> = new Set(),
+): HunkClassification[] {
+  const diagnostics = parseDiagnostics(failureOutput);
+
+  // Judging from silence is how a gate starts withholding real repairs.
+  if (diagnostics.length === 0) {
+    return hunks.map((hunk) => ({
+      hunk,
+      evidence: 'evidenced' as const,
+      reason: 'the failure reports no diagnostic locations to judge against',
+    }));
+  }
+
+  return hunks.map((hunk): HunkClassification => {
+    const pointedAt = diagnostics.some(
+      (d) => sameFile(d.file, hunk.file) && d.line >= hunk.start && d.line <= hunk.end,
+    );
+    if (pointedAt) {
+      return {
+        hunk,
+        evidence: 'evidenced',
+        reason: `a diagnostic points into ${hunk.file}:${hunk.start}`,
+      };
+    }
+
+    const owner = changes.find((c) =>
+      c.sites.some((s) => sameFile(s.file, hunk.file) && s.line >= hunk.start && s.line <= hunk.end),
+    );
+    if (owner) {
+      if (unresolvedDeprecations.has(owner.change.path)) {
+        return {
+          hunk,
+          evidence: 'evidenced',
+          reason: `${owner.change.path} is deprecated and still present here`,
+        };
+      }
+      return {
+        hunk,
+        evidence: 'unrequested',
+        reason: `${hunk.file}:${hunk.start} covers a call site with nothing outstanding on it`,
+      };
+    }
+
+    return { hunk, evidence: 'evidenced', reason: 'no call site and no diagnostic here' };
+  });
+}
+
 /**
  * Keep the edits the failure supports, dropping the rest — unless none are
  * supported, in which case the model's proposal is all there is and verification
