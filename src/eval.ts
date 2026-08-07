@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { scanRepo } from './analyze.ts';
 import { fixPackage } from './fix.ts';
+import type { Harness } from './harness.ts';
 import { countTypeEscapes } from './pr.ts';
 import { remainingDeprecations } from './quality.ts';
 import type { VerifyOutcome } from './types.ts';
@@ -61,6 +62,19 @@ export interface EvalCase {
 export interface CaseOutcome {
   caseId: string;
   model: string;
+  /**
+   * The harness that produced the edits, when one did.
+   *
+   * Part of the engine's identity, not a detail of the run. §8's condition on
+   * adopting a harness is that it swaps the editing engine itself, so folding
+   * its runs into the model's own row would make every subsequent result
+   * unattributable — two runs of the same model that produced different work for
+   * different reasons, averaged into one number.
+   */
+  harness?: string;
+  /** Hunks the gate let through, and hunks it reverted. */
+  harnessKept?: number;
+  harnessReverted?: number;
   verdict: VerifyOutcome;
   editsApplied: number;
   /** Edits the evidence gate withheld — informational, never a penalty. */
@@ -149,6 +163,8 @@ export function scoreCase(evalCase: EvalCase, outcome: CaseOutcome): CaseScore {
 
 export interface ModelSummary {
   model: string;
+  /** Present when these runs escalated to a harness. Part of the row's identity. */
+  harness?: string;
   /** Distinct cases this model was run on, however many times each ran. */
   casesRun: number;
   /** Total runs behind these rates. Repeats are how variance becomes visible. */
@@ -170,7 +186,22 @@ export interface ModelSummary {
    * it exists, is invisible in the only place it would ever be judged.
    */
   totalEditsWithheld: number;
+  /**
+   * Hunks a harness wrote and the gate reverted, across the sweep.
+   *
+   * The same reason `totalEditsWithheld` exists for structured edits: a harness
+   * that wrote nine hunks and kept two otherwise scores exactly like one that
+   * wrote two, and the gate's effect — the entire condition of adoption — is
+   * invisible in the only place it would ever be measured.
+   */
+  totalHunksReverted: number;
+  totalHunksKept: number;
   totalDurationMs: number;
+}
+
+/** Model and harness together: what actually produced the edits. */
+function engineKey(outcome: { model: string; harness?: string }): string {
+  return `${outcome.model}\u0000${outcome.harness ?? ''}`;
 }
 
 const mean = (values: number[]): number =>
@@ -187,29 +218,42 @@ const mean = (values: number[]): number =>
 export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSummary[] {
   const byCase = new Map(cases.map((c) => [c.id, c]));
   const byModel = new Map<string, CaseScore[]>();
-  const meta = new Map<string, { escapes: number; gaps: number; ms: number; withheld: number }>();
+  const engines = new Map<string, { model: string; harness?: string }>();
+  const meta = new Map<
+    string,
+    { escapes: number; gaps: number; ms: number; withheld: number; kept: number; reverted: number }
+  >();
 
   for (const outcome of outcomes) {
     const evalCase = byCase.get(outcome.caseId);
     if (!evalCase) continue; // an outcome for a case no longer in the corpus
-    const scores = byModel.get(outcome.model) ?? [];
+    const key = engineKey(outcome);
+    engines.set(key, {
+      model: outcome.model,
+      ...(outcome.harness ? { harness: outcome.harness } : {}),
+    });
+    const scores = byModel.get(key) ?? [];
     scores.push(scoreCase(evalCase, outcome));
-    byModel.set(outcome.model, scores);
+    byModel.set(key, scores);
 
-    const m = meta.get(outcome.model) ?? { escapes: 0, gaps: 0, ms: 0, withheld: 0 };
+    const m = meta.get(key) ?? { escapes: 0, gaps: 0, ms: 0, withheld: 0, kept: 0, reverted: 0 };
     m.escapes += outcome.typeEscapes;
     m.withheld += outcome.editsWithheld;
     m.gaps += outcome.deprecationGaps;
     m.ms += outcome.durationMs;
-    meta.set(outcome.model, m);
+    m.kept += outcome.harnessKept ?? 0;
+    m.reverted += outcome.harnessReverted ?? 0;
+    meta.set(key, m);
   }
 
   return [...byModel.entries()]
-    .map(([model, scores]) => {
-      const m = meta.get(model) ?? { escapes: 0, gaps: 0, ms: 0, withheld: 0 };
+    .map(([key, scores]) => {
+      const m = meta.get(key) ?? { escapes: 0, gaps: 0, ms: 0, withheld: 0, kept: 0, reverted: 0 };
+      const engine = engines.get(key) ?? { model: key };
       const failed = scores.filter((s) => !s.passed);
       return {
-        model,
+        model: engine.model,
+        ...(engine.harness ? { harness: engine.harness } : {}),
         casesRun: new Set(scores.map((s) => s.caseId)).size,
         runs: scores.length,
         casesTotal: cases.length,
@@ -222,6 +266,8 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
         totalTypeEscapes: m.escapes,
         totalDeprecationGaps: m.gaps,
         totalEditsWithheld: m.withheld,
+        totalHunksReverted: m.reverted,
+        totalHunksKept: m.kept,
         totalDurationMs: m.ms,
       };
     })
@@ -251,7 +297,7 @@ export async function runCase(
   evalCase: EvalCase,
   repoDir: string,
   model: string,
-  options: { useAgent?: boolean; onProgress?: (m: string) => void } = {},
+  options: { useAgent?: boolean; harness?: Harness; onProgress?: (m: string) => void } = {},
 ): Promise<CaseOutcome> {
   const startedAt = Number(process.hrtime.bigint() / 1_000_000n);
   const base: CaseOutcome = {
@@ -278,6 +324,7 @@ export async function runCase(
     const result = await fixPackage(repoDir, findings, {
       keepWorkspace: true,
       ...(options.useAgent === undefined ? {} : { useAgent: options.useAgent }),
+      ...(options.harness ? { harness: options.harness } : {}),
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
     });
 
@@ -298,6 +345,16 @@ export async function runCase(
       errorsAfter: result.agent?.finalErrors ?? 0,
       typeEscapes: countTypeEscapes(result.diff),
       deprecationGaps: gaps.length,
+      // Recorded from the run rather than from the request: a harness that was
+      // asked for and declined — an untrusted repository, an unavailable binary
+      // — did not produce these edits and must not be credited with them.
+      ...(result.harness
+        ? {
+            harness: result.harness.id,
+            harnessKept: result.harness.keptHunks,
+            harnessReverted: result.harness.revertedHunks.length,
+          }
+        : {}),
       durationMs: elapsed(),
     };
   } catch {
@@ -413,15 +470,22 @@ export async function materialiseCase(evalCase: EvalCase): Promise<string> {
 /** A fixed-width table, so two runs can be diffed by eye. */
 export function renderSummary(rows: ModelSummary[]): string {
   if (rows.length === 0) return 'No results.';
+  // The harness column appears only when a sweep used one, so an ordinary
+  // comparison is not widened by a column of dashes.
+  const escalated = rows.some((r) => r.harness);
   const lines = [
-    '| Model | Cases | Runs | Pass | Clean | Edit ratio | Withheld | Err. reduced (failed) | Escapes | Depr. gaps |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    `| Engine | Cases | Runs | Pass | Clean | Edit ratio | Withheld |${escalated ? ' Hunks kept | Hunks reverted |' : ''} Err. reduced (failed) | Escapes | Depr. gaps |`,
+    `| --- | --- | --- | --- | --- | --- | --- |${escalated ? ' --- | --- |' : ''} --- | --- | --- |`,
   ];
   const pct = (n: number): string => `${Math.round(n * 100)}%`;
   for (const r of rows) {
+    // Model and harness together, because together is what produced the edits.
+    const engine = r.harness ? `\`${r.model}\` + \`${r.harness}\`` : `\`${r.model}\``;
     lines.push(
-      `| \`${r.model}\` | ${r.casesRun}/${r.casesTotal} | ${r.runs} | ${pct(r.passRate)} | ${pct(r.cleanRate)} | ` +
-        `${r.meanEditRatio.toFixed(1)}x | ${r.totalEditsWithheld} | ${pct(r.meanErrorReduction)} | ${r.totalTypeEscapes} | ${r.totalDeprecationGaps} |`,
+      `| ${engine} | ${r.casesRun}/${r.casesTotal} | ${r.runs} | ${pct(r.passRate)} | ${pct(r.cleanRate)} | ` +
+        `${r.meanEditRatio.toFixed(1)}x | ${r.totalEditsWithheld} |` +
+        (escalated ? ` ${r.totalHunksKept} | ${r.totalHunksReverted} |` : '') +
+        ` ${pct(r.meanErrorReduction)} | ${r.totalTypeEscapes} | ${r.totalDeprecationGaps} |`,
     );
   }
   return lines.join('\n');

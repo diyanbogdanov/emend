@@ -710,6 +710,10 @@ async function cmdEval(args: Args): Promise<number> {
   );
   console.log('');
 
+  // Resolved once for the sweep, so every run is the same engine and the table
+  // can attribute results to it. §8's condition on adopting a harness is exactly
+  // this: it swaps the editing engine, so it has to be measured as one.
+  const evalHarness = harnessFrom(args);
   const outcomes: CaseOutcome[] = [];
   for (const model of models) {
     for (const evalCase of cases) {
@@ -723,7 +727,10 @@ async function cmdEval(args: Args): Promise<number> {
         const dir = await materialiseCase(evalCase);
         try {
           if (model) process.env['EMEND_LLM_MODEL'] = model;
-          const outcome = await runCase(evalCase, dir, label, { useAgent: Boolean(model) });
+          const outcome = await runCase(evalCase, dir, label, {
+            useAgent: Boolean(model),
+            ...(evalHarness ? { harness: evalHarness } : {}),
+          });
           outcomes.push(outcome);
           const score = scoreCase(evalCase, outcome);
           console.log(
@@ -855,6 +862,10 @@ ${c.bold('COMMANDS')}
     --model <a,b>   Compare models. Omit to measure the deterministic path.
     --repeat <n>    Run each case n times. Migrations vary between runs, so a
                     single run is an anecdote rather than a measurement.
+    --harness[=m]   Measure the escalation path too. A harness swaps the editing
+                    engine, so its runs get their own row and are never averaged
+                    into the model's — and the table gains the hunks its gate
+                    kept and reverted.
 
 ${c.bold('EXAMPLE')}
   emend demo ./emend-demo
