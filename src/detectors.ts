@@ -18,6 +18,7 @@ import ts from 'typescript';
 import { readLockfile } from './lockfile.ts';
 import { packageOfSpecifier } from './callsites.ts';
 import { remediationTarget, type InstalledPackage, type VulnerablePackage } from './osv.ts';
+import { ordinal, rankVulnerable, type AdvisoryFacts } from './advisory.ts';
 import { extractPins, findPinConflicts, resolvedVersions, PIN_FILES } from './pins.ts';
 import { checkAgainstSpec, findHttpCalls, type HttpCall } from './httpsites.ts';
 import { describeProvenance, type SpecCandidate } from './specs.ts';
@@ -403,6 +404,14 @@ function lockfileSite(lockfile: string, installPath: string): CallSite {
 export interface VulnerabilityOptions {
   /** Injected: this detector reaches the network, and that is the caller's call. */
   scan: (packages: InstalledPackage[]) => Promise<VulnerablePackage[]>;
+  /**
+   * Optional second opinion: numeric severity, and how likely exploitation is.
+   *
+   * Ordering without it is arbitrary, and arbitrary ordering on a list of forty
+   * findings means the one under active exploitation is as likely to be
+   * fortieth as first.
+   */
+  enrich?: (advisoryIds: string[]) => Promise<Map<string, AdvisoryFacts>>;
 }
 
 /**
@@ -464,10 +473,22 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
         return { findings: [], notes };
       }
 
+      // Enrichment is optional and its absence must not change what is
+      // reported — only the order, and how much a reader is told about urgency.
+      let facts = new Map<string, AdvisoryFacts>();
+      if (options.enrich) {
+        try {
+          facts = await options.enrich(vulnerable.flatMap((p) => p.vulnerabilities.map((v) => v.id)));
+        } catch {
+          notes.push('advisory severity and exploitation data were unavailable, so findings are unranked');
+        }
+      }
+      const ordered = facts.size > 0 ? rankVulnerable(vulnerable, facts) : vulnerable;
+
       const lockRaw = (await ctx.read('package-lock.json')) ?? '';
       const findings: Finding[] = [];
 
-      for (const pkg of vulnerable) {
+      for (const pkg of ordered) {
         const target = remediationTarget(pkg);
 
         const sites: CallSite[] = [];
@@ -491,9 +512,23 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
           target.leaves.length > 0
             ? ` ${target.leaves.length} has no published fix and survives the upgrade: ${target.leaves.join(', ')}.`
             : '';
+        // The urgency line, when anybody has assessed it. EPSS is stated as a
+        // percentile because the raw probability reads as reassuringly small —
+        // 0.07 is the 94th percentile of all CVEs.
+        const worst = pkg.vulnerabilities
+          .map((v) => facts.get(v.id))
+          .filter((f): f is AdvisoryFacts => f !== undefined)
+          .sort((a, b) => (b.epssPercentile ?? -1) - (a.epssPercentile ?? -1))[0];
+        const urgency =
+          worst?.epssPercentile !== undefined && worst?.epssPercentile !== null
+            ? ` Exploitation likelihood: ${ordinal(Math.round(worst.epssPercentile * 100))} percentile${worst.severity ? ` (${worst.severity})` : ''}.`
+            : worst?.severity
+              ? ` Severity: ${worst.severity}.`
+              : '';
+
         const guidance = target.version
-          ? `${named}. Upgrading to ${target.version} clears ${target.clears} of ${pkg.vulnerabilities.length}.${leaves} ${reach}.`
-          : `${named}. No published fix, so no upgrade is proposed. ${reach}.`;
+          ? `${named}. Upgrading to ${target.version} clears ${target.clears} of ${pkg.vulnerabilities.length}.${leaves}${urgency} ${reach}.`
+          : `${named}. No published fix, so no upgrade is proposed.${urgency} ${reach}.`;
 
         findings.push({
           id: vulnFindingId(pkg.name, pkg.version, pkg.vulnerabilities.map((v) => v.id)),

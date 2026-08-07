@@ -23,6 +23,7 @@ import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { openCodeHarness, type Harness } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
 import { scanPackages } from './osv.ts';
+import { enrichAdvisories } from './advisory.ts';
 import type { VulnerabilityOptions } from './detectors.ts';
 import type { SpecCandidate } from './specs.ts';
 import { listModels } from './llm/client.ts';
@@ -148,7 +149,14 @@ function vulnerabilitiesFrom(args: Args): VulnerabilityOptions | undefined {
   const flag = args.flags.get('vulns');
   if (flag === undefined || flag === false) return undefined;
   const fetch = httpFetcher({ timeoutMs: 30_000 });
-  return { scan: (packages) => scanPackages(fetch, packages) };
+  // GitHub's advisory endpoint carries the numeric severity and the exploitation
+  // estimate OSV does not. Unauthenticated it allows sixty requests an hour
+  // across everything Emend does, so a token matters here too.
+  const token = process.env['GITHUB_TOKEN'] ?? process.env['GH_TOKEN'];
+  return {
+    scan: (packages) => scanPackages(fetch, packages),
+    enrich: (ids) => enrichAdvisories(fetch, ids, { ...(token ? { token } : {}) }),
+  };
 }
 
 function severityLabel(sev: string): string {
