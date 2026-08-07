@@ -17,6 +17,24 @@ import type { Finding, ScanReport, VerificationReport } from './types.ts';
 export const DEFAULT_DB_PATH =
   process.env.EMEND_DB ?? path.join(homedir(), '.emend', 'emend.db');
 
+/**
+ * What one scan changed, relative to the last one of the same repository.
+ *
+ * The unit a scheduled run reports. Findings are identified by the fingerprint
+ * in analyze.ts, which is what makes "the same finding" survive across scans.
+ */
+export interface ScanDelta {
+  scanId: number;
+  /** No previous scan, so nothing here is news — this run is the baseline. */
+  first: boolean;
+  /** Finding ids never recorded for this repository before. */
+  added: string[];
+  /** Finding ids that were fixed and are open again. */
+  returned: string[];
+  /** Finding ids that were open and are now absent. */
+  resolved: string[];
+}
+
 export interface StoredScan {
   id: number;
   repoDir: string;
@@ -510,8 +528,27 @@ export class Store {
     return rows.map(toJob);
   }
 
-  recordScan(report: ScanReport, repoName: string): number {
+  recordScan(report: ScanReport, repoName: string): ScanDelta {
     const now = new Date().toISOString();
+
+    // Read the prior state before the upsert overwrites it. A scheduled scan is
+    // only worth reading if it says what changed; without this every run reports
+    // the same sixty-three advisories and trains the reader to skip it, which is
+    // how security tooling actually fails.
+    const before = new Map<string, string>(
+      (
+        this.#db
+          .prepare(`SELECT finding_id, status FROM findings WHERE repo_dir = ?`)
+          .all(report.repo) as Array<{ finding_id: string; status: string }>
+      ).map((r) => [r.finding_id, r.status]),
+    );
+    const scanned = Number(
+      (
+        this.#db
+          .prepare(`SELECT COUNT(*) AS n FROM scans WHERE repo_dir = ?`)
+          .get(report.repo) as { n: number }
+      ).n,
+    );
     const insertScan = this.#db.prepare(`
       INSERT INTO scans (repo_dir, repo_name, started_at, finished_at, counts_json, warnings_json, packages_json)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -554,7 +591,22 @@ export class Store {
       if (!currentIds.has(row.finding_id)) close.run(now, row.finding_id, report.repo);
     }
 
-    return scanId;
+    // On the first scan everything is unseen, and calling all of it "new" is
+    // true and useless. A baseline is not news.
+    const first = scanned === 0;
+    return {
+      scanId,
+      first,
+      added: first ? [] : findings.filter((f) => !before.has(f.id)).map((f) => f.id),
+      // Distinct from `added`, because a finding that was fixed and came back is
+      // a revert or a stale merge — and that it was already dealt with once is
+      // the most useful thing to know about it. Dismissed findings stay
+      // dismissed and are news in neither sense.
+      returned: first ? [] : findings.filter((f) => before.get(f.id) === 'fixed').map((f) => f.id),
+      resolved: [...before]
+        .filter(([id, status]) => status === 'open' && !currentIds.has(id))
+        .map(([id]) => id),
+    };
   }
 
   listScans(limit = 50): StoredScan[] {

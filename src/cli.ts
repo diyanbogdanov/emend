@@ -367,10 +367,25 @@ async function cmdScan(args: Args): Promise<number> {
   }
 
   const store = new Store();
-  store.recordScan(report, repo.name);
+  const delta = store.recordScan(report, repo.name);
   store.close();
 
   if (args.flags.get('json') !== true) {
+    // What a scheduled run is for. The full list is the same every time and gets
+    // skipped; the change since last time is the part worth a notification.
+    if (delta.first) {
+      console.log(c.dim(`  First scan of this repository — this is the baseline, not a change list.`));
+    } else if (delta.added.length + delta.returned.length + delta.resolved.length === 0) {
+      console.log(c.dim(`  Nothing changed since the last scan.`));
+    } else {
+      const parts: string[] = [];
+      if (delta.added.length > 0) parts.push(c.red(`${delta.added.length} new`));
+      // Named separately because "it came back" and "it is new" call for
+      // different responses, and the first is usually a revert to look at.
+      if (delta.returned.length > 0) parts.push(c.yellow(`${delta.returned.length} returned`));
+      if (delta.resolved.length > 0) parts.push(c.green(`${delta.resolved.length} resolved`));
+      console.log(`  Since the last scan: ${parts.join(c.dim(', '))}`);
+    }
     console.log(c.dim(`  Stored. Run ${c.bold('emend serve')} to browse, or ${c.bold('emend fix <repo>')} to migrate.`));
     console.log('');
   }
