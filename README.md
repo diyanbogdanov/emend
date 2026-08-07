@@ -360,3 +360,18 @@ pull requests are exercised against a real private repository; the GitHub App
 token exchange is the one link only a registered App can validate. See
 [`docs/specs/emend-mvp.md`](docs/specs/emend-mvp.md) §10 for what is deliberately
 out of scope, and its Appendix A for the product decisions still open.
+
+---
+
+## Licence
+
+**AGPL-3.0-only** — see [LICENSE](./LICENSE).
+
+The clause that matters here is §13, Remote Network Interaction: run a modified
+Emend as a service for other people and you owe them its source. Run it privately
+and nothing is required of you.
+
+A separate commercial licence is available for anyone who wants to embed Emend
+without AGPL obligations. That is only possible because contributions are
+collected under a [CLA](./CLA.md) — see [CONTRIBUTING.md](./CONTRIBUTING.md) for
+why, and for the reason it is collected before the first merge rather than after.
