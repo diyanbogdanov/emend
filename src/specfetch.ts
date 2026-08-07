@@ -22,6 +22,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import {
+  PROVENANCE_RANK,
   provenanceOfPointer,
   wellKnownSpecPaths,
   type SpecCandidate,
@@ -233,7 +234,9 @@ async function candidateFrom(
     vendor: vendor.domain,
     // The URL that served it, not the one that was asked for.
     url: res.url,
-    provenance: floor ?? provenanceOfPointer(res.url, vendor.domain, vendor.org),
+    // Against the registrable domain, so a description for `api.stripe.com`
+    // served from `stripe.com` is still the provider's own file.
+    provenance: floor ?? provenanceOfPointer(res.url, registrableDomain(vendor.domain), vendor.org),
     fetchedAt: now,
     body: res.body,
   };
@@ -243,6 +246,90 @@ interface AggregatorLead {
   url: string;
   /** Set only for the aggregator's own copy; a pointer is judged by where it lands. */
   floor?: SpecProvenance;
+}
+
+const APIS_IO = 'https://apis.io/api/v1';
+
+/** Stripe alone publishes 159 APIs there; following all of them is not a resolution. */
+const MAX_LISTINGS = 5;
+
+/** `api.stripe.com` -> `stripe.com`. Good enough to check a link against. */
+function registrableDomain(host: string): string {
+  const parts = host.toLowerCase().split('.');
+  return parts.length <= 2 ? host.toLowerCase() : parts.slice(-2).join('.');
+}
+
+/** Whether any URL in a record points at the vendor's own domain. */
+function linksBackTo(record: Doc, domain: string): boolean {
+  for (const value of Object.values(record)) {
+    if (typeof value !== 'string' || !/^https?:\/\//i.test(value)) continue;
+    try {
+      const host = new URL(value).hostname.toLowerCase();
+      if (host === domain || host.endsWith(`.${domain}`)) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+/**
+ * What apis.io lists for this vendor.
+ *
+ * The directory is keyed by a slug — `stripe` — where every call site hands us a
+ * host. There is no domain field on its records to bridge that: `baseURL` and
+ * `humanURL` are empty on all of them. So the slug is derived from the domain
+ * and then **verified**, by requiring the provider record to link back to the
+ * vendor's own domain somewhere. Attribution by guess is how one company's API
+ * ends up reported as another's, and `stripe` is a plausible slug for a dozen
+ * things.
+ *
+ * Nothing here is authoritative — its artifacts are third-party republications,
+ * so `canAssertBreakage` refuses them regardless. That bounds the damage a wrong
+ * slug could do, which is what makes a derived-then-checked slug acceptable at
+ * all rather than a guess dressed up.
+ */
+async function apisIoLeads(fetch: Fetcher, domain: string): Promise<AggregatorLead[]> {
+  const registrable = registrableDomain(domain);
+  const slug = registrable.split('.')[0];
+  if (!slug) return [];
+
+  const json = async (url: string): Promise<Doc | null> => {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      return JSON.parse(res.body) as Doc;
+    } catch {
+      return null;
+    }
+  };
+
+  const provider = await json(`${APIS_IO}/providers/${encodeURIComponent(slug)}`);
+  // No link back to the vendor, no attribution — and no further requests.
+  if (!provider || !linksBackTo(provider, registrable)) return [];
+
+  const listing = await json(`${APIS_IO}/providers/${encodeURIComponent(slug)}/apis`);
+  const data = listing?.['data'];
+  if (!Array.isArray(data)) return [];
+
+  const leads: AggregatorLead[] = [];
+  for (const entry of data.slice(0, MAX_LISTINGS)) {
+    const aid = (entry as Doc | undefined)?.['aid'];
+    if (typeof aid !== 'string') continue;
+    // The colon stays literal. `stripe:stripe-account-api` answers 200 and
+    // `stripe%3Astripe-account-api` answers 404, so encoding it made every
+    // detail lookup fail — silently, and while still spending the requests.
+    const detail = await json(`${APIS_IO}/apis/${encodeURIComponent(aid).replace(/%3A/gi, ':')}`);
+    const props = detail?.['properties'];
+    if (!Array.isArray(props)) continue;
+    for (const prop of props) {
+      const p = prop as Doc;
+      if (typeof p['type'] !== 'string' || typeof p['url'] !== 'string') continue;
+      // Judged by where the pointer lands, like every other directory entry.
+      if (/^(openapi|swagger)$/i.test(p['type'])) leads.push({ url: p['url'] });
+    }
+  }
+  return leads;
 }
 
 /**
@@ -332,6 +419,12 @@ export async function resolveSpec(
   if (cached) return cached;
 
   const now = new Date(clock).toISOString();
+  // A call site hands us a host — `api.stripe.com` — while the directories key on
+  // the registrable domain. Asking apis.guru about the host returned nothing and
+  // Stripe resolved to zero candidates, while asking about `stripe.com` had
+  // worked all along. Both are tried, host first: that is where the API actually
+  // lives, so a description served there is the more specific answer.
+  const domains = [...new Set([vendor.domain.toLowerCase(), registrableDomain(vendor.domain)])];
   const found: SpecCandidate[] = [];
   const seen = new Set<string>();
   const add = (c: SpecCandidate | null): void => {
@@ -343,8 +436,11 @@ export async function resolveSpec(
   const settled = (): boolean => found.some((c) => c.provenance === 'official-domain');
 
   // 1. The provider's own origin. Nothing is closer and it costs one request.
-  for (const url of wellKnownSpecPaths(`https://${vendor.domain}`)) {
-    add(await candidateFrom(options.fetch, url, vendor, now));
+  for (const domain of domains) {
+    for (const url of wellKnownSpecPaths(`https://${domain}`)) {
+      add(await candidateFrom(options.fetch, url, vendor, now));
+      if (settled()) break;
+    }
     if (settled()) break;
   }
 
@@ -353,22 +449,22 @@ export async function resolveSpec(
   //    provider's own domain is first-party metadata, and following it usually
   //    lands on first-party content — which is why the directory outranks the
   //    platforms that merely hold copies.
-  if (!settled()) {
+  for (const domain of domains) {
+    if (settled()) break;
     let manifest: FetchResponse | null = null;
     try {
-      manifest = await options.fetch(`https://${vendor.domain}/apis.json`);
+      manifest = await options.fetch(`https://${domain}/apis.json`);
     } catch {
       manifest = null;
     }
-    if (manifest?.ok) {
-      for (const url of specUrlsInManifest(manifest.body)) {
-        add(await candidateFrom(options.fetch, url, vendor, now));
-        if (settled()) break;
-      }
+    if (!manifest?.ok) continue;
+    for (const url of specUrlsInManifest(manifest.body)) {
+      add(await candidateFrom(options.fetch, url, vendor, now));
+      if (settled()) break;
     }
   }
 
-  // 3. apis.guru, through its index entry rather than a guessed URL: the spec
+  //    apis.guru, through its index entry rather than a guessed URL: the spec
   //    lives under a version segment no fixed pattern can produce, and the
   //    per-domain entry names it for one small request instead of the 8.8MB
   //    `list.json`.
@@ -378,8 +474,24 @@ export async function resolveSpec(
   //    against it is far likelier to be drift in the mirror than in the API.
   //    `specs.ts` already refuses to let it assert breakage; this only has to
   //    record the tier truthfully.
+  // 3. apis.io, the directory. Consulted before the aggregator, because a
+  //    directory holds addresses and an aggregator holds copies. It can never
+  //    settle the walk — its listings are third-party republications, so nothing
+  //    from it is the provider's own word — which is exactly why consulting it
+  //    first cannot produce a worse answer than not having it: the walk carries
+  //    on, and the ranking puts a first-party description in front if one turns
+  //    up later.
   if (!settled()) {
-    for (const lead of await aggregatorLeads(options.fetch, vendor.domain)) {
+    for (const lead of await apisIoLeads(options.fetch, registrableDomain(vendor.domain))) {
+      add(await candidateFrom(options.fetch, lead.url, vendor, now, lead.floor));
+      if (settled()) break;
+    }
+  }
+
+  // 4. apis.guru, the aggregator.
+  for (const domain of domains) {
+    if (settled()) break;
+    for (const lead of await aggregatorLeads(options.fetch, domain)) {
       add(await candidateFrom(options.fetch, lead.url, vendor, now, lead.floor));
       // A first-party pointer settles it; the mirrors after it add nothing but
       // an older copy of the same API.
@@ -387,8 +499,15 @@ export async function resolveSpec(
     }
   }
 
-  await writeCache(options.cacheDir, vendor, found);
-  return found;
+  // Best first, explicitly. Until apis.io was consulted the sources happened to
+  // run in descending order and `found[0]` was best by accident; every caller
+  // treats it as the best, so the ordering has to be a property of the result
+  // rather than of the order sources were tried in.
+  const ranked = [...found].sort(
+    (a, b) => PROVENANCE_RANK[b.provenance] - PROVENANCE_RANK[a.provenance],
+  );
+  await writeCache(options.cacheDir, vendor, ranked);
+  return ranked;
 }
 
 /**

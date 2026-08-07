@@ -50,7 +50,7 @@ test('the ranking runs from provider-controlled down to inferred', () => {
   // The order is the whole model: the further from the provider, the less the
   // copy in hand says about the API.
   assert.ok(PROVENANCE_RANK['official-domain'] > PROVENANCE_RANK['official-github']);
-  assert.ok(PROVENANCE_RANK['official-github'] > PROVENANCE_RANK['directory-apis-io']);
+  assert.ok(PROVENANCE_RANK['official-github'] > PROVENANCE_RANK['directory']);
   assert.ok(PROVENANCE_RANK['verified-swaggerhub'] > PROVENANCE_RANK['verified-postman']);
   assert.ok(PROVENANCE_RANK['verified-postman'] > PROVENANCE_RANK['curated']);
   assert.ok(PROVENANCE_RANK['curated'] > PROVENANCE_RANK['aggregator-apis-guru']);
@@ -62,15 +62,15 @@ test('a directory of provider-published pointers outranks a third party’s copy
   // a pointer the provider chose. SwaggerHub and Postman hold copies — verified
   // ones, but still somebody else's bytes on somebody else's platform. A pointer
   // to the provider beats a copy of the provider.
-  assert.ok(PROVENANCE_RANK['directory-apis-io'] > PROVENANCE_RANK['verified-swaggerhub']);
-  assert.ok(PROVENANCE_RANK['directory-apis-io'] > PROVENANCE_RANK['verified-postman']);
+  assert.ok(PROVENANCE_RANK['directory'] > PROVENANCE_RANK['verified-swaggerhub']);
+  assert.ok(PROVENANCE_RANK['directory'] > PROVENANCE_RANK['verified-postman']);
 
   const chosen = bestSpec([
     candidate({ provenance: 'verified-swaggerhub' }),
     candidate({ provenance: 'verified-postman' }),
-    candidate({ provenance: 'directory-apis-io' }),
+    candidate({ provenance: 'directory' }),
   ]);
-  assert.equal(chosen?.provenance, 'directory-apis-io');
+  assert.equal(chosen?.provenance, 'directory');
 });
 
 test('the directory is consulted before the platforms that host copies', () => {
@@ -112,8 +112,8 @@ test('preferring a source is not the same as trusting it', () => {
   // make the destination first-party. Rank orders what to try; the authority
   // set decides what may be claimed. Folding them into one number means any
   // future reorder silently hands out claim rights.
-  assert.ok(PROVENANCE_RANK['directory-apis-io'] > PROVENANCE_RANK['verified-swaggerhub']);
-  assert.equal(canAssertBreakage(candidate({ provenance: 'directory-apis-io' })), false);
+  assert.ok(PROVENANCE_RANK['directory'] > PROVENANCE_RANK['verified-swaggerhub']);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'directory' })), false);
   assert.equal(canAssertBreakage(candidate({ provenance: 'verified-swaggerhub' })), true);
 });
 
@@ -141,7 +141,7 @@ test('a pointer onto somebody else’s host keeps the directory’s own standing
   // bytes live somewhere the provider does not control.
   assert.equal(
     provenanceOfPointer('https://cdn.example.net/stripe.json', 'stripe.com'),
-    'directory-apis-io',
+    'directory',
   );
 });
 
@@ -153,7 +153,7 @@ test('a pointer to the provider’s GitHub is first-party too', () => {
   // …but only for the provider's own org. Anyone can host a mirror on GitHub.
   assert.equal(
     provenanceOfPointer('https://raw.githubusercontent.com/someone/stripe-mirror/main/spec.json', 'stripe.com', 'stripe'),
-    'directory-apis-io',
+    'directory',
   );
 });
 

@@ -23,13 +23,18 @@
 /**
  * Where a description came from, ordered by how close it sits to the provider.
  *
- * `directory-apis-io` sits above the platforms that host copies because an
- * APIs.json manifest is published *by the provider*: an apis.io entry is a
- * pointer the provider chose, where SwaggerHub and Postman hold somebody else's
- * bytes on somebody else's platform, verified account or not. A pointer to the
- * provider beats a copy of the provider — and usually resolves to first-party
- * anyway, at which point `provenanceOfPointer` says so and this tier never
- * applies.
+ * `directory` sits above the platforms that host copies because a directory
+ * holds *addresses*, not files. An APIs.json manifest is published by the
+ * provider, and an apis.io listing points wherever the provider said — where
+ * SwaggerHub and Postman hold somebody else's bytes on somebody else's platform,
+ * verified account or not. A pointer to the provider beats a copy of the
+ * provider, and when it lands on the provider `provenanceOfPointer` says so and
+ * this tier never applies. What is left is the residual case the tier is for:
+ * listed by a directory, hosted somewhere the provider does not control.
+ *
+ * Named for what it is rather than for one directory. It is reached from apis.io
+ * listings, from an APIs.json entry pointing off-domain, and from an apis.guru
+ * `x-origin` naming a repository we cannot credit to the provider.
  *
  * `aggregator-apis-guru` is called out by name rather than folded into a general
  * "aggregator" bucket: its README still advertises weekly refreshes while the
@@ -39,7 +44,7 @@
 export type SpecProvenance =
   | 'official-domain'
   | 'official-github'
-  | 'directory-apis-io'
+  | 'directory'
   | 'verified-swaggerhub'
   | 'verified-postman'
   | 'curated'
@@ -57,7 +62,7 @@ export type SpecProvenance =
 export const PROVENANCE_RANK: Record<SpecProvenance, number> = {
   'official-domain': 100,
   'official-github': 95,
-  'directory-apis-io': 92,
+  directory: 92,
   'verified-swaggerhub': 90,
   'verified-postman': 85,
   curated: 75,
@@ -158,7 +163,7 @@ export function provenanceOfPointer(
     host = parsed.hostname.toLowerCase();
     path = parsed.pathname;
   } catch {
-    return 'directory-apis-io';
+    return 'directory';
   }
 
   if (isUnder(host, vendorDomain.toLowerCase())) return 'official-domain';
@@ -168,7 +173,7 @@ export function provenanceOfPointer(
     if (org?.toLowerCase() === vendorOrg.toLowerCase()) return 'official-github';
   }
 
-  return 'directory-apis-io';
+  return 'directory';
 }
 
 /**
@@ -230,7 +235,7 @@ export const SPEC_SOURCES: readonly SpecSource[] = [
   // The provider's own repository, where most specs that are versioned live.
   { id: 'github', yields: 'official-github' },
   // A directory of provider-published manifests: usually a pointer home.
-  { id: 'apis-io', yields: 'directory-apis-io' },
+  { id: 'apis-io', yields: 'directory' },
   // Platforms holding copies, in order of how firmly the account is tied to the
   // provider. Postman is last of the two because a collection is not a contract.
   { id: 'swaggerhub', yields: 'verified-swaggerhub' },

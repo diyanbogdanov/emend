@@ -105,7 +105,7 @@ test('a manifest pointing off-domain keeps the directory’s standing, not the p
     const found = await resolveSpec({ domain: 'acme.com' }, { fetch, cacheDir: s.dir });
 
     const hit = found.find((c) => c.url.includes('elsewhere'));
-    assert.equal(hit?.provenance, 'directory-apis-io');
+    assert.equal(hit?.provenance, 'directory');
   } finally {
     s.cleanup();
   }
@@ -292,6 +292,206 @@ function guruEntry(over: Record<string, unknown> = {}): string {
   });
 }
 
+// ---------------------------------------------------------------------------
+// apis.io
+//
+// Keyed by a slug (`stripe`), where every call site hands us a host
+// (`api.stripe.com`). There is no domain field on its records to bridge that —
+// `baseURL` and `humanURL` are empty across all of them — so the slug is derived
+// and then *verified* by requiring the record to link back to the vendor's own
+// domain. Attribution by guess is how one vendor's API gets reported as
+// another's.
+// ---------------------------------------------------------------------------
+
+const APIS_IO = 'https://apis.io/api/v1';
+
+function apisIoRoutes(over: Record<string, Partial<FetchResponse>> = {}) {
+  return {
+    [`${APIS_IO}/providers/acme`]: {
+      body: JSON.stringify({ slug: 'acme', name: 'Acme', image: 'https://acme.com/logo.png' }),
+    },
+    [`${APIS_IO}/providers/acme/apis`]: {
+      body: JSON.stringify({ data: [{ aid: 'acme:acme-charges-api' }] }),
+    },
+    [`${APIS_IO}/apis/acme:acme-charges-api`]: {
+      body: JSON.stringify({
+        properties: [
+          { type: 'Documentation', url: 'https://acme.com/docs' },
+          { type: 'OpenAPI', url: 'https://cdn.listing.example/acme-charges.json' },
+        ],
+      }),
+    },
+    'https://cdn.listing.example/acme-charges.json': { body: OPENAPI },
+    ...over,
+  };
+}
+
+test('an api id keeps its colon, which is the only form the directory answers', async () => {
+  // Found by tracing a live run. `stripe:stripe-account-api` percent-encoded to
+  // `stripe%3Astripe-account-api` answers 404, while the literal colon answers
+  // 200 — so every detail lookup failed and apis.io contributed nothing at all,
+  // silently and while still costing seven requests per vendor.
+  const s = scratch();
+  try {
+    const fetch = fakeFetch(apisIoRoutes());
+    await resolveSpec({ domain: 'api.acme.com' }, { fetch, cacheDir: s.dir });
+    assert.ok(
+      fetch.asked.includes(`${APIS_IO}/apis/acme:acme-charges-api`),
+      `asked for the encoded form instead: ${fetch.asked.filter((u) => u.includes('/apis/')).join(', ')}`,
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a listing is followed to the description it names', async () => {
+  const s = scratch();
+  try {
+    const fetch = fakeFetch(apisIoRoutes());
+    const found = await resolveSpec({ domain: 'api.acme.com' }, { fetch, cacheDir: s.dir });
+
+    const hit = found.find((c) => c.url.includes('cdn.listing.example'));
+    // Listed by a directory, hosted by neither us nor the provider.
+    assert.equal(hit?.provenance, 'directory');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a record that never links back to the vendor is not attributed to it', async () => {
+  // The failure this guard exists for. `stripe` is a plausible slug for a dozen
+  // things; without the record pointing at the vendor's own domain, following it
+  // would report somebody else's API as this customer's.
+  const s = scratch();
+  try {
+    const fetch = fakeFetch(
+      apisIoRoutes({
+        [`${APIS_IO}/providers/acme`]: {
+          body: JSON.stringify({ slug: 'acme', name: 'Acme Unrelated', image: 'https://other.example/x.png' }),
+        },
+      }),
+    );
+    const found = await resolveSpec({ domain: 'api.acme.com' }, { fetch, cacheDir: s.dir });
+
+    assert.ok(!found.some((c) => c.url.includes('cdn.listing.example')));
+    assert.ok(!fetch.asked.includes(`${APIS_IO}/providers/acme/apis`), 'it stopped before listing');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('the directory is consulted before the aggregator', async () => {
+  const s = scratch();
+  try {
+    const fetch = fakeFetch(apisIoRoutes());
+    await resolveSpec({ domain: 'api.acme.com' }, { fetch, cacheDir: s.dir });
+    const io = fetch.asked.findIndex((u) => u.startsWith(APIS_IO));
+    const guru = fetch.asked.findIndex((u) => u.includes('apis.guru'));
+    assert.ok(io !== -1, 'apis.io was consulted');
+    assert.ok(guru === -1 || io < guru, 'and before apis.guru');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a directory listing does not stop the walk reaching a first-party one', async () => {
+  // Consulting apis.io first must not mean settling for it. Its listings are
+  // never the provider's own word, so the walk carries on and the ranking puts
+  // the first-party description in front. Ordering a source earlier should never
+  // produce a worse answer than not having it.
+  const s = scratch();
+  try {
+    const fetch = fakeFetch({
+      ...apisIoRoutes(),
+      'https://api.apis.guru/v2/api.acme.com.json': {
+        body: JSON.stringify({
+          apis: {
+            'acme.com': {
+              info: { 'x-origin': [{ url: 'https://raw.githubusercontent.com/acme/openapi/main/spec.json' }] },
+            },
+          },
+        }),
+      },
+      'https://raw.githubusercontent.com/acme/openapi/main/spec.json': { body: OPENAPI },
+    });
+    const found = await resolveSpec({ domain: 'api.acme.com', org: 'acme' }, { fetch, cacheDir: s.dir });
+    assert.equal(found[0]?.provenance, 'official-github');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('the number of listings followed for one vendor is bounded', async () => {
+  // Stripe alone publishes 159 APIs on apis.io. Following all of them would turn
+  // one resolution into three hundred requests.
+  const s = scratch();
+  try {
+    const many = Array.from({ length: 20 }, (_, i) => ({ aid: `acme:api-${i}` }));
+    const routes: Record<string, Partial<FetchResponse>> = {
+      ...apisIoRoutes(),
+      [`${APIS_IO}/providers/acme/apis`]: { body: JSON.stringify({ data: many }) },
+    };
+    const fetch = fakeFetch(routes);
+    await resolveSpec({ domain: 'api.acme.com' }, { fetch, cacheDir: s.dir });
+    const detailCalls = fetch.asked.filter((u) => u.startsWith(`${APIS_IO}/apis/`)).length;
+    assert.ok(detailCalls > 0 && detailCalls <= 5, `followed ${detailCalls}, expected at most 5`);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a call-site host resolves against the registrable domain the directories key on', async () => {
+  // Found live, and it silenced the detector completely. Call sites hand us
+  // `api.stripe.com`; apis.guru is keyed `stripe.com`, so asking it about the
+  // host returned nothing and Stripe resolved to zero candidates — while asking
+  // about `stripe.com` directly had worked all along. The host is what a
+  // repository actually contains, so the resolver has to bridge that itself.
+  const s = scratch();
+  try {
+    const fetch = fakeFetch({
+      'https://api.apis.guru/v2/acme.com.json': {
+        body: JSON.stringify({
+          apis: {
+            'acme.com': {
+              info: { 'x-origin': [{ url: 'https://raw.githubusercontent.com/acme/openapi/main/spec.json' }] },
+            },
+          },
+        }),
+      },
+      'https://raw.githubusercontent.com/acme/openapi/main/spec.json': { body: OPENAPI },
+    });
+    const found = await resolveSpec({ domain: 'api.acme.com', org: 'acme' }, { fetch, cacheDir: s.dir });
+    assert.equal(found[0]?.provenance, 'official-github');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a description on the bare domain is found from a call site on a subdomain', async () => {
+  const s = scratch();
+  try {
+    const fetch = fakeFetch({ 'https://acme.com/openapi.json': { body: OPENAPI } });
+    const found = await resolveSpec({ domain: 'api.acme.com' }, { fetch, cacheDir: s.dir });
+    assert.equal(found[0]?.provenance, 'official-domain');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('the host itself is still tried first, since that is where the API lives', async () => {
+  const s = scratch();
+  try {
+    const fetch = fakeFetch({
+      'https://api.acme.com/openapi.json': { body: OPENAPI },
+      'https://acme.com/openapi.json': { body: OPENAPI },
+    });
+    const found = await resolveSpec({ domain: 'api.acme.com' }, { fetch, cacheDir: s.dir });
+    assert.equal(found[0]?.url, 'https://api.acme.com/openapi.json');
+  } finally {
+    s.cleanup();
+  }
+});
+
 test('the aggregator’s pointer to the provider’s own repository beats its own copy', async () => {
   // The find that makes apis.guru worth keeping. Its index entry carries an
   // `x-origin` naming where the provider actually publishes — for Stripe, their
@@ -344,7 +544,7 @@ test('an org that was never supplied does not get credited for a GitHub URL', as
       'https://raw.githubusercontent.com/acme/openapi/master/spec3.json': { body: OPENAPI },
     });
     const found = await resolveSpec({ domain: 'acme.com' }, { fetch, cacheDir: s.dir });
-    assert.equal(found[0]?.provenance, 'directory-apis-io');
+    assert.equal(found[0]?.provenance, 'directory');
   } finally {
     s.cleanup();
   }
