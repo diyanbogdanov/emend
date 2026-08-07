@@ -874,6 +874,102 @@ export function classifyHunks(
  * remains the judge. Silently dropping everything would turn a possible repair
  * into a guaranteed no-op.
  */
+/**
+ * The prompt for repairing what an external linter objects to.
+ *
+ * Deliberately not the migration prompt. There is no API contract here, no
+ * symbol table, and no compiler — the whole of the evidence is a rule code, a
+ * line, and a sentence from the tool, and the model's job is to satisfy that
+ * sentence without becoming an opinion about the file.
+ */
+export const LINT_SYSTEM_PROMPT = `You are repairing exactly the issues an external linter reported in a Dockerfile or shell script.
+
+You will be given each finding as a rule code, a file, a line, and the linter's own message, plus the full text of each file.
+
+Rules:
+1. Fix only the lines the linter flagged. Nothing else in the file is yours to change — not formatting, not ordering, not a nearby thing you would have written differently.
+2. Satisfy what the message actually asks for. Do not silence a rule by deleting the line it objects to, and do not add a suppression comment.
+3. If a finding cannot be fixed without knowing something the file does not tell you — a version to pin, an intent behind a command — leave it and say so in your rationale.
+4. Preserve behaviour. A Dockerfile that no longer installs what it installed, or a script that no longer does what it did, is a worse outcome than the lint warning.
+
+Reply with JSON only:
+{"edits":[{"file":"Dockerfile","find":"<exact text to replace>","replace":"<new text>","reason":"DL3006: ..."}],"rationale":"...","confidence":"high|medium|low"}
+
+\`find\` must appear exactly once in the file, character for character. If you cannot write a unique \`find\`, include more surrounding lines until it is unique.`;
+
+export interface LintFixContext {
+  findings: Array<{ file: string; line: number; code: string; message: string }>;
+  sources: Map<string, string>;
+}
+
+export function buildLintPrompt(ctx: LintFixContext): string {
+  const lines: string[] = ['Findings to repair:', ''];
+  for (const f of ctx.findings) {
+    lines.push(`${f.file}:${f.line}:1: ${f.code} — ${f.message}`);
+  }
+  lines.push('');
+  for (const [file, source] of ctx.sources) {
+    lines.push(`--- ${file} ---`);
+    lines.push(source.slice(0, 8000));
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+export async function proposeLintFixes(
+  config: LlmConfig,
+  ctx: LintFixContext,
+): Promise<AgentProposal> {
+  return propose(config, LINT_SYSTEM_PROMPT, buildLintPrompt(ctx));
+}
+
+/**
+ * Keep only the edits that touch a line the linter actually flagged.
+ *
+ * Stricter than `selectEvidencedEdits`, and deliberately. That one lets an edit
+ * through when it finds neither a diagnostic nor a call site, because a
+ * dependency bump can genuinely break a file the call-site walk never visited —
+ * there is a hidden cause to allow for. Lint has no hidden cause: the findings
+ * are the complete list of what is wrong, so an edit away from all of them is
+ * the model rewriting something nobody asked about.
+ *
+ * The window is generous by a couple of lines because a linter reports the head
+ * of a construct — the `RUN` — while the fix often spans its continuations.
+ */
+export function selectLintEdits(
+  edits: TextEdit[],
+  findings: Array<{ file: string; line: number }>,
+  sources: Map<string, string>,
+): { keep: TextEdit[]; dropped: EditClassification[] } {
+  const WINDOW = 3;
+  const keep: TextEdit[] = [];
+  const dropped: EditClassification[] = [];
+
+  for (const edit of edits) {
+    const content = sources.get(edit.file);
+    const span = content ? spanOf(content, edit.find) : null;
+    if (!span) {
+      // Unlocatable here means the applicator rejects it anyway; let it, so one
+      // place decides and one reason is reported.
+      keep.push(edit);
+      continue;
+    }
+    const flagged = findings.filter((f) => sameFile(f.file, edit.file));
+    const touches = flagged.some(
+      (f) => f.line >= span.start - WINDOW && f.line <= span.end + WINDOW,
+    );
+    if (touches) keep.push(edit);
+    else {
+      dropped.push({
+        edit,
+        evidence: 'unrequested',
+        reason: `${edit.file} lines ${span.start}-${span.end} carry no linter finding`,
+      });
+    }
+  }
+  return { keep, dropped };
+}
+
 export function selectEvidencedEdits(classified: EditClassification[]): {
   keep: TextEdit[];
   dropped: EditClassification[];

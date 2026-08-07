@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { applyLintPatch, repairableFiles } from '../src/lint.ts';
+import { selectLintEdits } from '../src/llm/agent.ts';
 import type { LintFinding } from '../src/lint.ts';
 
 const run = promisify(execFile);
@@ -108,4 +109,64 @@ test('a patch that will not apply leaves the file alone and says so', async () =
   } finally {
     repo.cleanup();
   }
+});
+
+// ---------------------------------------------------------------------------
+// The agent's half: what hadolint cannot fix
+// ---------------------------------------------------------------------------
+
+test('an edit on a flagged line is kept', () => {
+  const sources = new Map([['Dockerfile', 'FROM node\nRUN apt-get install curl\nUSER node\n']]);
+  const { keep, dropped } = selectLintEdits(
+    [{ file: 'Dockerfile', find: 'FROM node', replace: 'FROM node:22', reason: 'DL3006' }],
+    [{ file: 'Dockerfile', line: 1 }],
+    sources,
+  );
+  assert.equal(keep.length, 1);
+  assert.equal(dropped.length, 0);
+});
+
+test('an edit nowhere near a finding is withheld', () => {
+  // Stricter than the migration gate, and deliberately. That one lets an edit
+  // through when it finds neither diagnostic nor call site, because a bump can
+  // break a file the walk never visited — there is a hidden cause to allow for.
+  // Lint has none: the findings are the complete list of what is wrong, so an
+  // edit away from all of them is the model rewriting something nobody asked
+  // about.
+  const sources = new Map([
+    ['Dockerfile', 'FROM node:22\nRUN echo a\nRUN echo b\nRUN echo c\nRUN echo d\nUSER node\n'],
+  ]);
+  const { keep, dropped } = selectLintEdits(
+    [{ file: 'Dockerfile', find: 'USER node', replace: 'USER 1000', reason: 'tidier' }],
+    [{ file: 'Dockerfile', line: 1 }],
+    sources,
+  );
+  assert.deepEqual(keep, []);
+  assert.equal(dropped.length, 1);
+  assert.match(dropped[0]?.reason ?? '', /carry no linter finding/);
+});
+
+test('a fix spanning the continuation of a flagged line is kept', () => {
+  // A linter reports the head of a construct — the `RUN` — while the fix often
+  // spans its continuations, so the window is generous by a couple of lines.
+  const sources = new Map([
+    ['Dockerfile', 'FROM node:22\nRUN apt-get update \\\n  && apt-get install -y curl \\\n  && rm -rf /var/lib/apt/lists/*\n'],
+  ]);
+  const { keep } = selectLintEdits(
+    [{ file: 'Dockerfile', find: '&& apt-get install -y curl', replace: '&& apt-get install -y --no-install-recommends curl', reason: 'DL3015' }],
+    [{ file: 'Dockerfile', line: 2 }],
+    sources,
+  );
+  assert.equal(keep.length, 1);
+});
+
+test('an edit that cannot be located is left for the applicator to refuse', () => {
+  // One place decides and one reason is reported, rather than two rejections
+  // with different wording for the same cause.
+  const { keep } = selectLintEdits(
+    [{ file: 'Dockerfile', find: 'NOT PRESENT', replace: 'x', reason: 'y' }],
+    [{ file: 'Dockerfile', line: 1 }],
+    new Map([['Dockerfile', 'FROM node:22\n']]),
+  );
+  assert.equal(keep.length, 1);
 });

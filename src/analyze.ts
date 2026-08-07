@@ -377,17 +377,13 @@ export async function scanRepo(
   const configFiles = walked.filter((f) => /(Dockerfile|Containerfile)|\.(sh|bash)$/.test(f));
   const codeFiles = walked.filter((f) => !configFiles.includes(f));
 
-  // Ten thousand rather than four hundred, on measurement: a full TypeScript
-  // parse of 19,316 files costs nine seconds, which a scan can afford — and the
-  // alternative is asserting "not imported from this repository's source" having
-  // read two percent of it.
-  const MAX_CODE_FILES = 10_000;
-  if (codeFiles.length > MAX_CODE_FILES) {
-    warnings.push(
-      `${codeFiles.length} source files found; only the first ${MAX_CODE_FILES} were read, so call sites and reachability are incomplete`,
-    );
-  }
-  const sourceFiles = [...configFiles, ...codeFiles.slice(0, MAX_CODE_FILES)];
+  // No cap. It was four hundred, then ten thousand, and both were guesses at a
+  // cost nobody had measured: reading all 19,333 files of n8n takes 3.5 seconds
+  // and 109MB, and parsing them takes nine. A scan that already spends tens of
+  // seconds on registry fetches can afford that — and the alternative was
+  // asserting "not imported from this repository's source" after reading part
+  // of it, which is the one kind of wrong answer this codebase exists to avoid.
+  const sourceFiles = [...configFiles, ...codeFiles];
   const pinScan = await scanPins(
     resolvedVersions(repo.dependencies),
     async (file) => {

@@ -468,25 +468,33 @@ async function cmdFix(args: Args): Promise<number> {
     console.log(c.bold('  lint') + c.dim(`  (${lintTargets.length} finding(s))`));
     const lintResult = await fixLint(repoDir, lintTargets, {
       keepWorkspace: args.flags.get('keep') === true,
+      useAgent: args.flags.get('agent') === true,
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
     const ok =
       lintResult.verification !== null && verificationPassed(lintResult.verification.outcome);
     if (ok) anyVerified = true;
-    if (lintResult.repaired.length > 0) {
-      console.log(
-        `    ${ok ? c.green('VERIFIED') : c.red('NOT VERIFIED')}  ${c.dim(`${lintResult.repaired.length} file(s) rewritten by shellcheck`)}`,
-      );
+    if (lintResult.repaired.length > 0 || lintResult.agentEdits > 0) {
+      const what = [
+        lintResult.repaired.length > 0 ? `${lintResult.repaired.length} file(s) by shellcheck` : '',
+        lintResult.agentEdits > 0 ? `${lintResult.agentEdits} edit(s) by the model` : '',
+      ]
+        .filter(Boolean)
+        .join(', ');
+      console.log(`    ${ok ? c.green('VERIFIED') : c.red('NOT VERIFIED')}  ${c.dim(what)}`);
     }
     // Never silent about the half nothing can repair.
     if (lintResult.unrepairable.length > 0) {
       console.log(
-        c.yellow(`    ${lintResult.unrepairable.length} finding(s) have no automatic repair:`),
+        c.yellow(
+          `    ${lintResult.unrepairable.length} finding(s) still unrepaired${args.flags.get('agent') === true ? '' : ' — re-run with --agent to let the model try'}:`,
+        ),
       );
       for (const u of lintResult.unrepairable.slice(0, 5)) {
         console.log(c.dim(`      ${u.finding.change.path} — ${u.reason}`));
       }
     }
+    if (lintResult.caveat) console.log(c.yellow(`    ${lintResult.caveat}`));
     if (lintResult.workspaceDir) console.log(c.dim(`    workspace kept at ${lintResult.workspaceDir}`));
   }
 

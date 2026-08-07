@@ -38,6 +38,8 @@ import {
   proposeEdits,
   proposeTightening,
   proposeReview,
+  proposeLintFixes,
+  selectLintEdits,
   nearbySymbols,
   classifyEdits,
   selectEvidencedEdits,
@@ -1375,6 +1377,10 @@ export async function fixVulnerability(
 export interface LintFixResult {
   /** Files shellcheck rewrote. */
   repaired: string[];
+  /** Edits the model made for findings no tool can fix. */
+  agentEdits: number;
+  /** What the verification could not actually establish. */
+  caveat?: string;
   /** Findings nothing here can repair, and why. */
   unrepairable: Array<{ finding: Finding; reason: string }>;
   verification: VerificationReport | null;
@@ -1422,13 +1428,14 @@ export async function fixLint(
 
   const base: LintFixResult = {
     repaired: [],
+    agentEdits: 0,
     unrepairable,
     verification: null,
     diff: '',
     workspaceDir: null,
     workspaceMode: null,
   };
-  if (files.length === 0) {
+  if (files.length === 0 && !options.useAgent) {
     progress(`nothing here is machine-repairable: ${unrepairable.length} finding(s) need a person`);
     return base;
   }
@@ -1440,19 +1447,84 @@ export async function fixLint(
     progress('running baseline verification (before any change)');
     const baseline = await runPhase(ws.dir, phaseOpts);
 
-    progress(`applying shellcheck's own suggestions to ${files.length} file(s)`);
-    const patch = await applyLintPatch(ws.dir, files);
-    if (!patch.applied) {
-      progress(patch.error ? `  patch refused: ${patch.error}` : '  nothing to apply');
-      if (!options.keepWorkspace) await ws.cleanup();
-      return base;
+    if (files.length > 0) {
+      progress(`applying shellcheck's own suggestions to ${files.length} file(s)`);
+      const patch = await applyLintPatch(ws.dir, files);
+      if (!patch.applied && patch.error) progress(`  patch refused: ${patch.error}`);
+    }
+
+    // What no linter can fix on its own. hadolint ships no autofix, so these
+    // are either a person's job or the model's — and the model gets a stricter
+    // gate than a migration does, because the findings here are the complete
+    // list of what is wrong rather than a symptom of something hidden.
+    let agentEdits = 0;
+    const stillUnrepairable: typeof unrepairable = [];
+    const llm = options.useAgent ? resolveLlmConfig() : null;
+    if (llm && !llm.ok) progress(`agent requested but unavailable: ${llm.reason}`);
+
+    if (unrepairable.length > 0 && llm?.ok) {
+      const targets = unrepairable.map((u) => ({
+        file: u.finding.sites[0]?.file ?? '',
+        line: u.finding.sites[0]?.line ?? 1,
+        code: u.finding.change.path,
+        message: u.finding.change.guidance ?? '',
+      }));
+      const sources = new Map<string, string>();
+      for (const file of new Set(targets.map((t) => t.file))) {
+        const body = await readFile(path.join(ws.dir, file), 'utf8').catch(() => null);
+        if (body !== null) sources.set(file, body);
+      }
+
+      progress(`  asking ${llm.config.model} to repair ${targets.length} finding(s) no tool can`);
+      const proposal = await proposeLintFixes(llm.config, { findings: targets, sources });
+      if (!proposal.ok) {
+        progress(`    provider error: ${proposal.error}`);
+        stillUnrepairable.push(...unrepairable);
+      } else {
+        const { keep, dropped } = selectLintEdits(proposal.edits, targets, sources);
+        if (dropped.length > 0) {
+          progress(`    withheld ${dropped.length} edit(s) on lines no linter flagged`);
+        }
+        const applied = await applyTextEdits(ws.dir, keep);
+        agentEdits = applied.applied.length;
+        progress(`    ${agentEdits} applied, ${applied.failed.length} rejected`);
+        // Only what the model actually changed leaves the unrepairable list.
+        const touched = new Set(applied.applied.map((e) => e.file));
+        stillUnrepairable.push(
+          ...unrepairable.filter((u) => !touched.has(u.finding.sites[0]?.file ?? '')),
+        );
+      }
+    } else {
+      stillUnrepairable.push(...unrepairable);
     }
 
     const verification = compare(baseline, await runPhase(ws.dir, phaseOpts));
     progress(`  ${verification.outcome}`);
 
+    // A green verification means much less for a Dockerfile than for source.
+    // `npm test` does not build an image, so an edit to a `FROM` tag, a pinned
+    // apt version, or a `USER` id passes untested — and the model will invent a
+    // package version if a rule asks it to pin one. Saying so is the difference
+    // between "verified" and "verified, in the way this repository can verify".
+    const editedImages = stillUnrepairable.length < unrepairable.length;
+    const dockerEdited =
+      editedImages && unrepairable.some((u) => /Dockerfile|Containerfile/.test(u.finding.sites[0]?.file ?? ''));
+    if (dockerEdited) {
+      progress(
+        '  note: the verification ran this repository’s own checks, which do not build the image — Dockerfile edits are unproven until they do',
+      );
+    }
+
     const result: LintFixResult = {
       ...base,
+      unrepairable: stillUnrepairable,
+      ...(dockerEdited
+        ? {
+            caveat:
+              'Dockerfile edits were verified only against this repository’s own checks, which do not build an image. A pinned package version or a changed USER id is unproven until something builds it.',
+          }
+        : {}),
+      agentEdits,
       repaired: files,
       verification,
       diff: await workspaceDiff(ws),
