@@ -14,7 +14,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
-import { fixFinding, fixPackage, fixPins } from './fix.ts';
+import { fixFinding, fixPackage, fixPins, fixVulnerability } from './fix.ts';
 import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
 import { startServer } from './server.ts';
@@ -337,7 +337,10 @@ async function cmdFix(args: Args): Promise<number> {
   // package path would run `npm install node@22`, which is nonsense and would
   // half-succeed in ways that are hard to unpick.
   const pinTargets = targets.filter((f) => f.detector === 'version-pin');
-  const packageTargets = targets.filter((f) => f.detector !== 'version-pin');
+  const vulnTargets = targets.filter((f) => f.detector === 'vulnerability');
+  const packageTargets = targets.filter(
+    (f) => f.detector !== 'version-pin' && f.detector !== 'vulnerability',
+  );
 
   // Group by package: a version bump is atomic, so every finding for one
   // package must be fixed together in one workspace and land as one PR.
@@ -350,6 +353,39 @@ async function cmdFix(args: Args): Promise<number> {
 
   console.log('');
   let anyVerified = false;
+
+  // Each in its own workspace: getting one package out of the tree is a
+  // self-contained change, and bundling them would make a single failure
+  // withhold every other fix.
+  for (const finding of vulnTargets) {
+    console.log(
+      c.bold(`  ${finding.pkg} ${finding.fromVersion} → ${finding.toVersion}`) +
+        c.dim('  (vulnerability)'),
+    );
+    const vulnResult = await fixVulnerability(repoDir, finding, {
+      keepWorkspace: args.flags.get('keep') === true,
+      onProgress: (m) => console.log(c.dim(`    ${m}`)),
+    });
+    const verified =
+      vulnResult.verification !== null && verificationPassed(vulnResult.verification.outcome);
+    // Two conditions, and both must hold. A green build with the vulnerable
+    // version still installed is the failure most easily mistaken for success.
+    const fixed = verified && vulnResult.resolved;
+    if (fixed) anyVerified = true;
+    console.log(
+      `    ${
+        fixed
+          ? c.green('FIXED')
+          : vulnResult.remediation.kind === 'none'
+            ? c.yellow('NO FIX AVAILABLE')
+            : c.red('NOT FIXED')
+      }  ${c.dim(vulnResult.verification?.summary ?? vulnResult.note ?? '')}`,
+    );
+    if (vulnResult.note && !fixed) console.log(c.yellow(`    ${vulnResult.note}`));
+    if (vulnResult.workspaceDir) {
+      console.log(c.dim(`    workspace kept at ${vulnResult.workspaceDir}`));
+    }
+  }
 
   if (pinTargets.length > 0) {
     console.log(c.bold(`  version pins`) + c.dim(`  (${pinTargets.length} drifted)`));

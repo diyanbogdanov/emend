@@ -19,6 +19,9 @@ import { planFinding } from './plan.ts';
 import { findWorkspaces } from './workspaces.ts';
 import { readRepo } from './inventory.ts';
 import { scanPins, resolvedVersions, planPinRepair } from './pins.ts';
+import { planRemediation, type Remediation } from './remediate.ts';
+import { readLockfile } from './lockfile.ts';
+import { compareVersions } from './registry.ts';
 import {
   prepareWorkspace,
   applyEdits,
@@ -1203,4 +1206,134 @@ export async function fixFinding(
 function describe(r: CommandResult): string {
   if (r.skipped) return `skipped(${r.skipReason})`;
   return r.ok ? 'pass' : `FAIL(exit ${r.exitCode})`;
+}
+
+export interface VulnFixResult {
+  finding: Finding;
+  /** Which rung was tried, and why none was when that is the answer. */
+  remediation: Remediation;
+  /** Whether the vulnerable version actually left the tree. */
+  resolved: boolean;
+  /** What the package resolves to now, read back from the lockfile. */
+  installedAfter: string | null;
+  verification: VerificationReport | null;
+  diff: string;
+  workspaceDir: string | null;
+  workspaceMode: string | null;
+  note?: string;
+}
+
+/**
+ * Get a vulnerable package out of the installed tree, and prove the build survives.
+ *
+ * Two questions, and both have to be answered. *Did the vulnerable version
+ * leave?* is read back from the lockfile after installing — never predicted,
+ * because predicting npm's resolution is a worse job than doing it and looking.
+ * *Does the repository still work?* is the ordinary baseline comparison every
+ * other repair here goes through.
+ *
+ * A bump that verifies green but leaves the vulnerable version installed is not
+ * a fix, and reporting it as one would be the most expensive kind of false
+ * certainty this product can produce.
+ */
+export async function fixVulnerability(
+  repoDir: string,
+  finding: Finding,
+  options: FixOptions = {},
+): Promise<VulnFixResult> {
+  const progress = options.onProgress ?? (() => {});
+  const untrusted = options.untrusted === true;
+  const phaseOpts = { skipTests: untrusted };
+
+  const repo = await readRepo(repoDir);
+  const directs = new Set(repo.dependencies.map((d) => d.name));
+  const lockRaw = await readFile(path.join(repoDir, 'package-lock.json'), 'utf8').catch(() => '');
+  const target = finding.toVersion === finding.fromVersion ? null : finding.toVersion;
+  const remediation = planRemediation(
+    { name: finding.pkg, version: finding.fromVersion, target },
+    directs,
+    lockRaw,
+  );
+
+  const base = {
+    finding,
+    remediation,
+    resolved: false,
+    installedAfter: null,
+    verification: null,
+    diff: '',
+    workspaceDir: null,
+    workspaceMode: null,
+  } satisfies VulnFixResult;
+
+  if (remediation.kind === 'none') {
+    progress(`no bump available: ${remediation.reason}`);
+    return { ...base, note: remediation.reason };
+  }
+
+  let ws: Workspace | null = null;
+  try {
+    ws = await prepareWorkspace(repoDir);
+    progress(`  workspace: ${ws.dir} (${ws.mode})`);
+    progress('running baseline verification (before any change)');
+    const baseline = await runPhase(ws.dir, phaseOpts);
+
+    if (remediation.kind === 'direct') {
+      progress(`bumping ${remediation.pkg} to ${remediation.to}`);
+      await bumpDependency(ws.dir, remediation.pkg, remediation.to, { ignoreScripts: untrusted });
+    } else {
+      // Every direct dependency whose tree reaches it, because any one of them
+      // can be the reason the old version is still resolved.
+      progress(
+        `bumping ${remediation.parents.join(', ')} to move ${remediation.child} to ${remediation.to}`,
+      );
+      for (const parent of remediation.parents) {
+        await bumpDependency(ws.dir, parent, 'latest', { ignoreScripts: untrusted });
+      }
+    }
+
+    // Read back rather than assume. A parent bump may resolve a patched child,
+    // a still-vulnerable one, or the same one — and only the lockfile knows.
+    const after = await readLockfile(ws.dir);
+    const installed = [...after.tree.values()]
+      .filter((e) => e.name === finding.pkg)
+      .map((e) => e.version);
+    const worst = installed.sort(compareVersions)[0] ?? null;
+    const resolved =
+      installed.length === 0 ||
+      (worst !== null && compareVersions(worst, finding.toVersion) >= 0);
+    progress(
+      installed.length === 0
+        ? `  ${finding.pkg} is no longer installed`
+        : `  ${finding.pkg} now resolves to ${installed.join(', ')}`,
+    );
+
+    const verification = compare(baseline, await runPhase(ws.dir, phaseOpts));
+    progress(`  ${verification.outcome}`);
+
+    const result: VulnFixResult = {
+      ...base,
+      resolved,
+      installedAfter: worst,
+      verification,
+      diff: await workspaceDiff(ws),
+      workspaceDir: ws.dir,
+      workspaceMode: ws.mode,
+      // Said out loud, because a green build with the vulnerable version still
+      // installed is the failure most likely to be mistaken for a success.
+      ...(resolved
+        ? {}
+        : {
+            note: `the build verified, but ${finding.pkg} still resolves to ${worst ?? 'an affected version'} — this bump did not clear the advisory`,
+          }),
+    };
+    if (!options.keepWorkspace) {
+      await ws.cleanup();
+      result.workspaceDir = null;
+    }
+    return result;
+  } catch (err) {
+    if (ws && !options.keepWorkspace) await ws.cleanup().catch(() => {});
+    throw err;
+  }
 }
