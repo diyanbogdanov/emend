@@ -189,6 +189,14 @@ const WELL_KNOWN = [
   '/api/swagger.json',
   '/.well-known/openapi.json',
   '/.well-known/api-description',
+  // Framework defaults, which are the ones that actually land. Guessing a
+  // hand-written path on an origin almost never works — measured against four
+  // real vendors, it found nothing — but nobody moves the path their framework
+  // generates. springfox, ASP.NET, and the Swagger UI convention respectively.
+  '/v2/api-docs',
+  '/v3/api-docs',
+  '/swagger/v1/swagger.json',
+  '/api-docs',
 ];
 
 export function wellKnownSpecPaths(origin: string): string[] {

@@ -277,18 +277,122 @@ test('a failed fetch is not cached as an absence', async () => {
 // Aggregators
 // ---------------------------------------------------------------------------
 
-test('apis.guru is reached for, but only once the provider has come up empty', async () => {
+/** The shape the live per-domain endpoint returns, entries flattened under `apis`. */
+function guruEntry(over: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    apis: {
+      'acme.com': {
+        swaggerUrl: 'https://api.apis.guru/v2/specs/acme.com/2022-11-15/openapi.json',
+        info: {
+          'x-origin': [{ format: 'openapi', url: 'https://raw.githubusercontent.com/acme/openapi/master/spec3.yaml' }],
+        },
+        ...over,
+      },
+    },
+  });
+}
+
+test('the aggregator’s pointer to the provider’s own repository beats its own copy', async () => {
+  // The find that makes apis.guru worth keeping. Its index entry carries an
+  // `x-origin` naming where the provider actually publishes — for Stripe, their
+  // own GitHub — so the aggregator can be used purely to *discover* and the
+  // description still comes from a first-party source. Discovery source versus
+  // truth source, handed over by the directory itself.
   const s = scratch();
   try {
     const fetch = fakeFetch({
-      'https://api.apis.guru/v2/specs/acme.com/openapi.json': { body: OPENAPI },
+      'https://api.apis.guru/v2/acme.com.json': { body: guruEntry() },
+      'https://raw.githubusercontent.com/acme/openapi/master/spec3.json': { body: OPENAPI },
+      'https://api.apis.guru/v2/specs/acme.com/2022-11-15/openapi.json': { body: OPENAPI },
+    });
+    const found = await resolveSpec({ domain: 'acme.com', org: 'acme' }, { fetch, cacheDir: s.dir });
+
+    assert.equal(found[0]?.provenance, 'official-github');
+    assert.ok(found[0]?.url.includes('githubusercontent'));
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a YAML pointer is retried as its JSON sibling, since YAML is not read here', async () => {
+  // Stripe's `x-origin` names `spec3.yaml`, and there is no YAML reader. Rather
+  // than lose the best pointer available, the JSON sibling is tried — and it is
+  // only accepted if it parses as a description, so this is a check rather than
+  // a guess.
+  const s = scratch();
+  try {
+    const fetch = fakeFetch({
+      'https://api.apis.guru/v2/acme.com.json': { body: guruEntry() },
+      'https://raw.githubusercontent.com/acme/openapi/master/spec3.json': { body: OPENAPI },
+    });
+    await resolveSpec({ domain: 'acme.com', org: 'acme' }, { fetch, cacheDir: s.dir });
+    assert.ok(fetch.asked.includes('https://raw.githubusercontent.com/acme/openapi/master/spec3.yaml'));
+    assert.ok(fetch.asked.includes('https://raw.githubusercontent.com/acme/openapi/master/spec3.json'));
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('an org that was never supplied does not get credited for a GitHub URL', async () => {
+  // Anyone may host a mirror on GitHub. Without being told the provider's org,
+  // the pointer is still the best route available and is still not first-party,
+  // so it keeps the directory's standing and may not assert breakage.
+  const s = scratch();
+  try {
+    const fetch = fakeFetch({
+      'https://api.apis.guru/v2/acme.com.json': { body: guruEntry() },
+      'https://raw.githubusercontent.com/acme/openapi/master/spec3.json': { body: OPENAPI },
+    });
+    const found = await resolveSpec({ domain: 'acme.com' }, { fetch, cacheDir: s.dir });
+    assert.equal(found[0]?.provenance, 'directory-apis-io');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('the aggregator’s own copy is used when no origin pointer resolves', async () => {
+  const s = scratch();
+  try {
+    const fetch = fakeFetch({
+      'https://api.apis.guru/v2/acme.com.json': { body: guruEntry({ info: {} }) },
+      'https://api.apis.guru/v2/specs/acme.com/2022-11-15/openapi.json': { body: OPENAPI },
     });
     const found = await resolveSpec({ domain: 'acme.com' }, { fetch, cacheDir: s.dir });
 
     assert.equal(found[0]?.provenance, 'aggregator-apis-guru');
-    // And it may not be used to assert a call is broken — that is `specs.ts`'s
-    // job, and this only has to make sure the tier is recorded truthfully.
+    // And only after the provider itself came up empty.
     assert.ok(fetch.asked.some((u) => u.startsWith('https://acme.com/')));
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('an aggregator entry naming nothing usable yields nothing', async () => {
+  const s = scratch();
+  try {
+    const fetch = fakeFetch({
+      'https://api.apis.guru/v2/acme.com.json': { body: JSON.stringify({ apis: {} }) },
+    });
+    assert.deepEqual(await resolveSpec({ domain: 'acme.com' }, { fetch, cacheDir: s.dir }), []);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('the framework defaults are tried, not just the hand-written ones', async () => {
+  // Measured: guessing `/openapi.json` on an origin almost never lands. What
+  // does land is whatever the framework generates by default — springfox's
+  // `/v2/api-docs`, ASP.NET's `/swagger/v1/swagger.json` — because nobody moves
+  // those. Conventions, not guesses; the list stays short for that reason.
+  const s = scratch();
+  try {
+    const fetch = fakeFetch({
+      'https://acme.com/swagger/v1/swagger.json': {
+        body: JSON.stringify({ swagger: '2.0', info: {}, paths: { '/x': {} } }),
+      },
+    });
+    const found = await resolveSpec({ domain: 'acme.com' }, { fetch, cacheDir: s.dir });
+    assert.equal(found[0]?.provenance, 'official-domain');
   } finally {
     s.cleanup();
   }

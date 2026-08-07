@@ -57,6 +57,8 @@ export interface ResolveOptions {
   maxAgeMs?: number;
 }
 
+type Doc = Record<string, unknown>;
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Above this, a body is not being read as an API description by anybody. */
@@ -237,6 +239,73 @@ async function candidateFrom(
   };
 }
 
+interface AggregatorLead {
+  url: string;
+  /** Set only for the aggregator's own copy; a pointer is judged by where it lands. */
+  floor?: SpecProvenance;
+}
+
+/**
+ * What apis.guru's entry for a domain points at, best route first.
+ *
+ * Two hops rather than one, because the description sits under a version
+ * segment — `/v2/specs/stripe.com/2022-11-15/openapi.json` — that cannot be
+ * guessed. The per-domain endpoint names it for about a kilobyte, against 8.8MB
+ * for `list.json`.
+ *
+ * The reason this source earns its place is `x-origin`: the entry records where
+ * the provider *actually publishes*, which for Stripe is their own GitHub
+ * repository. So the aggregator can be used purely to discover, and the
+ * description still comes from a first-party source — the aggregator's own copy
+ * is the fallback rather than the point. Measured today, that copy is dated
+ * 2022-11-15, four years stale, which is precisely why it must not be the point.
+ */
+async function aggregatorLeads(fetch: Fetcher, domain: string): Promise<AggregatorLead[]> {
+  let res: FetchResponse;
+  try {
+    res = await fetch(`https://api.apis.guru/v2/${domain}.json`);
+  } catch {
+    return [];
+  }
+  if (!res.ok) return [];
+
+  let apis: unknown;
+  try {
+    apis = (JSON.parse(res.body) as { apis?: unknown }).apis;
+  } catch {
+    return [];
+  }
+  if (typeof apis !== 'object' || apis === null) return [];
+
+  const pointers: AggregatorLead[] = [];
+  const mirrors: AggregatorLead[] = [];
+
+  for (const entry of Object.values(apis as Doc)) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const e = entry as Doc;
+
+    const info = (typeof e['info'] === 'object' && e['info'] !== null ? e['info'] : {}) as Doc;
+    const origins = info['x-origin'];
+    if (Array.isArray(origins)) {
+      for (const origin of origins) {
+        const url = (origin as Doc | undefined)?.['url'];
+        if (typeof url !== 'string') continue;
+        pointers.push({ url });
+        // There is no YAML reader here. Rather than lose the best pointer
+        // available, its JSON sibling is tried too — and accepted only if it
+        // parses as a description, which makes it a check and not a guess.
+        if (/\.ya?ml$/i.test(url)) pointers.push({ url: url.replace(/\.ya?ml$/i, '.json') });
+      }
+    }
+
+    if (typeof e['swaggerUrl'] === 'string') {
+      mirrors.push({ url: e['swaggerUrl'], floor: 'aggregator-apis-guru' });
+    }
+  }
+
+  return [...pointers, ...mirrors];
+}
+
 /**
  * Find every description of this vendor's API that can be located, best first.
  *
@@ -299,20 +368,23 @@ export async function resolveSpec(
     }
   }
 
-  // 3. apis.guru. A good bootstrap and a bad authority: the corpus is no longer
-  //    actively maintained, so a difference against it is as likely to be drift
-  //    in the mirror as in the API. `specs.ts` already refuses to let it assert
-  //    breakage; this only has to record the tier truthfully.
+  // 3. apis.guru, through its index entry rather than a guessed URL: the spec
+  //    lives under a version segment no fixed pattern can produce, and the
+  //    per-domain entry names it for one small request instead of the 8.8MB
+  //    `list.json`.
+  //
+  //    A good bootstrap and a bad authority. Measured today, its preferred
+  //    Stripe description is dated 2022-11-15 — four years old — so a difference
+  //    against it is far likelier to be drift in the mirror than in the API.
+  //    `specs.ts` already refuses to let it assert breakage; this only has to
+  //    record the tier truthfully.
   if (!settled()) {
-    add(
-      await candidateFrom(
-        options.fetch,
-        `https://api.apis.guru/v2/specs/${vendor.domain}/openapi.json`,
-        vendor,
-        now,
-        'aggregator-apis-guru',
-      ),
-    );
+    for (const lead of await aggregatorLeads(options.fetch, vendor.domain)) {
+      add(await candidateFrom(options.fetch, lead.url, vendor, now, lead.floor));
+      // A first-party pointer settles it; the mirrors after it add nothing but
+      // an older copy of the same API.
+      if (settled() || found.some((c) => c.provenance === 'official-github')) break;
+    }
   }
 
   await writeCache(options.cacheDir, vendor, found);
