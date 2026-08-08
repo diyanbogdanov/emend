@@ -39,8 +39,17 @@ export interface HarnessTask {
 
 export interface HarnessRun {
   ok: boolean;
-  /** Whatever the harness reported, for the PR body and for debugging. */
+  /** A summary of what the harness DID, for the PR body and for debugging. */
   log: string;
+  /**
+   * Everything the harness printed, unsummarised.
+   *
+   * The repair path wants the summary — which tools ran, what failed. A review
+   * wants what the model *said*, and `summariseEvents` drops that: it keeps tool
+   * activity and errors, so a session whose entire output was a findings object
+   * summarised to nothing and was reported as having produced no output at all.
+   */
+  raw?: string;
   error?: string;
 }
 
@@ -558,17 +567,19 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
       // opencode sets a non-zero exit imperatively on error, so stdout still
       // holds the events that say what went wrong either way.
       const log = summariseEvents(result.stdout);
+      const raw = result.stdout;
       if (result.timedOut) {
-        return { ok: false, log, error: `opencode timed out after ${Math.round(timeout / 1000)}s` };
+        return { ok: false, log, raw, error: `opencode timed out after ${Math.round(timeout / 1000)}s` };
       }
       if (result.code !== 0) {
         return {
           ok: false,
           log,
+          raw,
           error: result.stderr.trim() || `opencode exited ${result.code}`,
         };
       }
-      return { ok: true, log: log || result.stderr.trim() };
+      return { ok: true, log: log || result.stderr.trim(), raw };
     },
   };
 }

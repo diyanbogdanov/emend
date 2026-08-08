@@ -202,13 +202,15 @@ export async function reviewSession(input: {
     return { ok: false, findings: [], log: run.log, reason };
   }
 
-  const findings = parseReviewFindings(run.log);
+  // The raw output, not the summary: `summariseEvents` keeps tool activity and
+  // drops the model's text, which for a review is the entire answer.
+  const findings = parseReviewFindings(assistantText(run.raw ?? run.log));
   if (findings === null) {
     // Exiting zero is not the same as answering. Measured: opencode failed to
     // resolve a model, printed an APIError and exited zero, and an earlier
     // version reported "no structural findings" — a clean bill of health from a
     // review that never ran.
-    const line = run.log.split('\n').find((l) => l.trim()) ?? 'no output';
+    const line = (run.raw ?? run.log).split('\n').find((l) => l.trim()) ?? 'no output';
     const reason = `the review returned no findings object: ${line.trim().slice(0, 200)}`;
     progress(`  repo-wide review could not run: ${line.trim().slice(0, 120)}`);
     return { ok: false, findings: [], log: run.log, reason };
@@ -220,6 +222,39 @@ export async function reviewSession(input: {
       : `  repo-wide review: ${findings.length} finding(s)`,
   );
   return { ok: true, findings, log: run.log };
+}
+
+/**
+ * What the model actually said, pulled out of opencode's event stream.
+ *
+ * `--format json` emits newline-delimited events and puts the reply inside
+ * `part.text`, JSON-escaped — so a findings object arrives on the wire as
+ * `{\"findings\": []}` and a scan of the raw log for `{"findings"` never
+ * matches. That is why a review that answered correctly was reported as having
+ * produced no output.
+ *
+ * Falls back to the raw log when there are no events, which keeps two things
+ * working: a harness that prints plainly, and an error line like
+ * `error: {"name":"APIError"…}` — which must still reach the caller as "did not
+ * answer" rather than be swallowed into an empty string.
+ */
+export function assistantText(log: string): string {
+  const said: string[] = [];
+  let sawEvent = false;
+
+  for (const line of log.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const event = JSON.parse(trimmed) as { type?: unknown; part?: { text?: unknown } };
+      if (typeof event.type !== 'string') continue;
+      sawEvent = true;
+      if (event.type === 'text' && typeof event.part?.text === 'string') said.push(event.part.text);
+    } catch {
+      /* a line of JSON that is not an event; the fallback below covers it */
+    }
+  }
+  return sawEvent ? said.join('\n') : log;
 }
 
 /** Files the workspace reports as changed, so "it edited nothing" can be checked. */

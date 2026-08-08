@@ -10,6 +10,7 @@ import {
   parseReviewFindings,
   renderReviewFindings,
   reviewSession,
+  assistantText,
 } from '../src/reviewharness.ts';
 import type { Harness } from '../src/harness.ts';
 
@@ -211,3 +212,41 @@ test('structural findings are rendered before cosmetic ones', () => {
 
 
 
+
+// ---------------------------------------------------------------------------
+// Reading opencode's event stream
+// ---------------------------------------------------------------------------
+
+test('the reply is pulled out of the event stream, where it is escaped', () => {
+  // `--format json` emits newline-delimited events and puts the reply inside
+  // `part.text`, JSON-escaped. So a findings object arrives on the wire as
+  // `{\"findings\": []}` and a scan of the raw log for `{"findings"` never
+  // matches — which is why a review that answered correctly was reported as
+  // having produced no output.
+  const log = [
+    '{"type":"step_start","part":{"type":"step-start"}}',
+    '{"type":"text","part":{"type":"text","text":"{\\"findings\\": [{\\"severity\\":\\"duplication\\",\\"file\\":\\"a.ts\\",\\"what\\":\\"w\\",\\"why\\":\\"y\\"}]}"}}',
+    '{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}',
+  ].join('\n');
+  const found = parseReviewFindings(assistantText(log));
+  assert.equal(found?.length, 1);
+  assert.equal(found?.[0]?.file, 'a.ts');
+});
+
+test('several text events are joined, not just the first', () => {
+  const log = [
+    '{"type":"text","part":{"type":"text","text":"Here is what I found."}}',
+    '{"type":"text","part":{"type":"text","text":"{\\"findings\\": []}"}}',
+  ].join('\n');
+  assert.deepEqual(parseReviewFindings(assistantText(log)), []);
+});
+
+test('a log that is not an event stream is passed through untouched', () => {
+  // Two things depend on this: a harness that prints plainly, and an error line
+  // that must still reach the caller as "did not answer" rather than be
+  // swallowed into an empty string.
+  assert.equal(assistantText('{"findings": []}'), '{"findings": []}');
+  const err = 'error: {"name":"APIError","data":{"message":"model not available"}}';
+  assert.equal(assistantText(err), err);
+  assert.equal(parseReviewFindings(assistantText(err)), null);
+});
