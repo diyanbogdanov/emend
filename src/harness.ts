@@ -343,6 +343,15 @@ export interface OpenCodeOptions {
    * it makes one possible to pin at all.
    */
   providers?: Record<string, unknown>;
+  /**
+   * MCP servers this session may call, keyed by name.
+   *
+   * How `emend fix` drives its own loop: it starts an opencode session pointed
+   * at Emend's own MCP server, so the agent gets the deterministic primitives —
+   * bump, verify, prove the advisory cleared — as tools, and does the repairing
+   * itself with the edit rights it already has.
+   */
+  mcp?: Record<string, unknown>;
   /** `provider/model`, e.g. `openrouter/z-ai/glm-4.6`. Omitted means opencode's own default. */
   model?: string;
   /** An opencode agent definition, if one is configured for this work. */
@@ -512,6 +521,7 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
             }
           : {}),
         ...(options.providers ? { provider: options.providers } : {}),
+        ...(options.mcp ? { mcp: options.mcp } : {}),
         permission: {
           edit: options.readOnly ? 'deny' : 'allow',
           bash: options.allowBash ? 'allow' : 'deny',
@@ -609,4 +619,58 @@ export function summariseEvents(stdout: string): string {
     }
   }
   return lines.join('\n').trim();
+}
+
+/**
+ * An opencode session that drives Emend's own tools.
+ *
+ * The loop `runAgentRepair` used to be, moved to something built for it. Emend
+ * still owns everything deterministic — which version clears the advisory, did
+ * the build survive, did the vulnerable version actually leave the tree — and
+ * those arrive as tools the session cannot fake. What it brings that the deleted
+ * loop could not is the ability to read a file nobody thought to load, change
+ * its mind about which rung to try, and stop when it is done rather than after
+ * a fixed three attempts.
+ *
+ * `emendCommand` is how this process was started, so the child runs the same
+ * build rather than whatever `emend` happens to be on PATH.
+ */
+export function drivingHarness(options: {
+  model?: string;
+  emendCommand: string[];
+  timeoutMs?: number;
+}): OpenCodeHarness {
+  return openCodeHarness({
+    ...(options.model ? { model: options.model } : {}),
+    ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+    // It has to edit — repairing the break is the entire job it is here for.
+    allowBash: true,
+    mcp: {
+      emend: { type: 'local', command: options.emendCommand, enabled: true },
+    },
+  });
+}
+
+/** What to ask a driving session to do about one finding. */
+export function drivePrompt(input: { repo: string; findingId: string; pkg: string }): string {
+  return [
+    `Fix the ${input.pkg} finding \`${input.findingId}\` in the repository at ${input.repo}.`,
+    '',
+    'Use the emend MCP tools. They own everything deterministic and you should not reimplement any of it:',
+    '- `emend_fix_vulnerability` (or `emend_fix_package`) applies the bump in an isolated workspace and verifies it. It does NOT repair a build the bump breaks — that part is yours.',
+    '- `emend_verify` runs the repository\'s own typecheck and tests against the baseline.',
+    '- `emend_advisory_status` reads back which versions the lockfile actually resolves.',
+    '- `emend_impact` tells you what else references a symbol before you change its shape.',
+    '',
+    'Then, in the workspace the fix tool returns:',
+    '1. If the build broke, repair it. Change only what the compiler is complaining about.',
+    '2. Before changing the shape of anything the repository declares, call `emend_impact` on the file. Other callers break silently otherwise.',
+    '3. Call `emend_verify` until it passes. If three attempts do not converge, stop and say what is still broken rather than widening the change.',
+    '',
+    'Two things must BOTH hold before you call it done, and they are separate facts:',
+    `- the advisory cleared — confirm with \`emend_advisory_status\`, not by assuming the bump worked;`,
+    '- the build passes — confirm with `emend_verify`.',
+    '',
+    'A green build with the vulnerable version still installed is not a fix; it is the failure most easily mistaken for one. Report both facts plainly, including when one of them is false.',
+  ].join('\n');
 }

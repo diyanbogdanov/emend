@@ -12,6 +12,8 @@ import {
   openCodeHarness,
   revertHunks,
   type Harness,
+  drivingHarness,
+  drivePrompt,
 } from '../src/harness.ts';
 import { parseDiffHunks } from '../src/llm/agent.ts';
 import type { CallSite, SurfaceChange } from '../src/types.ts';
@@ -598,3 +600,37 @@ test('before the binary has been asked, no version-specific flag is assumed', as
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// Driving Emend's own tools
+// ---------------------------------------------------------------------------
+
+test('a driving session gets Emend’s tools and the rights to act on them', () => {
+  const h = drivingHarness({
+    model: 'openrouter/z-ai/glm-5.2',
+    emendCommand: ['node', '/x/cli.ts', 'mcp'],
+  });
+  const config = JSON.parse(String(h.envFor().OPENCODE_CONFIG_CONTENT)) as {
+    mcp: Record<string, { command: string[] }>;
+    permission: Record<string, string>;
+  };
+  assert.deepEqual(config.mcp['emend']?.command, ['node', '/x/cli.ts', 'mcp']);
+  // Repairing the break is the entire job it is here for; denying edit would
+  // leave it able to diagnose and unable to act.
+  assert.equal(config.permission['edit'], 'allow');
+});
+
+test('the drive prompt requires both facts, separately', () => {
+  // The property that survived every rewrite of this loop. An agent told only
+  // to get the build green will report a green build with the vulnerable
+  // version still installed as a fix.
+  const prompt = drivePrompt({ repo: '/r', findingId: 'abc123', pkg: 'axios' });
+  assert.match(prompt, /emend_advisory_status/);
+  assert.match(prompt, /emend_verify/);
+  assert.match(prompt, /not a fix/);
+});
+
+test('the drive prompt sends it to impact before reshaping a symbol', () => {
+  const prompt = drivePrompt({ repo: '/r', findingId: 'abc', pkg: 'axios' });
+  assert.match(prompt, /emend_impact/);
+});

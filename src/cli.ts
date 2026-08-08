@@ -18,11 +18,12 @@ import { reintroduced } from './remediate.ts';
 import { fixFinding, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
 import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
+import { assistantText } from './reviewharness.ts';
 import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
 import { serve as serveMcp } from './mcp.ts';
-import { openCodeHarness, type Harness } from './harness.ts';
+import { openCodeHarness, drivingHarness, drivePrompt, harnessPermitted, type Harness } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
 import { scanPackages, goSymbolRecord } from './osv.ts';
 import { goSymbolSites, symbolTargets } from './goreach.ts';
@@ -490,6 +491,46 @@ async function cmdFix(args: Args): Promise<number> {
       c.bold(`  ${finding.pkg} ${finding.fromVersion} → ${finding.toVersion}`) +
         c.dim('  (vulnerability)'),
     );
+    // `--drive` hands the whole loop to an opencode session pointed at Emend's
+    // own MCP server. Emend keeps the deterministic half as tools it cannot
+    // fake; the session does the repairing, which it can do because it has edit
+    // rights and a loop of its own. This is what `runAgentRepair` was, moved to
+    // something built for it.
+    if (args.flags.get('drive')) {
+      const permitted = harnessPermitted({ untrusted: args.flags.get('untrusted') === true });
+      if (!permitted.ok) {
+        console.log(c.yellow(`    declining to drive: ${permitted.reason}`));
+        continue;
+      }
+      const model = args.flags.get('drive');
+      const harness = drivingHarness({
+        ...(typeof model === 'string' ? { model } : {}),
+        emendCommand: [process.execPath, '--experimental-strip-types', fileURLToPath(import.meta.url), 'mcp'],
+      });
+      const availability = await harness.available();
+      if (!availability.ok) {
+        console.log(c.yellow(`    cannot drive: ${availability.reason}`));
+        continue;
+      }
+      console.log(c.dim(`    driving ${harness.id} against emend's own tools`));
+      const run = await harness.run(repoDir, {
+        instruction: drivePrompt({ repo: repoDir, findingId: finding.id, pkg: finding.pkg }),
+        failureOutput: '',
+      });
+      // Whatever it says, said plainly. There is no gate on this path — the
+      // session owns the workspace — so the log is the whole account of what
+      // happened and hiding any of it would be the wrong trade.
+      // `run.log` is summariseEvents, which keeps tool activity and drops the
+      // model's text. Here the text is the report, so read the raw stream.
+      const said = assistantText(run.raw ?? '').trim();
+      const summary = run.log.trim();
+      if (summary) console.log(c.dim(`    ${summary.slice(0, 2000)}`));
+      if (said) console.log(said.slice(0, 4000).split('\n').map((l) => `    ${l}`).join('\n'));
+      if (!run.ok) console.log(c.red(`    ${run.error ?? 'the session failed'}`));
+      if (run.ok && !said && !summary) console.log(c.yellow('    the session produced no output'));
+      continue;
+    }
+
     const vulnResult = await fixVulnerability(repoDir, finding, {
       keepWorkspace: args.flags.get('keep') === true,
       // Without this the repair loop is unreachable and a security bump that
