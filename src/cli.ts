@@ -124,15 +124,16 @@ function harnessFrom(args: Args): Harness | undefined {
  * `--review=<model>` pins one; bare `--review` uses the same model as the agent,
  * which is the open-weight default the provider preset carries.
  */
-function reviewLlmFrom(args: Args): LlmConfig | undefined {
+function reviewHarnessFrom(args: Args): Harness | undefined {
   const flag = args.flags.get('review');
   if (flag === undefined || flag === false) return undefined;
-  const resolved = resolveLlmConfig(typeof flag === 'string' ? { model: flag } : {});
-  if (!resolved.ok) {
-    console.log(c.yellow(`  review requested but unavailable: ${resolved.reason}`));
-    return undefined;
-  }
-  return resolved.config;
+  // A separate session from any repair harness, deliberately. A model reviewing
+  // its own work argues for it; one that never saw the reasoning has only the
+  // code. `--review=<provider/model>` pins the reviewer independently.
+  return openCodeHarness({
+    readOnly: true,
+    ...(typeof flag === 'string' ? { model: flag } : {}),
+  });
 }
 
 /**
@@ -467,7 +468,7 @@ async function cmdFix(args: Args): Promise<number> {
   }
 
   console.log('');
-  const reviewLlm = reviewLlmFrom(args);
+  const reviewHarness = reviewHarnessFrom(args);
   let anyVerified = false;
 
   // Each in its own workspace: getting one package out of the tree is a
@@ -484,7 +485,7 @@ async function cmdFix(args: Args): Promise<number> {
       // breaks the build is reported as unfixable by the one tool here that
       // knows how to fix it.
       useAgent: args.flags.get('agent') === true,
-      ...(reviewLlm ? { reviewLlm } : {}),
+      ...(reviewHarness ? { reviewHarness } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
     // Why this package is in the tree at all — the first thing a reviewer asks
@@ -627,12 +628,12 @@ async function cmdFix(args: Args): Promise<number> {
     }
 
     const harness = harnessFrom(args);
-    const reviewLlm = reviewLlmFrom(args);
+    const reviewHarness = reviewHarnessFrom(args);
     const result = await fixPackage(repoDir, findings, {
       keepWorkspace: args.flags.get('keep') === true,
       useAgent: args.flags.get('agent') === true,
       ...(harness ? { harness } : {}),
-      ...(reviewLlm ? { reviewLlm } : {}),
+      ...(reviewHarness ? { reviewHarness } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
 

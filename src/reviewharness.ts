@@ -1,6 +1,5 @@
+import type { Harness } from './harness.ts';
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -85,20 +84,25 @@ export function reviewPrompt(input: {
     '',
     'A separate pass already reviews the diff in isolation for casts, `any`, unnecessary optionality, added branching, duplicated edits, and wrapper indirection. Do NOT report those; they are covered.',
     '',
+    'Work these in order. A structural regression outranks every item below it, and naming a lesser one while a structural problem stands is a wasted review.',
+    '',
     'Report only what requires reading the repository rather than the diff:',
     '1. `structural` — feature-specific logic added to a module that is supposed to be general-purpose, or a change to a shared module that only one caller wanted. Name the caller and the module.',
     '2. `duplication` — a helper or constant this change introduced that already exists elsewhere under another name. Name both paths. This is the finding a diff-only reviewer can never make, so it is the most valuable thing you can return.',
     '3. `boundary` — an invariant this change now relies on that is enforced nowhere, or one enforced in a layer that does not own it.',
-    '4. `size` — a file this change pushed past the point where a reader can hold it, with no structural reason. Say the line count. Do not report a file that was already long and that this change barely touched.',
+    '4. `complexity` — ad-hoc branching or a special case this change added to a flow that did not have one, especially a "temporary" one. Spaghetti growth is the regression that compounds; name the flow and what a shape needing no branch would look like.',
+    '5. `atomicity` — work this change made sequential that is independent and could run together, or steps that can leave state half-applied if one throws. Both are only visible with the surrounding code in front of you.',
+    '6. `size` — a file this change pushed past the point where a reader can hold it, with no structural reason. Say the line count. Do not report a file that was already long and that this change barely touched.',
     '',
     'Rules:',
     '- You MUST open files before answering. A conclusion drawn from the path list alone is worthless: duplication and misplaced logic are only visible in the contents. Start with the files the diff touches and their neighbours in the tree.',
     '- Report nothing you have not opened the relevant files to confirm. A plausible guess costs a reader more than silence.',
     '- No cosmetic or naming notes. If you have no structural finding, say so — an empty list is a real and useful answer.',
     '- Prefer a small number of high-conviction findings over an exhaustive list.',
+    '- Verifying is not the bar. This change already compiles and its tests pass; that is why you are being asked. Ask what a demanding reviewer would refuse to merge, and prefer the move that DELETES complexity — reframe, extract, remove — over one that rearranges it.',
     '',
     'Output ONLY a JSON object, no prose and no markdown fences:',
-    '{"findings": [{"severity": "structural" | "duplication" | "boundary" | "size", "file": "<repo-relative path>", "what": "<the claim>", "why": "<why it matters here>"}]}',
+    '{"findings": [{"severity": "structural" | "duplication" | "boundary" | "complexity" | "atomicity" | "size", "file": "<repo-relative path>", "what": "<the claim>", "why": "<why it matters here>"}]}',
   ].join('\n');
 }
 
@@ -151,155 +155,86 @@ export interface HarnessReview {
 }
 
 /**
- * A reader over a real checkout, backed by git's own idea of what is in it.
+ * Review the diff in a fresh agent session, separate from the one that made it.
  *
- * `git ls-files` rather than a directory walk: it already excludes node_modules,
- * build output and anything gitignored, and it cannot wander outside the
- * repository. The list it returns is also the allowlist `reviewRepository` reads
- * against, so a model asking for `../../.ssh/id_rsa` gets told it is not a file
- * in this repository.
+ * Fresh is the point. A model reviewing its own work argues for it; a session
+ * that never saw the reasoning only has the code. The repair session and this
+ * one share nothing but the checkout.
+ *
+ * Read-only by instruction and by evidence, not by permission. The harness is
+ * told to change nothing, and `changedFiles` is compared before and after — a
+ * review that edited the workspace has its findings discarded, because a
+ * reviewer that rewrites the thing it is judging has stopped being one.
+ *
+ * The earlier version of this asked the model to simulate tool use in prose,
+ * and it answered without opening a file — twice, including after being told to
+ * read. That was the mechanism, not the model: given real tools through
+ * opencode, the same GLM 5.2 ran `ls`, read every source file, found both
+ * planted problems and two nobody planted, including a latent correctness bug.
  */
-export function repoReader(dir: string): RepoReader {
-  let cached: string[] | null = null;
-  return {
-    async list() {
-      if (cached) return cached;
-      const { stdout } = await execFileAsync('git', ['-C', dir, 'ls-files'], {
-        maxBuffer: 32 * 1024 * 1024,
-      }).catch(() => ({ stdout: '' }));
-      cached = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-      return cached;
-    },
-    async read(file) {
-      const listed = await this.list();
-      if (!listed.includes(file)) return null;
-      return readFile(path.join(dir, file), 'utf8').catch(() => null);
-    },
-  };
-}
-
-/** Read-only access to a checkout. There is deliberately no write counterpart. */
-export interface RepoReader {
-  /** Repo-relative source paths, excluding dependencies and build output. */
-  list(): Promise<string[]>;
-  /** File contents, or null when the path is not one `list` offered. */
-  read(file: string): Promise<string | null>;
-}
-
-const MAX_ROUNDS = 4;
-const MAX_BYTES = 120_000;
-const MAX_PER_ROUND = 6;
-
-/**
- * Review the repository with a model that can ask for files.
- *
- * Deliberately not a coding harness. opencode was the obvious tool and was the
- * wrong one twice over: it resolves its model from the host's own config — which
- * on a Copilot-authenticated machine silently meant Claude, contrary to running
- * on open weights — and its read-only mode had to be *verified afterwards*
- * because the permission was configuration rather than capability.
- *
- * Here read-only is structural. The loop offers `list` and `read` and there is no
- * write tool to deny, so there is nothing to verify and nothing to revert. It
- * also needs no tool-calling API: the model asks in text, which keeps it working
- * on any provider and any open-weight model.
- */
-export async function reviewRepository(
-  ask: (messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>) =>
-    Promise<{ ok: boolean; content: string; error?: string }>,
-  reader: RepoReader,
-  input: { pkg: string; fromVersion: string; toVersion: string; diff: string },
-  progress: (message: string) => void = () => {},
-): Promise<HarnessReview> {
-  const files = await reader.list();
-  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-    { role: 'system', content: reviewPrompt(input) },
-    {
-      role: 'user',
-      content: [
-        'Files in this repository:',
-        files.join('\n'),
-        '',
-        `Ask for what you need with lines of the form \`READ: <path>\` (at most ${MAX_PER_ROUND} per reply, nothing else in the message).`,
-        'When you have read enough, reply with the JSON object and nothing else.',
-      ].join('\n'),
-    },
-  ];
-
-  const transcript: string[] = [];
-  let budget = MAX_BYTES;
-  let hasRead = false;
-  let pushedBack = false;
-
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
-    const reply = await ask(messages);
-    if (!reply.ok) {
-      return { ok: false, findings: [], log: reply.error ?? 'the review model failed', reason: reply.error ?? 'the review model failed' };
-    }
-    transcript.push(reply.content);
-
-    const parsed = parseReviewFindings(reply.content);
-    // An answer given without opening a file is an answer about the file list.
-    // Measured live: GLM 5.2 concluded "no structural findings" on the first
-    // reply, having read nothing — and the repository it was judging contained a
-    // helper duplicating one in the diff and feature logic in a shared module.
-    // Neither is visible from a list of paths. One push-back, then take what
-    // comes: refusing repeatedly would turn a thin review into no review.
-    if (parsed !== null && !hasRead && !pushedBack && round < MAX_ROUNDS) {
-      pushedBack = true;
-      messages.push({ role: 'assistant', content: reply.content });
-      messages.push({
-        role: 'user',
-        content:
-          'You have not opened any files. Duplication and misplaced logic cannot be seen from a list of paths. ' +
-          'Read the files the diff touches and the ones nearest them in the tree, then answer.',
-      });
-      continue;
-    }
-    if (parsed !== null) {
-      progress(
-        parsed.length === 0
-          ? '  repo-wide review: no structural findings'
-          : `  repo-wide review: ${parsed.length} finding(s)`,
-      );
-      return { ok: true, findings: parsed, log: transcript.join('\n---\n') };
-    }
-
-    const wanted = [...reply.content.matchAll(/^\s*READ:\s*(\S+)\s*$/gm)]
-      .map((m) => m[1] ?? '')
-      .filter(Boolean)
-      .slice(0, MAX_PER_ROUND);
-    if (wanted.length === 0) break;
-
-    const delivered: string[] = [];
-    for (const file of wanted) {
-      // `list` is the allowlist. A path it never offered is not read, whatever
-      // the model asked for — the one place traversal could happen.
-      if (!files.includes(file)) {
-        delivered.push(`## ${file}\n(not a file in this repository)`);
-        continue;
-      }
-      const content = (await reader.read(file)) ?? '';
-      const slice = content.slice(0, Math.max(0, budget));
-      budget -= slice.length;
-      delivered.push(`## ${file}\n\`\`\`\n${slice}\n\`\`\``);
-    }
-    hasRead = true;
-    progress(`  repo-wide review: read ${wanted.length} file(s), round ${round}/${MAX_ROUNDS}`);
-    messages.push({ role: 'assistant', content: reply.content });
-    messages.push({
-      role: 'user',
-      content:
-        budget <= 0
-          ? `${delivered.join('\n\n')}\n\nThe reading budget is spent. Reply with the JSON object now.`
-          : delivered.join('\n\n'),
-    });
+export async function reviewSession(input: {
+  harness: Harness;
+  dir: string;
+  pkg: string;
+  fromVersion: string;
+  toVersion: string;
+  diff: string;
+  progress?: (message: string) => void;
+}): Promise<HarnessReview> {
+  const progress = input.progress ?? (() => {});
+  const available = await input.harness.available();
+  if (!available.ok) {
+    const reason = `review harness unavailable: ${available.reason ?? 'unknown'}`;
+    progress(`  ${reason}`);
+    return { ok: false, findings: [], log: '', reason };
   }
 
-  // Out of rounds without an answer. Not the same as finding nothing.
-  const reason = `the review did not produce a findings object within ${MAX_ROUNDS} rounds`;
-  progress(`  repo-wide review could not conclude: ${reason}`);
-  return { ok: false, findings: [], log: transcript.join('\n---\n'), reason };
+  const before = await changedFiles(input.dir);
+  const run = await input.harness.run(input.dir, {
+    instruction: reviewPrompt(input),
+    failureOutput: '',
+  });
+  const after = await changedFiles(input.dir);
+
+  if (after.join('\n') !== before.join('\n')) {
+    const reason = 'the review session modified the workspace; its findings are discarded';
+    progress(`  ${reason}`);
+    return { ok: false, findings: [], log: run.log, reason };
+  }
+
+  const findings = parseReviewFindings(run.log);
+  if (findings === null) {
+    // Exiting zero is not the same as answering. Measured: opencode failed to
+    // resolve a model, printed an APIError and exited zero, and an earlier
+    // version reported "no structural findings" — a clean bill of health from a
+    // review that never ran.
+    const line = run.log.split('\n').find((l) => l.trim()) ?? 'no output';
+    const reason = `the review returned no findings object: ${line.trim().slice(0, 200)}`;
+    progress(`  repo-wide review could not run: ${line.trim().slice(0, 120)}`);
+    return { ok: false, findings: [], log: run.log, reason };
+  }
+
+  progress(
+    findings.length === 0
+      ? '  repo-wide review: no structural findings'
+      : `  repo-wide review: ${findings.length} finding(s)`,
+  );
+  return { ok: true, findings, log: run.log };
+}
+
+/** Files the workspace reports as changed, so "it edited nothing" can be checked. */
+async function changedFiles(dir: string): Promise<string[]> {
+  const { stdout } = await execFileAsync('git', [
+    '-C', dir, 'status', '--porcelain', '--', '.', ':(exclude)**/node_modules/**',
+  ]).catch(() => ({ stdout: '' }));
+  return stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    // opencode writes `.omo/run-continuation/ses_*.json` on every run whatever
+    // the permissions say. Counting its own bookkeeping as an edit discarded a
+    // review in which no source file had changed at all.
+    .filter((line) => !line.slice(2).trim().replace(/^"|"$/g, '').startsWith('.omo/'));
 }
 
 /**

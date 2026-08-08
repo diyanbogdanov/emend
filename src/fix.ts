@@ -52,7 +52,7 @@ import {
 } from './llm/agent.ts';
 import { escalate, harnessPermitted, type Harness } from './harness.ts';
 import { analyseImpact, type SymbolImpact } from './impact.ts';
-import { reviewRepository, repoReader, type ReviewFinding } from './reviewharness.ts';
+import { reviewSession, type ReviewFinding } from './reviewharness.ts';
 import {
   remainingDeprecations,
   describeDeprecationGaps,
@@ -110,7 +110,7 @@ export interface FixOptions {
    * cannot — sharing one handle would make "read-only" a property of how it
    * happens to be called rather than of what was passed.
    */
-  reviewLlm?: LlmConfig;
+  reviewHarness?: Harness;
   onProgress?: (message: string) => void;
 }
 
@@ -1238,14 +1238,13 @@ export async function fixPackage(
     // that does not verify tells a reader about code that is not going to ship,
     // and spends the most expensive step in the pipeline doing it.
     let reviewNotes: ReviewFinding[] | undefined;
-    if (options.reviewLlm && verificationPassed(verification.outcome)) {
-      const cfg = options.reviewLlm;
-      const review = await reviewRepository(
-        (messages) => chat(cfg, messages, { maxTokens: cfg.maxTokens }),
-        repoReader(ws.dir),
-        { pkg, fromVersion, toVersion, diff },
+    if (options.reviewHarness && verificationPassed(verification.outcome)) {
+      const review = await reviewSession({
+        harness: options.reviewHarness,
+        dir: ws.dir,
+        pkg, fromVersion, toVersion, diff,
         progress,
-      );
+      });
       if (review.findings.length > 0) reviewNotes = review.findings;
     }
 
@@ -1681,19 +1680,17 @@ export async function fixVulnerability(
     // is still a change someone has to read, and the questions it cannot answer
     // from its own diff are identical.
     let reviewNotes: ReviewFinding[] | undefined;
-    if (options.reviewLlm && verificationPassed(verification.outcome)) {
-      const cfg = options.reviewLlm;
-      const review = await reviewRepository(
-        (messages) => chat(cfg, messages, { maxTokens: cfg.maxTokens }),
-        repoReader(ws.dir),
-        {
+    if (options.reviewHarness && verificationPassed(verification.outcome)) {
+      const review = await reviewSession({
+        harness: options.reviewHarness,
+        dir: ws.dir,
+       
           pkg: finding.pkg,
           fromVersion: finding.fromVersion,
           toVersion: worst ?? finding.toVersion,
           diff: await workspaceDiff(ws),
-        },
         progress,
-      );
+      });
       if (review.findings.length > 0) reviewNotes = review.findings;
     }
 
