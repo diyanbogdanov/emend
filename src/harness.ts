@@ -490,6 +490,18 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
   function envFor(): Record<string, string> {
     return {
       OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        // Measured: declaring `provider` alone is not enough — without
+        // `enabled_providers` opencode keeps resolving through whatever it has
+        // authenticated (github-copilot here) and rejects every model, including
+        // the open-weight ones it lists. The `{env:...}` template is opencode's
+        // own indirection, so the key never enters this JSON.
+        ...(options.model?.startsWith('openrouter/')
+          ? {
+              enabled_providers: ['openrouter'],
+              model: options.model,
+              provider: { openrouter: { options: { apiKey: '{env:OPENROUTER_API_KEY}' } } },
+            }
+          : {}),
         ...(options.providers ? { provider: options.providers } : {}),
         permission: {
           edit: options.readOnly ? 'deny' : 'allow',
