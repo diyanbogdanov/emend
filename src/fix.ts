@@ -34,6 +34,7 @@ import {
 } from './apply.ts';
 import { runPhase, compare, verificationPassed } from './verify.ts';
 import { resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
+import { chat } from './llm/client.ts';
 import {
   proposeEdits,
   proposeTightening,
@@ -51,7 +52,7 @@ import {
 } from './llm/agent.ts';
 import { escalate, harnessPermitted, type Harness } from './harness.ts';
 import { analyseImpact, type SymbolImpact } from './impact.ts';
-import { harnessReview, type ReviewFinding } from './reviewharness.ts';
+import { reviewRepository, repoReader, type ReviewFinding } from './reviewharness.ts';
 import {
   remainingDeprecations,
   describeDeprecationGaps,
@@ -109,7 +110,7 @@ export interface FixOptions {
    * cannot — sharing one handle would make "read-only" a property of how it
    * happens to be called rather than of what was passed.
    */
-  reviewHarness?: Harness;
+  reviewLlm?: LlmConfig;
   onProgress?: (message: string) => void;
 }
 
@@ -1237,17 +1238,15 @@ export async function fixPackage(
     // that does not verify tells a reader about code that is not going to ship,
     // and spends the most expensive step in the pipeline doing it.
     let reviewNotes: ReviewFinding[] | undefined;
-    if (options.reviewHarness && verificationPassed(verification.outcome)) {
-      const allowed = harnessPermitted({ untrusted: options.untrusted === true });
-      if (!allowed.ok) progress(`  repo-wide review skipped: ${allowed.reason}`);
-      else {
-        const review = await harnessReview({
-          harness: options.reviewHarness,
-          dir: ws.dir,
-          pkg, fromVersion, toVersion, diff, progress,
-        });
-        if (review.findings.length > 0) reviewNotes = review.findings;
-      }
+    if (options.reviewLlm && verificationPassed(verification.outcome)) {
+      const cfg = options.reviewLlm;
+      const review = await reviewRepository(
+        (messages) => chat(cfg, messages, { maxTokens: cfg.maxTokens }),
+        repoReader(ws.dir),
+        { pkg, fromVersion, toVersion, diff },
+        progress,
+      );
+      if (review.findings.length > 0) reviewNotes = review.findings;
     }
 
     const result: PackageFixResult = {
@@ -1682,21 +1681,20 @@ export async function fixVulnerability(
     // is still a change someone has to read, and the questions it cannot answer
     // from its own diff are identical.
     let reviewNotes: ReviewFinding[] | undefined;
-    if (options.reviewHarness && verificationPassed(verification.outcome)) {
-      const allowed = harnessPermitted({ untrusted });
-      if (!allowed.ok) progress(`  repo-wide review skipped: ${allowed.reason}`);
-      else {
-        const review = await harnessReview({
-          harness: options.reviewHarness,
-          dir: ws.dir,
+    if (options.reviewLlm && verificationPassed(verification.outcome)) {
+      const cfg = options.reviewLlm;
+      const review = await reviewRepository(
+        (messages) => chat(cfg, messages, { maxTokens: cfg.maxTokens }),
+        repoReader(ws.dir),
+        {
           pkg: finding.pkg,
           fromVersion: finding.fromVersion,
           toVersion: worst ?? finding.toVersion,
           diff: await workspaceDiff(ws),
-          progress,
-        });
-        if (review.findings.length > 0) reviewNotes = review.findings;
-      }
+        },
+        progress,
+      );
+      if (review.findings.length > 0) reviewNotes = review.findings;
     }
 
     const result: VulnFixResult = {

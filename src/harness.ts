@@ -47,20 +47,6 @@ export interface HarnessRun {
 /** An agent that works in a checkout, rather than proposing text edits. */
 export interface Harness {
   id: string;
-  /**
-   * Paths this harness writes for its own bookkeeping, which are not repository
-   * content.
-   *
-   * Declared by the harness rather than guessed by a caller, because only the
-   * harness knows what it leaves behind. Measured: opencode writes
-   * `.omo/run-continuation/ses_*.json` on every run, and `harnessReview`'s
-   * did-it-write check counted that as the harness editing the workspace and
-   * threw away a perfectly good review.
-   *
-   * This is an exclusion from a safety check, so it is deliberately narrow — a
-   * harness that declared `src/` here would switch the check off.
-   */
-  artifacts?: readonly string[];
   /** Whether this harness can run here. Checked before every run, never assumed. */
   available(): Promise<HarnessAvailability>;
   /** Work in `dir`. Whatever it leaves on disk is the result. */
@@ -520,8 +506,6 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
 
   return {
     id: 'opencode',
-    // Session state, written on every run whatever the permissions say.
-    artifacts: ['.omo/'],
     commandFor,
     envFor,
 

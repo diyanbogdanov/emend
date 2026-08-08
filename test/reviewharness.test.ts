@@ -1,119 +1,103 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import {
   reviewPrompt,
   parseReviewFindings,
   renderReviewFindings,
-  harnessReview,
+  reviewRepository,
+  type RepoReader,
 } from '../src/reviewharness.ts';
-import { openCodeHarness } from '../src/harness.ts';
-import type { Harness } from '../src/harness.ts';
 
-const run = promisify(execFile);
-
-async function repo(): Promise<{ dir: string; cleanup: () => void }> {
-  const dir = mkdtempSync(path.join(tmpdir(), 'emend-rh-'));
-  await run('git', ['init', '-b', 'main', dir]);
-  await run('git', ['-C', dir, 'config', 'user.email', 't@e.com']);
-  await run('git', ['-C', dir, 'config', 'user.name', 'T']);
-  writeFileSync(path.join(dir, 'a.ts'), 'export const a = 1;\n');
-  await run('git', ['-C', dir, 'add', '-A']);
-  await run('git', ['-C', dir, 'commit', '-m', 'base']);
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-}
-
-function fakeHarness(
-  over: Partial<{ log: string; ok: boolean; onRun: (dir: string) => void; artifacts: string[] }> = {},
-): Harness {
-  return {
-    id: 'fake',
-    artifacts: over.artifacts ?? [],
-    available: async () => ({ ok: true }),
-    run: async (dir: string) => {
-      over.onRun?.(dir);
-      return { ok: over.ok ?? true, log: over.log ?? '{"findings": []}' };
-    },
-  } as unknown as Harness;
-}
-
-const FINDINGS = `I read the repository. Here is my conclusion.
-{"findings": [
-  {"severity": "duplication", "file": "src/util/money.ts", "what": "centsToUnits duplicates formatAmount", "why": "two roundings drift"},
+const FINDINGS = `{"findings": [
+  {"severity": "duplication", "file": "src/util/money.ts", "what": "minorToMajor duplicates centsToUnits", "why": "two roundings drift"},
   {"severity": "size", "file": "src/client.ts", "what": "now 1240 lines", "why": "no reader holds it"}
 ]}`;
 
+function reader(files: Record<string, string>): RepoReader {
+  return {
+    list: async () => Object.keys(files),
+    read: async (f) => files[f] ?? null,
+  };
+}
+
+const REPO = { 'src/client.ts': 'export const a = 1;', 'src/util/money.ts': 'export const b = 2;' };
+const INPUT = { pkg: 'axios', fromVersion: '0.21.1', toVersion: '0.33.0', diff: '' };
+
 // ---------------------------------------------------------------------------
-// Read-only is the safety argument, so it is checked rather than assumed
+// Read-only by construction, not by permission
 // ---------------------------------------------------------------------------
 
-test('the review harness denies the edit tool', () => {
-  // The repair harness is gated by classifyHunks reading what it changed. This
-  // one changes nothing, so it needs no gate — but only if the permission it
-  // claims is the permission it gets.
-  const config = JSON.parse(openCodeHarness({ readOnly: true }).envFor()['OPENCODE_CONFIG_CONTENT'] ?? '{}');
-  assert.equal(config.permission.edit, 'deny');
-  // And the repair harness must not have been made read-only by the same change.
-  const repair = JSON.parse(openCodeHarness().envFor()['OPENCODE_CONFIG_CONTENT'] ?? '{}');
-  assert.equal(repair.permission.edit, 'allow');
+test('the model can read files it asks for', async () => {
+  const seen: string[] = [];
+  const result = await reviewRepository(
+    async (messages) => {
+      const last = messages[messages.length - 1]?.content ?? '';
+      if (last.includes('export const b = 2')) return { ok: true, content: FINDINGS };
+      seen.push('asked');
+      return { ok: true, content: 'READ: src/util/money.ts' };
+    },
+    reader(REPO), INPUT,
+  );
+  assert.equal(result.ok, true, result.reason ?? '');
+  assert.equal(result.findings.length, 2);
+  assert.equal(seen.length, 1, 'one round of reading, then the answer');
 });
 
-test('a read-only run that wrote anyway has its findings discarded', async () => {
-  // A tool that ignored its own configuration is not a tool whose conclusions
-  // are evidence. Reporting the findings and quietly reverting the write would
-  // trust a process that already disregarded one instruction.
-  const r = await repo();
-  try {
-    const result = await harnessReview({
-      harness: fakeHarness({
-        log: FINDINGS,
-        onRun: (dir) => writeFileSync(path.join(dir, 'sneaky.ts'), 'export const x = 1;\n'),
-      }),
-      dir: r.dir,
-      pkg: 'axios', fromVersion: '0.21.1', toVersion: '0.33.0', diff: '',
-    });
-    assert.equal(result.ok, false);
-    assert.deepEqual(result.findings, [], 'findings from a run that wrote are not reported');
-    assert.match(result.reason ?? '', /modified the workspace/);
-  } finally {
-    r.cleanup();
-  }
+test('a path the repository never offered is not read', async () => {
+  // `list` is the allowlist, and it is the only place traversal could happen.
+  // A model asking for something outside the checkout is told it does not exist
+  // rather than handed the file.
+  let delivered = '';
+  await reviewRepository(
+    async (messages) => {
+      const last = messages[messages.length - 1]?.content ?? '';
+      if (last.includes('not a file')) { delivered = last; return { ok: true, content: '{"findings": []}' }; }
+      return { ok: true, content: 'READ: ../../.ssh/id_rsa' };
+    },
+    reader(REPO), INPUT,
+  );
+  assert.match(delivered, /not a file in this repository/);
+  assert.ok(!delivered.includes('id_rsa\n```'), 'no contents were returned');
 });
 
-test('a clean read-only run reports what it found', async () => {
-  const r = await repo();
-  try {
-    const result = await harnessReview({
-      harness: fakeHarness({ log: FINDINGS }),
-      dir: r.dir,
-      pkg: 'axios', fromVersion: '0.21.1', toVersion: '0.33.0', diff: '',
-    });
-    assert.equal(result.ok, true);
-    assert.equal(result.findings.length, 2);
-  } finally {
-    r.cleanup();
-  }
+test('a review that never answers is not a clean review', async () => {
+  // The bug the opencode run exposed, in the shape this loop can reach it:
+  // rounds run out and no findings object arrives. That is "did not conclude",
+  // never "found nothing".
+  const result = await reviewRepository(
+    async () => ({ ok: true, content: 'READ: src/client.ts' }),
+    reader(REPO), INPUT,
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.reason ?? '', /did not produce a findings object/);
+  assert.deepEqual(result.findings, []);
 });
 
-test('a harness that failed reports why rather than "nothing found"', async () => {
-  // The distinction this codebase never blurs. An empty list from a failed run
-  // reads as a clean bill of health.
-  const r = await repo();
-  try {
-    const result = await harnessReview({
-      harness: fakeHarness({ ok: false, log: 'crashed' }),
-      dir: r.dir,
-      pkg: 'axios', fromVersion: '0.21.1', toVersion: '0.33.0', diff: '',
-    });
-    assert.equal(result.ok, false);
-    assert.ok((result.reason ?? '').length > 0);
-  } finally {
-    r.cleanup();
-  }
+test('a model error is reported, not swallowed as an empty result', async () => {
+  const result = await reviewRepository(
+    async () => ({ ok: false, content: '', error: 'model not available' }),
+    reader(REPO), INPUT,
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.reason ?? '', /model not available/);
+});
+
+test('the reading budget is bounded so a large repository cannot run away', async () => {
+  const big = Object.fromEntries(
+    Array.from({ length: 40 }, (_, i) => [`src/f${i}.ts`, 'x'.repeat(20_000)]),
+  );
+  let rounds = 0;
+  const result = await reviewRepository(
+    async (messages) => {
+      rounds++;
+      const last = messages[messages.length - 1]?.content ?? '';
+      if (last.includes('budget is spent')) return { ok: true, content: '{"findings": []}' };
+      return { ok: true, content: Object.keys(big).slice(0, 6).map((f) => `READ: ${f}`).join('\n') };
+    },
+    reader(big), INPUT,
+  );
+  assert.ok(rounds <= 4, `bounded rounds, got ${rounds}`);
+  assert.ok(result.ok || (result.reason ?? '').length > 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -156,20 +140,6 @@ test('a log with no findings object means "did not answer", not "found none"', (
   assert.deepEqual(parseReviewFindings('{"findings": []}'), []);
 });
 
-test('a harness that exited zero without answering is not a clean review', async () => {
-  const r = await repo();
-  try {
-    const result = await harnessReview({
-      harness: fakeHarness({ ok: true, log: 'error: {"name":"APIError","message":"model not available"}' }),
-      dir: r.dir,
-      pkg: 'axios', fromVersion: '0.21.1', toVersion: '0.33.0', diff: '',
-    });
-    assert.equal(result.ok, false, 'exiting zero is not the same as answering');
-    assert.match(result.reason ?? '', /no findings object/);
-  } finally {
-    r.cleanup();
-  }
-});
 
 // ---------------------------------------------------------------------------
 // What it asks for, and what it must not
@@ -211,54 +181,28 @@ test('structural findings are rendered before cosmetic ones', () => {
   assert.match(out, /nothing here was changed automatically/);
 });
 
-test('the harness’s own bookkeeping is not mistaken for an edit', async () => {
-  // Measured on the first live run: opencode writes `.omo/run-continuation/…`
-  // on every run whatever the permissions say, and the did-it-write check
-  // counted that as an edit and threw away a review in which no source file had
-  // changed at all. The read-only permission had worked perfectly.
-  const r = await repo();
-  try {
-    const result = await harnessReview({
-      harness: fakeHarness({
-        log: FINDINGS,
-        artifacts: ['.omo/'],
-        onRun: (dir) => {
-          mkdirSync(path.join(dir, '.omo', 'run-continuation'), { recursive: true });
-          writeFileSync(path.join(dir, '.omo', 'run-continuation', 'ses_1.json'), '{}');
-        },
-      }),
-      dir: r.dir,
-      pkg: 'axios', fromVersion: '0.21.1', toVersion: '0.33.0', diff: '',
-    });
-    assert.equal(result.ok, true, result.reason ?? '');
-    assert.equal(result.findings.length, 2);
-  } finally {
-    r.cleanup();
-  }
+
+
+test('an answer given without opening a file is pushed back once', async () => {
+  // Measured live: GLM 5.2 concluded "no structural findings" on its first
+  // reply, having read nothing — while judging a repository whose bait was a
+  // helper duplicating one in the diff and feature logic in a shared module.
+  // Neither is visible from a list of paths.
+  const replies = ['{"findings": []}', 'READ: src/util/money.ts', FINDINGS];
+  let i = 0;
+  const result = await reviewRepository(async () => ({ ok: true, content: replies[i++] ?? '' }), reader(REPO), INPUT);
+  assert.equal(result.ok, true, result.reason ?? '');
+  assert.equal(result.findings.length, 2, 'the answer after reading is the one taken');
+  assert.equal(i, 3, 'pushed back once, then read, then answered');
 });
 
-test('declaring artifacts does not excuse writing source', async () => {
-  // The exclusion is a narrow carve-out for a tool's own state, not an amnesty.
-  // A harness that declares an artifact directory and then edits the repository
-  // must still be refused, or the check is decorative.
-  const r = await repo();
-  try {
-    const result = await harnessReview({
-      harness: fakeHarness({
-        log: FINDINGS,
-        artifacts: ['.omo/'],
-        onRun: (dir) => {
-          mkdirSync(path.join(dir, '.omo'), { recursive: true });
-          writeFileSync(path.join(dir, '.omo', 'ses.json'), '{}');
-          writeFileSync(path.join(dir, 'a.ts'), 'export const a = 2;\n');
-        },
-      }),
-      dir: r.dir,
-      pkg: 'axios', fromVersion: '0.21.1', toVersion: '0.33.0', diff: '',
-    });
-    assert.equal(result.ok, false);
-    assert.deepEqual(result.findings, []);
-  } finally {
-    r.cleanup();
-  }
+test('the push-back happens once, not until the rounds run out', async () => {
+  // Refusing repeatedly turns a thin review into no review, which is worse.
+  let calls = 0;
+  const result = await reviewRepository(
+    async () => { calls++; return { ok: true, content: '{"findings": []}' }; },
+    reader(REPO), INPUT,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(calls, 2, 'one push-back, then the answer is accepted');
 });

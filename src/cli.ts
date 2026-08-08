@@ -20,7 +20,7 @@ import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
 import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
-import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
+import { PROVIDERS, resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
 import { openCodeHarness, type Harness } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
 import { scanPackages, goSymbolRecord } from './osv.ts';
@@ -111,22 +111,27 @@ function harnessFrom(args: Args): Harness | undefined {
 }
 
 /**
- * The read-only harness for the repo-wide review, when one was asked for.
+ * The read-only repo-wide review, when one was asked for.
  *
- * `--review` rather than sharing `--harness`, because the two are different
- * decisions. Escalating a repair means letting an agent write to the workspace
- * to get the build green; reviewing means letting one read the repository to
- * form an opinion. A user may well want the second without the first, and the
- * read-only permission is the review's entire safety argument — inheriting a
- * handle configured to write would make it a matter of how it is called.
+ * A model with read access to the checkout, not a coding harness. opencode was
+ * the obvious choice and was wrong twice: it resolves its model from the host's
+ * own config — on a Copilot-authenticated machine that silently meant Claude,
+ * contrary to running on open weights — and its read-only mode was configuration
+ * to be verified afterwards rather than a capability it lacked. Here there is no
+ * write tool to deny.
+ *
+ * `--review=<model>` pins one; bare `--review` uses the same model as the agent,
+ * which is the open-weight default the provider preset carries.
  */
-function reviewHarnessFrom(args: Args): Harness | undefined {
+function reviewLlmFrom(args: Args): LlmConfig | undefined {
   const flag = args.flags.get('review');
   if (flag === undefined || flag === false) return undefined;
-  return openCodeHarness({
-    readOnly: true,
-    ...(typeof flag === 'string' ? { model: flag } : {}),
-  });
+  const resolved = resolveLlmConfig(typeof flag === 'string' ? { model: flag } : {});
+  if (!resolved.ok) {
+    console.log(c.yellow(`  review requested but unavailable: ${resolved.reason}`));
+    return undefined;
+  }
+  return resolved.config;
 }
 
 /**
@@ -461,6 +466,7 @@ async function cmdFix(args: Args): Promise<number> {
   }
 
   console.log('');
+  const reviewLlm = reviewLlmFrom(args);
   let anyVerified = false;
 
   // Each in its own workspace: getting one package out of the tree is a
@@ -477,7 +483,7 @@ async function cmdFix(args: Args): Promise<number> {
       // breaks the build is reported as unfixable by the one tool here that
       // knows how to fix it.
       useAgent: args.flags.get('agent') === true,
-      ...(reviewHarnessFrom(args) ? { reviewHarness: reviewHarnessFrom(args) } : {}),
+      ...(reviewLlm ? { reviewLlm } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
     // Why this package is in the tree at all — the first thing a reviewer asks
@@ -620,12 +626,12 @@ async function cmdFix(args: Args): Promise<number> {
     }
 
     const harness = harnessFrom(args);
-    const reviewHarness = reviewHarnessFrom(args);
+    const reviewLlm = reviewLlmFrom(args);
     const result = await fixPackage(repoDir, findings, {
       keepWorkspace: args.flags.get('keep') === true,
       useAgent: args.flags.get('agent') === true,
       ...(harness ? { harness } : {}),
-      ...(reviewHarness ? { reviewHarness } : {}),
+      ...(reviewLlm ? { reviewLlm } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
 
@@ -1122,7 +1128,7 @@ ${c.bold('COMMANDS')}
                     build red, pinning provider/model if given. Every hunk it
                     writes is held to the same evidence rule; anything the
                     failure did not ask for is reverted. Slower and costlier.
-    --review[=m]    After a migration verifies, let a READ-ONLY opencode read the
+    --review[=m]    After a migration verifies, let a READ-ONLY model read the
                     repository and report what the diff alone cannot show:
                     duplication against code it never loaded, a shared module a
                     caller leaked into, a file this change made unreadable. It
