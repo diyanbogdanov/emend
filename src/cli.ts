@@ -132,6 +132,17 @@ function reviewHarnessFrom(args: Args): Harness | undefined {
   // code. `--review=<provider/model>` pins the reviewer independently.
   return openCodeHarness({
     readOnly: true,
+    // Bash, but no edit. Measured: the review found nothing until it could run
+    // `ls` — which was the first thing the successful direct run did. Told to
+    // open files but given no way to discover which exist, it has only the diff,
+    // and duplication is exactly what the diff cannot show.
+    //
+    // The read-only guarantee does not rest on this permission. It rests on
+    // comparing the workspace before and after and discarding the findings of a
+    // session that changed anything — evidence rather than configuration. What
+    // does widen is reach outside the checkout: `webfetch` is denied but bash
+    // could still curl, so this path stays blocked for untrusted repositories.
+    allowBash: true,
     ...(typeof flag === 'string' ? { model: flag } : {}),
   });
 }
