@@ -87,3 +87,16 @@ test('a tool result is JSON the agent can parse, not prose', async () => {
   assert.equal(parsed['pkg'], 'typescript');
   assert.ok(Array.isArray(parsed['installed']));
 });
+
+test('fix_vulnerability does not repair unless asked', async () => {
+  // The division the whole inversion rests on. Emend bumps, verifies, and proves
+  // the advisory cleared; repairing a break the bump caused belongs to the caller,
+  // which has edit rights and a loop of its own. Defaulting this on would mean one
+  // model calling a function that calls another model — two loops, not a cleaner
+  // path.
+  const tool = tools().find((t) => t.name === 'fix_vulnerability');
+  const props = (tool?.inputSchema as { properties: Record<string, unknown> }).properties;
+  assert.ok('repair' in props, 'the caller must be able to opt in');
+  assert.ok(!((tool?.inputSchema as { required: string[] }).required ?? []).includes('repair'));
+  assert.match(tool?.description ?? '', /does NOT repair/);
+});

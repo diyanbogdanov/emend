@@ -134,16 +134,24 @@ export function tools(): ToolDef[] {
     {
       name: 'fix_vulnerability',
       description:
-        'Take one vulnerability finding through the full remediation: isolated workspace, baseline, the ' +
-        'bump (direct, then parents, then an override), and verification. Reports whether the advisory ' +
-        'actually cleared SEPARATELY from whether the build passed. Both must hold; a green build with ' +
-        'the vulnerable version still installed is not a fix.',
+        'Take one vulnerability finding through the deterministic remediation: isolated workspace, ' +
+        'baseline, the bump (direct, then parents, then an override), and verification. Reports whether ' +
+        'the advisory actually cleared SEPARATELY from whether the build passed. Both must hold; a green ' +
+        'build with the vulnerable version still installed is not a fix. ' +
+        'It does NOT repair a build the bump broke — that is yours to do, in the workspace it returns. ' +
+        'Pass repair:true only to fall back to Emend\'s own loop.',
       inputSchema: {
         type: 'object',
         properties: {
           repo: { type: 'string' },
           finding_id: { type: 'string', description: 'An id from scan' },
           keep_workspace: { type: 'boolean' },
+          repair: {
+            type: 'boolean',
+            description:
+              'Default false. Emend bumps and verifies; repairing a break the bump caused is the ' +
+              'caller\'s job, which is the point of driving this from an agent that can edit.',
+          },
         },
         required: ['repo', 'finding_id'],
       },
@@ -151,6 +159,10 @@ export function tools(): ToolDef[] {
         const repo = str(args, 'repo');
         const result = await fixVulnerability(repo, await findingById(repo, str(args, 'finding_id')), {
           keepWorkspace: args['keep_workspace'] === true,
+          // Off unless asked for. Under this architecture the caller owns repair
+          // — it has edit rights and a loop of its own, and running both means
+          // one model calling a function that calls another model.
+          useAgent: args['repair'] === true,
         });
         return {
           advisory_cleared: result.resolved,
