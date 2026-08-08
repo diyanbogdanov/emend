@@ -21,6 +21,7 @@ import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr
 import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
+import { serve as serveMcp } from './mcp.ts';
 import { openCodeHarness, type Harness } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
 import { scanPackages, goSymbolRecord } from './osv.ts';
@@ -1191,7 +1192,11 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   try {
     switch (args.command) {
-      case 'scan':
+    case 'mcp':
+      // Speaks JSON-RPC on stdout, so nothing else may write there.
+      await serveMcp();
+      break;
+    case 'scan':
         process.exitCode = await cmdScan(args);
         break;
       case 'fix':
