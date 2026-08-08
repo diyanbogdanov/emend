@@ -39,17 +39,29 @@ export interface HarnessTask {
 
 export interface HarnessRun {
   ok: boolean;
-  /** A summary of what the harness DID, for the PR body and for debugging. */
+  /**
+   * Everything the harness printed. Lossless, and the default for that reason.
+   *
+   * This field used to hold the summary below, and it cost three separate
+   * debugging rounds: a review session whose entire output was a findings
+   * object, and a driving session whose output was its report, both summarised
+   * to nothing and reported as having produced no output at all. `summarise`
+   * keeps tool activity and errors, which is the right thing for a PR body and
+   * silently the wrong thing for everyone reading what the model *said*.
+   *
+   * Lossless by default, summarising by explicit choice.
+   */
   log: string;
   /**
-   * Everything the harness printed, unsummarised.
+   * Which tools ran and what failed — for the PR body, where the log is noise.
    *
-   * The repair path wants the summary — which tools ran, what failed. A review
-   * wants what the model *said*, and `summariseEvents` drops that: it keeps tool
-   * activity and errors, so a session whose entire output was a findings object
-   * summarised to nothing and was reported as having produced no output at all.
+   * Optional, and falling back to `log` rather than to nothing. A harness with
+   * no summarising step simply has neither, and a consumer that forgets this
+   * field gets too much output instead of none — which is the direction a
+   * mistake here should fail, given the previous arrangement failed the other
+   * way three times.
    */
-  raw?: string;
+  summary?: string;
   error?: string;
 }
 
@@ -261,14 +273,14 @@ export async function escalate(
       diff = await diffFor(dir, [GATE_CONTEXT]);
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
-      return refused(`cannot read what ${harness.id} changed — ${why}`, run.log);
+      return refused(`cannot read what ${harness.id} changed — ${why}`, (run.summary ?? run.log));
     }
 
     if (diff.trim() === '') {
       // An empty diff after an escalation is not a repair, and reporting it as
       // one is how a run that did nothing gets recorded as a run that worked.
       const why = run.ok ? `${harness.id} changed nothing` : `${harness.id} changed nothing — ${run.error ?? 'no reason given'}`;
-      return refused(why, run.log);
+      return refused(why, (run.summary ?? run.log));
     }
 
     const classified = classifyHunks(
@@ -288,7 +300,7 @@ export async function escalate(
 
     const reverted = await revertHunks(dir, diff, drop.map((c) => c.hunk));
     if (reverted.error) {
-      return refused(`could not revert ${drop.length} unrequested hunk(s) — ${reverted.error}`, run.log);
+      return refused(`could not revert ${drop.length} unrequested hunk(s) — ${reverted.error}`, (run.summary ?? run.log));
     }
 
     // Re-read at full context, so the reported diff is both what is actually on
@@ -303,7 +315,7 @@ export async function escalate(
 
     return {
       ok: true,
-      log: run.log,
+      log: run.summary ?? run.log,
       diff: final,
       keptHunks: classified.length - reverted.reverted,
       revertedHunks: drop,
@@ -576,20 +588,20 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
 
       // opencode sets a non-zero exit imperatively on error, so stdout still
       // holds the events that say what went wrong either way.
-      const log = summariseEvents(result.stdout);
-      const raw = result.stdout;
+      const log = result.stdout;
+      const summary = summariseEvents(result.stdout);
       if (result.timedOut) {
-        return { ok: false, log, raw, error: `opencode timed out after ${Math.round(timeout / 1000)}s` };
+        return { ok: false, log, summary, error: `opencode timed out after ${Math.round(timeout / 1000)}s` };
       }
       if (result.code !== 0) {
         return {
           ok: false,
           log,
-          raw,
+          summary,
           error: result.stderr.trim() || `opencode exited ${result.code}`,
         };
       }
-      return { ok: true, log: log || result.stderr.trim(), raw };
+      return { ok: true, log: log || result.stderr.trim(), summary };
     },
   };
 }

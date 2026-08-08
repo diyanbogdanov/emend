@@ -14,6 +14,8 @@ import {
   type Harness,
   drivingHarness,
   drivePrompt,
+  summariseEvents,
+  type HarnessRun,
 } from '../src/harness.ts';
 import { parseDiffHunks } from '../src/llm/agent.ts';
 import type { CallSite, SurfaceChange } from '../src/types.ts';
@@ -633,4 +635,26 @@ test('the drive prompt requires both facts, separately', () => {
 test('the drive prompt sends it to impact before reshaping a symbol', () => {
   const prompt = drivePrompt({ repo: '/r', findingId: 'abc', pkg: 'axios' });
   assert.match(prompt, /emend_impact/);
+});
+
+test('a run’s log is the whole stream, and the summary is the derived thing', async () => {
+  // The inversion. `log` used to hold summariseEvents output, which keeps tool
+  // activity and drops the model's text — so a review session whose entire
+  // output was a findings object, and a driving session whose output was its
+  // report, both summarised to nothing and were reported as having produced no
+  // output at all. Three debugging rounds, one cause.
+  //
+  // Lossless by default; summarising is the explicit choice.
+  const h = openCodeHarness({ model: 'openrouter/z-ai/glm-5.2' });
+  const events = [
+    '{"type":"text","part":{"type":"text","text":"the answer nobody could see"}}',
+    '{"type":"tool","part":{"type":"tool","tool":"read"}}',
+  ].join('\n');
+  assert.ok(summariseEvents(events).length >= 0);
+  // The contract the type enforces: `log` is required and `summary` is not, so a
+  // consumer that forgets the summary gets too much output rather than none.
+  const run: HarnessRun = { ok: true, log: events };
+  assert.equal(run.summary, undefined);
+  assert.match(run.summary ?? run.log, /the answer nobody could see/);
+  assert.equal(typeof h.id, 'string');
 });

@@ -520,10 +520,8 @@ async function cmdFix(args: Args): Promise<number> {
       // Whatever it says, said plainly. There is no gate on this path — the
       // session owns the workspace — so the log is the whole account of what
       // happened and hiding any of it would be the wrong trade.
-      // `run.log` is summariseEvents, which keeps tool activity and drops the
-      // model's text. Here the text is the report, so read the raw stream.
-      const said = assistantText(run.raw ?? '').trim();
-      const summary = run.log.trim();
+      const said = assistantText(run.log).trim();
+      const summary = (run.summary ?? "").trim();
       if (summary) console.log(c.dim(`    ${summary.slice(0, 2000)}`));
       if (said) console.log(said.slice(0, 4000).split('\n').map((l) => `    ${l}`).join('\n'));
       if (!run.ok) console.log(c.red(`    ${run.error ?? 'the session failed'}`));

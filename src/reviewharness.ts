@@ -204,15 +204,13 @@ export async function reviewSession(input: {
     return { ok: false, findings: [], log: run.log, reason };
   }
 
-  // The raw output, not the summary: `summariseEvents` keeps tool activity and
-  // drops the model's text, which for a review is the entire answer.
-  const findings = parseReviewFindings(assistantText(run.raw ?? run.log));
+  const findings = parseReviewFindings(assistantText(run.log));
   if (findings === null) {
     // Exiting zero is not the same as answering. Measured: opencode failed to
     // resolve a model, printed an APIError and exited zero, and an earlier
     // version reported "no structural findings" — a clean bill of health from a
     // review that never ran.
-    const line = (run.raw ?? run.log).split('\n').find((l) => l.trim()) ?? 'no output';
+    const line = run.log.split('\n').find((l) => l.trim()) ?? 'no output';
     const reason = `the review returned no findings object: ${line.trim().slice(0, 200)}`;
     progress(`  repo-wide review could not run: ${line.trim().slice(0, 120)}`);
     return { ok: false, findings: [], log: run.log, reason };
