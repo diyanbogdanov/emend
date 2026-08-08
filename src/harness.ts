@@ -337,6 +337,17 @@ export interface OpenCodeOptions {
    * `harnessReview` verifies the workspace is unchanged afterwards.
    */
   readOnly?: boolean;
+  /**
+   * Providers declared inline, so the model is Emend's choice rather than
+   * whatever the host's opencode happens to have configured.
+   *
+   * Without this the harness inherits the user's config, and on a machine whose
+   * opencode authenticates through GitHub Copilot that silently means a Claude
+   * or GPT model — measured, and contrary to running on open weights. Declaring
+   * the provider here does not override a `--harness=<model>` the user pinned;
+   * it makes one possible to pin at all.
+   */
+  providers?: Record<string, unknown>;
   /** `provider/model`, e.g. `openrouter/z-ai/glm-4.6`. Omitted means opencode's own default. */
   model?: string;
   /** An opencode agent definition, if one is configured for this work. */
@@ -493,6 +504,7 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
   function envFor(): Record<string, string> {
     return {
       OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        ...(options.providers ? { provider: options.providers } : {}),
         permission: {
           edit: options.readOnly ? 'deny' : 'allow',
           bash: options.allowBash ? 'allow' : 'deny',
