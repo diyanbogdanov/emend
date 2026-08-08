@@ -111,6 +111,25 @@ function harnessFrom(args: Args): Harness | undefined {
 }
 
 /**
+ * The read-only harness for the repo-wide review, when one was asked for.
+ *
+ * `--review` rather than sharing `--harness`, because the two are different
+ * decisions. Escalating a repair means letting an agent write to the workspace
+ * to get the build green; reviewing means letting one read the repository to
+ * form an opinion. A user may well want the second without the first, and the
+ * read-only permission is the review's entire safety argument — inheriting a
+ * handle configured to write would make it a matter of how it is called.
+ */
+function reviewHarnessFrom(args: Args): Harness | undefined {
+  const flag = args.flags.get('review');
+  if (flag === undefined || flag === false) return undefined;
+  return openCodeHarness({
+    readOnly: true,
+    ...(typeof flag === 'string' ? { model: flag } : {}),
+  });
+}
+
+/**
  * Contract checking, when it was asked for.
  *
  * Returns the resolver rather than a boolean, because handing over the thing
@@ -600,10 +619,12 @@ async function cmdFix(args: Args): Promise<number> {
     }
 
     const harness = harnessFrom(args);
+    const reviewHarness = reviewHarnessFrom(args);
     const result = await fixPackage(repoDir, findings, {
       keepWorkspace: args.flags.get('keep') === true,
       useAgent: args.flags.get('agent') === true,
       ...(harness ? { harness } : {}),
+      ...(reviewHarness ? { reviewHarness } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
 
@@ -1100,6 +1121,11 @@ ${c.bold('COMMANDS')}
                     build red, pinning provider/model if given. Every hunk it
                     writes is held to the same evidence rule; anything the
                     failure did not ask for is reverted. Slower and costlier.
+    --review[=m]    After a migration verifies, let a READ-ONLY opencode read the
+                    repository and report what the diff alone cannot show:
+                    duplication against code it never loaded, a shared module a
+                    caller leaked into, a file this change made unreadable. It
+                    changes nothing; the notes go in the pull request body.
     --keep          Leave the workspace on disk for inspection
 
   models          List models your configured LLM provider serves.

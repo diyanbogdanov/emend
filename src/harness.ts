@@ -313,6 +313,16 @@ export async function escalate(
 
 export interface OpenCodeOptions {
   bin?: string;
+  /**
+   * Deny the edit tool, making the run advisory.
+   *
+   * The review harness uses this. Its output is findings for a human, not a
+   * diff, so the write capability buys nothing and costs the whole gate problem:
+   * every other harness run is judged by `classifyHunks` reading what it changed,
+   * and a run that changes nothing has nothing to judge. Not trusted on its own —
+   * `harnessReview` verifies the workspace is unchanged afterwards.
+   */
+  readOnly?: boolean;
   /** `provider/model`, e.g. `openrouter/z-ai/glm-4.6`. Omitted means opencode's own default. */
   model?: string;
   /** An opencode agent definition, if one is configured for this work. */
@@ -470,7 +480,7 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
     return {
       OPENCODE_CONFIG_CONTENT: JSON.stringify({
         permission: {
-          edit: 'allow',
+          edit: options.readOnly ? 'deny' : 'allow',
           bash: options.allowBash ? 'allow' : 'deny',
           // Everything else the harness does lands in a diff that gets judged. A
           // fetch does not — it is the one action leaving no artefact for the

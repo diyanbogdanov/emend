@@ -12,6 +12,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { renderReviewFindings } from './reviewharness.ts';
 import type { FixResult } from './fix.ts';
 import type { CommandResult } from './types.ts';
 
@@ -251,6 +252,15 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
     for (const f of result.failedEdits) {
       lines.push(`- \`${f.file}${f.line ? `:${f.line}` : ''}\` — ${f.reason}`);
     }
+  }
+
+  // Advisory notes from the read-only repo-wide pass. Placed before the harness
+  // section because they are about the change rather than about how it was
+  // produced, and a reviewer reads for the former.
+  const notes = renderReviewFindings(result.reviewNotes ?? []);
+  if (notes) {
+    lines.push('');
+    lines.push(notes);
   }
 
   // What a harness did, when one was reached for. Collected all along and never

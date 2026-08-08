@@ -51,6 +51,7 @@ import {
 } from './llm/agent.ts';
 import { escalate, harnessPermitted, type Harness } from './harness.ts';
 import { analyseImpact, type SymbolImpact } from './impact.ts';
+import { harnessReview, type ReviewFinding } from './reviewharness.ts';
 import {
   remainingDeprecations,
   describeDeprecationGaps,
@@ -100,6 +101,15 @@ export interface FixOptions {
    * do — going and reading the CI config, the Dockerfile, the build script.
    */
   harness?: Harness;
+  /**
+   * A read-only harness for the repo-wide review pass.
+   *
+   * Deliberately a second field rather than reusing `harness`. That one is
+   * configured to write, and the review's entire safety argument is that it
+   * cannot — sharing one handle would make "read-only" a property of how it
+   * happens to be called rather than of what was passed.
+   */
+  reviewHarness?: Harness;
   onProgress?: (message: string) => void;
 }
 
@@ -162,6 +172,15 @@ export interface FixResult {
   };
   /** Populated when the run escalated to a harness. */
   harness?: HarnessEscalation;
+  /**
+   * Repo-wide review notes, when a harness was available to produce them.
+   *
+   * Advisory and read-only by construction: nothing here changed the diff. They
+   * answer what the structured review structurally cannot — duplication against
+   * code it never loaded, a shared module a caller leaked into — and so they are
+   * reported to a human rather than acted on.
+   */
+  reviewNotes?: ReviewFinding[];
 }
 
 /**
@@ -1213,6 +1232,24 @@ export async function fixPackage(
     }
 
     const diff = await workspaceDiff(ws);
+
+    // The repo-wide review. Only on a migration that stands: reviewing a diff
+    // that does not verify tells a reader about code that is not going to ship,
+    // and spends the most expensive step in the pipeline doing it.
+    let reviewNotes: ReviewFinding[] | undefined;
+    if (options.reviewHarness && verificationPassed(verification.outcome)) {
+      const allowed = harnessPermitted({ untrusted: options.untrusted === true });
+      if (!allowed.ok) progress(`  repo-wide review skipped: ${allowed.reason}`);
+      else {
+        const review = await harnessReview({
+          harness: options.reviewHarness,
+          dir: ws.dir,
+          pkg, fromVersion, toVersion, diff, progress,
+        });
+        if (review.findings.length > 0) reviewNotes = review.findings;
+      }
+    }
+
     const result: PackageFixResult = {
       pkg,
       fromVersion,
@@ -1229,6 +1266,7 @@ export async function fixPackage(
       workspaceMode: ws.mode,
       ...(agentRecord ? { agent: agentRecord } : {}),
       ...(harnessRecord ? { harness: harnessRecord } : {}),
+      ...(reviewNotes ? { reviewNotes } : {}),
     };
 
     if (!options.keepWorkspace) {
