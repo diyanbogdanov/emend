@@ -477,6 +477,7 @@ async function cmdFix(args: Args): Promise<number> {
       // breaks the build is reported as unfixable by the one tool here that
       // knows how to fix it.
       useAgent: args.flags.get('agent') === true,
+      ...(reviewHarnessFrom(args) ? { reviewHarness: reviewHarnessFrom(args) } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
     // Why this package is in the tree at all — the first thing a reviewer asks

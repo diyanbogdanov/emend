@@ -110,7 +110,7 @@ export function reviewPrompt(input: {
  * not carry all four fields with a known severity is dropped, because a partial
  * finding rendered into a PR body reads as authoritative regardless.
  */
-export function parseReviewFindings(log: string): ReviewFinding[] {
+export function parseReviewFindings(log: string): ReviewFinding[] | null {
   const candidates = [...log.matchAll(/\{[\s\S]*?"findings"[\s\S]*?\]\s*\}/g)].map((m) => m[0]);
   for (const raw of candidates.reverse()) {
     let parsed: unknown;
@@ -134,7 +134,17 @@ export function parseReviewFindings(log: string): ReviewFinding[] {
       );
     });
   }
-  return [];
+  // No findings object at all — the harness did not answer the question. That is
+  // NOT an empty result. Measured live: opencode failed to resolve a model,
+  // printed an APIError, exited zero, and this reported "no structural findings"
+  // — a clean bill of health from a review that never ran.
+  return null;
+}
+
+/** The most useful 200 characters of a harness log, for a one-line reason. */
+function firstLine(log: string): string {
+  const line = log.split('\n').find((l) => l.trim().length > 0) ?? 'no output';
+  return line.trim().slice(0, 200);
 }
 
 export interface HarnessReview {
@@ -145,12 +155,27 @@ export interface HarnessReview {
   reason?: string;
 }
 
-/** Files the workspace reports as changed, so "it edited nothing" can be checked. */
-async function changedFiles(dir: string): Promise<string[]> {
+/**
+ * Files the workspace reports as changed, so "it edited nothing" can be checked.
+ *
+ * The harness's own bookkeeping is excluded, and only what the harness itself
+ * declares. Measured live: opencode writes `.omo/run-continuation/ses_*.json` on
+ * every run regardless of permissions, and counting that as an edit threw away a
+ * review in which nothing else had changed at all.
+ */
+async function changedFiles(dir: string, artifacts: readonly string[] = []): Promise<string[]> {
   const { stdout } = await execFileAsync('git', [
     '-C', dir, 'status', '--porcelain', '--', '.', ':(exclude)**/node_modules/**',
   ]).catch(() => ({ stdout: '' }));
-  return stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+  return stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    // Porcelain is `XY path`; the path starts after the two status columns.
+    .filter((line) => {
+      const file = line.slice(2).trim().replace(/^"|"$/g, '');
+      return !artifacts.some((a) => file === a || file.startsWith(a));
+    });
 }
 
 /**
@@ -171,14 +196,15 @@ export async function harnessReview(input: {
   progress?: (message: string) => void;
 }): Promise<HarnessReview> {
   const progress = input.progress ?? (() => {});
-  const before = await changedFiles(input.dir);
+  const artifacts = input.harness.artifacts ?? [];
+  const before = await changedFiles(input.dir, artifacts);
 
   const run = await input.harness.run(input.dir, {
     instruction: reviewPrompt(input),
     failureOutput: '',
   });
 
-  const after = await changedFiles(input.dir);
+  const after = await changedFiles(input.dir, artifacts);
   if (after.join('\n') !== before.join('\n')) {
     const reason =
       'the review harness modified the workspace despite running read-only; its findings are discarded';
@@ -191,6 +217,15 @@ export async function harnessReview(input: {
   }
 
   const findings = parseReviewFindings(run.log);
+  if (findings === null) {
+    // The harness exited without answering. `run.ok` cannot catch this on its
+    // own: opencode reports a failed model resolution in its output and still
+    // exits zero, so the only evidence that the question went unanswered is the
+    // absence of an answer.
+    const reason = `the review harness returned no findings object: ${firstLine(run.log)}`;
+    progress(`  repo-wide review could not run: ${firstLine(run.log)}`);
+    return { ok: false, findings: [], log: run.log, reason };
+  }
   progress(
     findings.length === 0
       ? '  repo-wide review: no structural findings'

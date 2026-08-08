@@ -1446,6 +1446,8 @@ export interface VulnFixResult {
   diff: string;
   workspaceDir: string | null;
   workspaceMode: string | null;
+  /** Advisory notes from the read-only repo-wide pass, when one ran. */
+  reviewNotes?: ReviewFinding[];
   /**
    * Populated when the bump cleared the advisory but broke the build, and the
    * agent was asked to repair it. Absent means no repair was attempted — which
@@ -1676,10 +1678,32 @@ export async function fixVulnerability(
       }
     }
 
+    // The repo-wide review, same as the drift path. A security bump that landed
+    // is still a change someone has to read, and the questions it cannot answer
+    // from its own diff are identical.
+    let reviewNotes: ReviewFinding[] | undefined;
+    if (options.reviewHarness && verificationPassed(verification.outcome)) {
+      const allowed = harnessPermitted({ untrusted });
+      if (!allowed.ok) progress(`  repo-wide review skipped: ${allowed.reason}`);
+      else {
+        const review = await harnessReview({
+          harness: options.reviewHarness,
+          dir: ws.dir,
+          pkg: finding.pkg,
+          fromVersion: finding.fromVersion,
+          toVersion: worst ?? finding.toVersion,
+          diff: await workspaceDiff(ws),
+          progress,
+        });
+        if (review.findings.length > 0) reviewNotes = review.findings;
+      }
+    }
+
     const result: VulnFixResult = {
       ...base,
       resolved,
       overrode,
+      ...(reviewNotes ? { reviewNotes } : {}),
       ...(agentRecord ? { agent: agentRecord } : {}),
       installedAfter: worst,
       verification,
