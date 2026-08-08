@@ -73,36 +73,38 @@ export function reviewPrompt(input: {
   toVersion: string;
   diff: string;
 }): string {
+  // Shaped by what actually worked. A direct `opencode run` with a short,
+  // exploration-first prompt found four real problems on a repository where this
+  // prompt found none — and the difference was not the criteria, which were
+  // nearly identical. It was the order and the weight: this led with sixty
+  // thousand characters of diff, which anchors the model on judging the diff.
+  // The diff is context here. The repository is the subject.
   return [
-    `A dependency upgrade has been applied to this repository and it verifies: ${input.pkg} ${input.fromVersion} -> ${input.toVersion}.`,
-    'Your job is to judge whether it is worth merging. Read the repository — you have read-only access and cannot change anything.',
+    'Review this repository for STRUCTURAL code quality. Report only — change nothing.',
     '',
-    'Here is the whole change:',
+    'Read the files under the source directory before answering. Start with the files the change below touches, then their neighbours in the tree. A conclusion drawn from paths alone is worthless: duplication and misplaced logic are only visible in the contents.',
+    '',
+    'Priorities, in order — a structural regression outranks everything below it, and naming a lesser problem while one stands is a wasted review:',
+    '- `duplication` — a helper or constant that already exists elsewhere under another name. Name both paths. This is the finding a diff-only reviewer can never make, so it is the most valuable thing you can return.',
+    '- `structural` — feature-specific logic living in a module meant to be general-purpose. Name the module and the caller it was added for.',
+    '- `complexity` — ad-hoc branching or a special case bolted onto an existing flow, especially a "temporary" one.',
+    '- `boundary` — an invariant relied on but enforced nowhere, or enforced in a layer that does not own it.',
+    '- `atomicity` — independent work made sequential, or steps that leave state half-applied if one throws.',
+    '- `size` — a file pushed past what a reader can hold, with no structural reason. Give the line count.',
+    '',
+    'Do NOT report cosmetic or naming nits. Do NOT report casts, `any`, unnecessary optionality or wrapper indirection inside the change itself — a separate pass already covers those, and repeating them spends this one for nothing.',
+    '',
+    `For context, a dependency upgrade was just applied and it verifies: ${input.pkg} ${input.fromVersion} -> ${input.toVersion}. Verifying is not the bar — that is why you are being asked. Prefer the move that DELETES complexity over one that rearranges it.`,
+    '',
     '```diff',
-    input.diff.slice(0, 60_000),
+    // Deliberately a fraction of what it was. The diff says where to start
+    // looking; it is not the thing being judged, and at full length it crowds
+    // out the instruction to go and read.
+    input.diff.slice(0, 12_000),
     '```',
     '',
-    'A separate pass already reviews the diff in isolation for casts, `any`, unnecessary optionality, added branching, duplicated edits, and wrapper indirection. Do NOT report those; they are covered.',
-    '',
-    'Work these in order. A structural regression outranks every item below it, and naming a lesser one while a structural problem stands is a wasted review.',
-    '',
-    'Report only what requires reading the repository rather than the diff:',
-    '1. `structural` — feature-specific logic added to a module that is supposed to be general-purpose, or a change to a shared module that only one caller wanted. Name the caller and the module.',
-    '2. `duplication` — a helper or constant this change introduced that already exists elsewhere under another name. Name both paths. This is the finding a diff-only reviewer can never make, so it is the most valuable thing you can return.',
-    '3. `boundary` — an invariant this change now relies on that is enforced nowhere, or one enforced in a layer that does not own it.',
-    '4. `complexity` — ad-hoc branching or a special case this change added to a flow that did not have one, especially a "temporary" one. Spaghetti growth is the regression that compounds; name the flow and what a shape needing no branch would look like.',
-    '5. `atomicity` — work this change made sequential that is independent and could run together, or steps that can leave state half-applied if one throws. Both are only visible with the surrounding code in front of you.',
-    '6. `size` — a file this change pushed past the point where a reader can hold it, with no structural reason. Say the line count. Do not report a file that was already long and that this change barely touched.',
-    '',
-    'Rules:',
-    '- You MUST open files before answering. A conclusion drawn from the path list alone is worthless: duplication and misplaced logic are only visible in the contents. Start with the files the diff touches and their neighbours in the tree.',
-    '- Report nothing you have not opened the relevant files to confirm. A plausible guess costs a reader more than silence.',
-    '- No cosmetic or naming notes. If you have no structural finding, say so — an empty list is a real and useful answer.',
-    '- Prefer a small number of high-conviction findings over an exhaustive list.',
-    '- Verifying is not the bar. This change already compiles and its tests pass; that is why you are being asked. Ask what a demanding reviewer would refuse to merge, and prefer the move that DELETES complexity — reframe, extract, remove — over one that rearranges it.',
-    '',
-    'Output ONLY a JSON object, no prose and no markdown fences:',
-    '{"findings": [{"severity": "structural" | "duplication" | "boundary" | "complexity" | "atomicity" | "size", "file": "<repo-relative path>", "what": "<the claim>", "why": "<why it matters here>"}]}',
+    'Output ONLY a JSON object, no prose and no markdown fences. An empty list is a real and useful answer:',
+    '{"findings": [{"severity": "duplication" | "structural" | "complexity" | "boundary" | "atomicity" | "size", "file": "<repo-relative path>", "what": "<the claim>", "why": "<why it costs a reader here>"}]}',
   ].join('\n');
 }
 

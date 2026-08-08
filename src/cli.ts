@@ -509,6 +509,13 @@ async function cmdFix(args: Args): Promise<number> {
     }
     // A repaired fix and a fix that never needed repair are not the same result,
     // and a reviewer reading the diff is entitled to know which one this is.
+    // The repo-wide review's findings. Computed and then dropped on the floor
+    // until now, which made the whole pass decorative — it is advisory output for
+    // a human, so the human has to see it.
+    for (const f of vulnResult.reviewNotes ?? []) {
+      console.log(`    ${c.yellow(`[${f.severity}]`)} ${f.file}  ${c.dim(f.what)}`);
+      console.log(c.dim(`        ${f.why}`));
+    }
     if (vulnResult.agent) {
       const { attempts, finalErrors } = vulnResult.agent;
       console.log(

@@ -178,7 +178,7 @@ test('the prompt excludes what the structured review already covers', () => {
   // safer — it is one finding arriving twice, in a body where the reader's
   // attention is the scarce thing.
   const prompt = reviewPrompt({ pkg: 'axios', fromVersion: '0.21.1', toVersion: '0.33.0', diff: '' });
-  assert.match(prompt, /Do NOT report those/);
+  assert.match(prompt, /a separate pass already covers those/);
   assert.match(prompt, /casts, `any`/);
 });
 
@@ -187,8 +187,10 @@ test('the prompt asks only for what needs the repository', () => {
   for (const criterion of ['duplication', 'structural', 'boundary', 'size']) {
     assert.ok(prompt.includes(criterion), `${criterion} must be asked for`);
   }
-  assert.match(prompt, /cannot change anything/);
-  assert.match(prompt, /Report nothing you have not opened/);
+  assert.match(prompt, /change nothing/i, 'the review must not edit what it judges');
+  // The instruction that decides whether it explores at all. Measured: without a
+  // concrete "go and read" the model answers from the diff and finds nothing.
+  assert.match(prompt, /Read the files under the source directory before answering/);
 });
 
 // ---------------------------------------------------------------------------
