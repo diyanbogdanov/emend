@@ -13,12 +13,19 @@ const SPEC = JSON.stringify({
   },
 });
 
+// Several fixtures below are `official-github`, which is a stored copy and so
+// has to say when the provider last changed it before it may assert anything.
+// Computed rather than written down: these tests are about matching routes, and
+// a literal date would quietly turn them red a year from now.
+const RECENTLY = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
 function candidate(over: Partial<SpecCandidate> = {}): SpecCandidate {
   return {
     vendor: 'api.acme.com',
     url: 'https://api.acme.com/openapi.json',
     provenance: 'official-domain',
     fetchedAt: '2026-08-07T00:00:00.000Z',
+    updatedAt: RECENTLY,
     body: SPEC,
     ...over,
   };
@@ -72,6 +79,9 @@ function slack(over: Partial<SpecCandidate> = {}): SpecCandidate {
     url: 'https://raw.githubusercontent.com/slackapi/slack-api-specs/master/web-api/slack_web_openapi_v2.json',
     provenance: 'official-github',
     fetchedAt: '2026-08-09T00:00:00.000Z',
+    // The real one has not changed since 2020 and so may assert nothing; that
+    // is its own test in specs.test.ts. Here the base path is what is measured.
+    updatedAt: RECENTLY,
     body: SLACK,
     ...over,
   };

@@ -91,17 +91,67 @@ test('nothing at all yields nothing, rather than a default', () => {
 // What a spec may be used to say
 // ---------------------------------------------------------------------------
 
+const NOW = Date.parse('2026-08-09T00:00:00.000Z');
+/** A commit inside the currency window, so provenance is the only thing tested. */
+const RECENT = '2026-08-06T00:00:00.000Z';
+
 test('only a provider-controlled spec may assert that a call is broken', () => {
   // Telling someone their Stripe call breaks, on the strength of a community
   // copy that may be a year stale, is the false certainty every honesty rule in
   // this codebase exists to prevent. Emend can still report the call sites it
   // found and say the spec was not authoritative.
-  assert.equal(canAssertBreakage(candidate({ provenance: 'official-domain' })), true);
-  assert.equal(canAssertBreakage(candidate({ provenance: 'official-github' })), true);
-  assert.equal(canAssertBreakage(candidate({ provenance: 'verified-swaggerhub' })), true);
-  assert.equal(canAssertBreakage(candidate({ provenance: 'verified-postman' })), false);
-  assert.equal(canAssertBreakage(candidate({ provenance: 'curated' })), false);
-  assert.equal(canAssertBreakage(candidate({ provenance: 'extracted-from-docs' })), false);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'official-domain' }), NOW), true);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'official-github', updatedAt: RECENT }), NOW), true);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'verified-swaggerhub', updatedAt: RECENT }), NOW), true);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'verified-postman', updatedAt: RECENT }), NOW), false);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'curated', updatedAt: RECENT }), NOW), false);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'extracted-from-docs', updatedAt: RECENT }), NOW), false);
+});
+
+// ---------------------------------------------------------------------------
+// Provenance says who wrote it. Currency says whether they still mean it, and
+// the two are separate questions for the same reason rank and control are.
+// ---------------------------------------------------------------------------
+
+test('a stored copy the provider abandoned asserts nothing', () => {
+  // Measured, not hypothetical. `slackapi/slack-api-specs` last changed its
+  // description on 2020-10-06; it still lists `files.upload`, which Slack has
+  // retired, and lacks `files.getUploadURLExternal`, which replaced it. Emend
+  // reported simstudioai/sim's correct, modern calls as reaching deleted
+  // endpoints, on the provider's own authority. Being first-party is not the
+  // same as being current, and a five-year-dead file is not evidence about
+  // today's API.
+  const slack = candidate({
+    vendor: 'slack.com',
+    provenance: 'official-github',
+    url: 'https://raw.githubusercontent.com/slackapi/slack-api-specs/master/web-api/slack_web_openapi_v2.json',
+    updatedAt: '2020-10-06T00:00:00.000Z',
+  });
+  assert.equal(canAssertBreakage(slack, NOW), false);
+});
+
+test('a stored copy of unknown age asserts nothing either', () => {
+  // "We could not find out when this last changed" is not "it is current".
+  // Failing to the quiet side costs a finding; failing to the loud side costs a
+  // pull request against working code.
+  assert.equal(canAssertBreakage(candidate({ provenance: 'official-github' }), NOW), false);
+});
+
+test('a description served live from the provider’s own origin needs no date', () => {
+  // The asymmetry is real rather than a convenience. A file at the provider's
+  // own origin is what they are serving as their description right now, so the
+  // fetch is itself the currency evidence. A file in a repository is a
+  // committed artifact, and only its last commit says whether anyone still
+  // maintains it — which is exactly how a dead spec keeps resolving forever.
+  assert.equal(canAssertBreakage(candidate({ provenance: 'official-domain' }), NOW), true);
+});
+
+test('a stored copy stays evidence while the provider is still touching it', () => {
+  // The other side of the gate. Descriptions do go quiet for months without
+  // being abandoned — Twilio's measured at 95 days and Webflow's at 74 — so the
+  // window has to be loose enough that a normal release cadence clears it.
+  const twilio = candidate({ provenance: 'official-github', updatedAt: '2026-05-06T00:00:00.000Z' });
+  assert.equal(canAssertBreakage(twilio, NOW), true, '95 days is a quiet quarter, not an abandonment');
 });
 
 test('preferring a source is not the same as trusting it', () => {
@@ -111,9 +161,10 @@ test('preferring a source is not the same as trusting it', () => {
   // make the destination first-party. Rank orders what to try; the authority
   // set decides what may be claimed. Folding them into one number means any
   // future reorder silently hands out claim rights.
+  // Both current, so authority is the only thing under test here.
   assert.ok(PROVENANCE_RANK['directory'] > PROVENANCE_RANK['verified-swaggerhub']);
-  assert.equal(canAssertBreakage(candidate({ provenance: 'directory' })), false);
-  assert.equal(canAssertBreakage(candidate({ provenance: 'verified-swaggerhub' })), true);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'directory', updatedAt: RECENT }), NOW), false);
+  assert.equal(canAssertBreakage(candidate({ provenance: 'verified-swaggerhub', updatedAt: RECENT }), NOW), true);
 });
 
 // ---------------------------------------------------------------------------

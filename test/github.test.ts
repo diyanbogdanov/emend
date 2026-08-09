@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { githubSpecUrls } from '../src/github.ts';
+import { githubSpecUrls, lastChangedAt } from '../src/github.ts';
 import type { FetchResponse, Fetcher } from '../src/specfetch.ts';
 
 function fakeFetch(routes: Record<string, Partial<FetchResponse>>): Fetcher & { asked: string[] } {
@@ -246,4 +246,41 @@ test('being rate limited yields nothing rather than a wrong answer', async () =>
     {},
   );
   assert.deepEqual(found, []);
+});
+
+// ---------------------------------------------------------------------------
+// When the provider last touched the description
+// ---------------------------------------------------------------------------
+
+const COMMITS = `${API}/repos/slackapi/slack-api-specs/commits?path=web-api%2Fslack_web_openapi_v2.json&per_page=1`;
+
+test('the date a description last changed is read from the commit that changed it', async () => {
+  // Not the repository's newest commit: a README tidy in a dead repository
+  // would make an abandoned description look maintained. `slackapi/slack-api-specs`
+  // is exactly that shape — its last commit is 2021 documentation, while the
+  // description itself has not moved since 2020.
+  const at = await lastChangedAt(
+    fakeFetch({ [COMMITS]: { body: JSON.stringify([{ commit: { committer: { date: '2020-10-06T00:00:00Z' } } }]) } }),
+    'https://raw.githubusercontent.com/slackapi/slack-api-specs/master/web-api/slack_web_openapi_v2.json',
+    {},
+  );
+  assert.equal(at, '2020-10-06T00:00:00Z');
+});
+
+test('a branch spelled refs/heads is the same branch', async () => {
+  const url = `${API}/repos/acme/openapi/commits?path=openapi%2Fspec.json&per_page=1`;
+  const at = await lastChangedAt(
+    fakeFetch({ [url]: { body: JSON.stringify([{ commit: { committer: { date: '2026-08-01T00:00:00Z' } } }]) } }),
+    'https://raw.githubusercontent.com/acme/openapi/refs/heads/main/openapi/spec.json',
+    {},
+  );
+  assert.equal(at, '2026-08-01T00:00:00Z');
+});
+
+test('a date that cannot be established is undefined, never today', async () => {
+  // Rate limited, or a URL that is not a repository file. Both mean "not
+  // known", and `canAssertBreakage` treats not-known as not-current — which is
+  // the whole point of asking.
+  assert.equal(await lastChangedAt(fakeFetch({}), 'https://raw.githubusercontent.com/a/b/main/x.json', {}), undefined);
+  assert.equal(await lastChangedAt(fakeFetch({}), 'https://api.acme.com/openapi.json', {}), undefined);
 });

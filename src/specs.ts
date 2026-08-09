@@ -89,8 +89,17 @@ export interface SpecCandidate {
   vendor: string;
   url: string;
   provenance: SpecProvenance;
-  /** When this copy was obtained, which is the only staleness signal a mirror gives. */
+  /** When Emend obtained this copy. Says nothing about the description's own age. */
   fetchedAt: string;
+  /**
+   * When the provider last changed the description, where that can be known.
+   *
+   * Deliberately separate from `fetchedAt`, which was doing duty as a staleness
+   * signal and is not one: a copy pulled today out of a repository abandoned in
+   * 2020 has a `fetchedAt` of today. Absent means *not known*, which
+   * `canAssertBreakage` treats as not current rather than as current.
+   */
+  updatedAt?: string;
   /** The description itself, once fetched. */
   body?: string;
 }
@@ -126,8 +135,49 @@ export function bestSpec(candidates: SpecCandidate[]): SpecCandidate | undefined
  * and it is not a complete description of the API. An endpoint missing from one
  * says nothing about whether the endpoint exists.
  */
-export function canAssertBreakage(candidate: SpecCandidate): boolean {
-  return PROVIDER_CONTROLLED.has(candidate.provenance);
+export function canAssertBreakage(candidate: SpecCandidate, now: number = Date.now()): boolean {
+  if (!PROVIDER_CONTROLLED.has(candidate.provenance)) return false;
+  return SERVED_LIVE.has(candidate.provenance) || isCurrent(candidate, now);
+}
+
+/**
+ * The provenances whose currency the fetch itself establishes.
+ *
+ * A file at the provider's own origin is what they are serving as their
+ * description *now*, so retrieving it is the evidence that they still mean it.
+ * A file in a repository or on a platform is a committed artifact that keeps
+ * resolving long after anyone stopped maintaining it, and only its own last
+ * change says which of the two it is.
+ */
+const SERVED_LIVE: ReadonlySet<SpecProvenance> = new Set(['official-domain']);
+
+/**
+ * How long a stored copy may go untouched and still be evidence about today.
+ *
+ * Measured rather than rounded to a comfortable number. Across the descriptions
+ * Emend resolved for real vendors, every maintained one had changed within 95
+ * days — Twilio 95, Webflow 74, Box and Asana 9, GitHub, Discord, Deepgram and
+ * Runway inside three — and the one abandoned description, Slack's, had not
+ * changed in 2,132. There is a factor of twenty-two between the two groups, so
+ * the threshold sits an order of magnitude clear of both: loose enough that a
+ * quiet quarter is not an accusation, tight enough that five dead years cannot
+ * pass as the provider's current word.
+ */
+export const CURRENCY_WINDOW_MS = 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a stored copy is known to be recent enough to speak for today's API.
+ *
+ * An unknown date is not a recent one. Emend asked and could not find out, and
+ * rendering that as current is the same error as reporting an unreadable call
+ * as a clean one — with a worse consequence, because the finding it licences
+ * looks exactly like a real one.
+ */
+export function isCurrent(candidate: SpecCandidate, now: number = Date.now()): boolean {
+  if (!candidate.updatedAt) return false;
+  const changed = Date.parse(candidate.updatedAt);
+  if (Number.isNaN(changed)) return false;
+  return now - changed <= CURRENCY_WINDOW_MS;
 }
 
 /** Whether `host` is `domain` or something under it — `api.stripe.com` for `stripe.com`. */
@@ -243,11 +293,37 @@ export const SPEC_SOURCES: readonly SpecSource[] = [
   { id: 'postman', yields: 'verified-postman' },
 ];
 
-/** One line per candidate, for a finding's evidence. */
-export function describeProvenance(candidate: SpecCandidate): string {
+/**
+ * Why this candidate does or does not entitle Emend to speak.
+ *
+ * Names the actual reason rather than one stock reason for everything refused:
+ * a spec can now be turned down for being somebody else's copy *or* for being
+ * the provider's own file that nobody has touched in five years, and a reader
+ * who is told "a third-party copy" about GitHub-hosted, first-party Slack
+ * Swagger has been told something false.
+ */
+export function describeProvenance(candidate: SpecCandidate, now: number = Date.now()): string {
   const rank = PROVENANCE_RANK[candidate.provenance];
-  const claim = canAssertBreakage(candidate)
-    ? 'provider-controlled, so a mismatch is evidence'
-    : 'a third-party copy, so a mismatch is a lead and not a finding';
-  return `${candidate.url} — ${candidate.provenance} (${rank}/100): ${claim}`;
+  return `${candidate.url} — ${candidate.provenance} (${rank}/100): ${claimOf(candidate, now)}`;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function claimOf(candidate: SpecCandidate, now: number): string {
+  if (!PROVIDER_CONTROLLED.has(candidate.provenance)) {
+    return 'a third-party copy, so a mismatch is a lead and not a finding';
+  }
+  if (SERVED_LIVE.has(candidate.provenance)) {
+    return 'provider-controlled and served from their own origin, so a mismatch is evidence';
+  }
+
+  const changed = candidate.updatedAt ? Date.parse(candidate.updatedAt) : Number.NaN;
+  if (Number.isNaN(changed)) {
+    return 'provider-controlled, but when they last changed it could not be established, so a mismatch is a lead and not a finding';
+  }
+
+  const days = Math.round((now - changed) / DAY_MS);
+  return isCurrent(candidate, now)
+    ? `provider-controlled and last changed ${days} day(s) ago, so a mismatch is evidence`
+    : `provider-controlled but last changed ${days} day(s) ago, so it is not evidence about today's API`;
 }

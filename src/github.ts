@@ -206,3 +206,61 @@ export async function githubSpecUrls(
   }
   return found;
 }
+
+/**
+ * When the provider last changed the description at this URL.
+ *
+ * The signal `SpecCandidate.fetchedAt` was quietly standing in for and is not:
+ * a copy pulled today out of a repository nobody has touched since 2020 was
+ * indistinguishable from one the provider revised this morning, and Emend
+ * asserted breakage from both. `slackapi/slack-api-specs` is the measured case
+ * — five years untouched, still listing endpoints Slack has retired.
+ *
+ * Asked per *path* rather than per repository on purpose. A README tidy or a
+ * licence bump makes a dead repository look alive, and Slack's is exactly that
+ * shape: its newest commit is 2021 documentation while the description itself
+ * stopped moving in 2020.
+ *
+ * `undefined` means *could not establish* — a rate limit, a URL that is not a
+ * repository file, anything. It never guesses at a date, because the caller
+ * reads an unknown date as "not current", and a wrong date here licences a
+ * confident claim that somebody's integration is broken.
+ */
+export async function lastChangedAt(
+  fetch: Fetcher,
+  url: string,
+  options: GithubOptions,
+): Promise<string | undefined> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.hostname.toLowerCase() !== 'raw.githubusercontent.com') return undefined;
+
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  const [owner, repo, ...rest] = parts;
+  if (!owner || !repo || rest.length === 0) return undefined;
+  // `/OWNER/REPO/BRANCH/PATH` and `/OWNER/REPO/refs/heads/BRANCH/PATH` both
+  // occur in the wild; the ref is whatever sits between the repo and the file.
+  const path = (rest[0] === 'refs' && rest[1] === 'heads' ? rest.slice(3) : rest.slice(1)).join('/');
+  if (!path) return undefined;
+
+  const endpoint = `${API}/repos/${owner}/${repo}/commits?path=${encodeURIComponent(path)}&per_page=1`;
+  try {
+    const res = await fetch(endpoint, {
+      headers: {
+        accept: 'application/vnd.github+json',
+        ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
+      },
+    });
+    if (!res.ok) return undefined;
+    const body: unknown = JSON.parse(res.body);
+    if (!Array.isArray(body) || body.length === 0) return undefined;
+    const date = (body[0] as { commit?: { committer?: { date?: unknown } } })?.commit?.committer?.date;
+    return typeof date === 'string' ? date : undefined;
+  } catch {
+    return undefined;
+  }
+}

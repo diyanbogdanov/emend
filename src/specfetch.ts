@@ -23,7 +23,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import YAML from 'yaml';
 import { MAX_SPEC_BYTES, parseSpec } from './specdiff.ts';
-import { githubSpecUrls, type GithubOptions } from './github.ts';
+import { githubSpecUrls, lastChangedAt, type GithubOptions } from './github.ts';
 import {
   PROVENANCE_RANK,
   provenanceOfPointer,
@@ -131,6 +131,14 @@ interface CacheEntry {
   url: string;
   provenance: SpecProvenance;
   fetchedAt: string;
+  /**
+   * Carried through the cache explicitly. It survives the round trip either way
+   * — the entry is spread whole — but a type that omits it says a cached
+   * candidate has no currency, and a candidate with no currency asserts
+   * nothing. Leaving it implicit means one narrowing away from a cache that
+   * silently disarms every finding it serves.
+   */
+  updatedAt?: string;
   body: string;
 }
 
@@ -225,6 +233,7 @@ async function candidateFrom(
   floor?: SpecProvenance,
   /** An organisation established by the source that produced this URL. */
   org?: string,
+  github?: GithubOptions,
 ): Promise<SpecCandidate | null> {
   let res: FetchResponse;
   try {
@@ -234,15 +243,26 @@ async function candidateFrom(
   }
   if (!res.ok || !looksLikeSpec(res.body)) return null;
 
+  // Against the registrable domain, so a description for `api.stripe.com`
+  // served from `stripe.com` is still the provider's own file.
+  const provenance =
+    floor ?? provenanceOfPointer(res.url, registrableDomain(vendor.domain), org ?? vendor.org);
+
+  // A file in a repository keeps resolving long after anyone stopped
+  // maintaining it, so it has to say when it last changed before it may assert
+  // anything. Asked only for the provenance where the answer can change a
+  // claim: a description served from the provider's own origin is current by
+  // being served, and a third-party copy asserts nothing whatever its date.
+  const updatedAt =
+    provenance === 'official-github' ? await lastChangedAt(fetch, res.url, github ?? {}) : undefined;
+
   return {
     vendor: vendor.domain,
     // The URL that served it, not the one that was asked for.
     url: res.url,
-    // Against the registrable domain, so a description for `api.stripe.com`
-    // served from `stripe.com` is still the provider's own file.
-    provenance:
-      floor ?? provenanceOfPointer(res.url, registrableDomain(vendor.domain), org ?? vendor.org),
+    provenance,
     fetchedAt: now,
+    ...(updatedAt ? { updatedAt } : {}),
     body: res.body,
   };
 }
@@ -452,7 +472,7 @@ export async function resolveSpec(
   // 1. The provider's own origin. Nothing is closer and it costs one request.
   for (const domain of domains) {
     for (const url of wellKnownSpecPaths(`https://${domain}`)) {
-      add(await candidateFrom(options.fetch, url, vendor, now));
+      add(await candidateFrom(options.fetch, url, vendor, now, undefined, undefined, options.github));
       if (settled()) break;
     }
     if (settled()) break;
@@ -473,7 +493,7 @@ export async function resolveSpec(
     }
     if (!manifest?.ok) continue;
     for (const url of specUrlsInManifest(manifest.body)) {
-      add(await candidateFrom(options.fetch, url, vendor, now));
+      add(await candidateFrom(options.fetch, url, vendor, now, undefined, undefined, options.github));
       if (settled()) break;
     }
   }
@@ -483,7 +503,7 @@ export async function resolveSpec(
   //    a description Emend may assert breakage from.
   if (!settled() && options.github) {
     for (const hit of await githubSpecUrls(options.fetch, vendor.domain, options.github)) {
-      add(await candidateFrom(options.fetch, hit.url, vendor, now, undefined, hit.org));
+      add(await candidateFrom(options.fetch, hit.url, vendor, now, undefined, hit.org, options.github));
       if (settled() || found.some((c) => c.provenance === 'official-github')) break;
     }
   }
@@ -499,7 +519,7 @@ export async function resolveSpec(
   if (!settled()) {
     for (const artifact of await apisIoArtifacts(options.fetch, vendor.domain)) {
       if (!/^(openapi|swagger)$/i.test(artifact.type)) continue;
-      add(await candidateFrom(options.fetch, artifact.url, vendor, now));
+      add(await candidateFrom(options.fetch, artifact.url, vendor, now, undefined, undefined, options.github));
       if (settled()) break;
     }
   }
