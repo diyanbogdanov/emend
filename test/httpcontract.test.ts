@@ -48,6 +48,77 @@ test('a call to an endpoint the description no longer has is reported', () => {
   assert.equal(result.gone[0]?.route, '/v1/invoices/upcoming');
 });
 
+// A description states its paths relative to a base the call site must spell in
+// full. Slack's own Swagger says `basePath: "/api"` and lists `/auth.test`,
+// while every call in every repository reads `https://slack.com/api/auth.test`.
+// Without aligning the two, no call ever matches, `matched` stays zero, and the
+// vendor with the clearest drift story in the industry — `channels.*` retired
+// in favour of `conversations.*` — can never produce a finding. The failure is
+// silent and reads exactly like a clean integration.
+const SLACK = JSON.stringify({
+  swagger: '2.0',
+  info: { title: 'Slack Web API', version: '1' },
+  host: 'slack.com',
+  basePath: '/api',
+  paths: {
+    '/auth.test': { post: {} },
+    '/conversations.list': { get: {} },
+  },
+});
+
+function slack(over: Partial<SpecCandidate> = {}): SpecCandidate {
+  return {
+    vendor: 'slack.com',
+    url: 'https://raw.githubusercontent.com/slackapi/slack-api-specs/master/web-api/slack_web_openapi_v2.json',
+    provenance: 'official-github',
+    fetchedAt: '2026-08-09T00:00:00.000Z',
+    body: SLACK,
+    ...over,
+  };
+}
+
+test('a description’s base path is spelled out by the call site, and the two align', () => {
+  const source = `
+    await fetch('https://slack.com/api/auth.test', { method: 'POST' });
+    await fetch('https://slack.com/api/conversations.list');
+  `;
+  const result = checkAgainstSpec(findHttpCalls('src/slack.ts', source), 'slack.com', slack());
+  assert.equal(result.matched, 2, 'basePath /api plus /auth.test is the call site’s /api/auth.test');
+  assert.deepEqual(result.gone, []);
+  assert.equal(result.note, undefined);
+});
+
+test('an endpoint the provider retired is reported once the base path aligns', () => {
+  // The finding this whole tier exists for. `channels.list` is absent from
+  // Slack's own description; `conversations.list` replaced it.
+  const source = `
+    await fetch('https://slack.com/api/conversations.list');
+    await fetch('https://slack.com/api/channels.list');
+  `;
+  const result = checkAgainstSpec(findHttpCalls('src/slack.ts', source), 'slack.com', slack());
+  assert.equal(result.gone.length, 1);
+  assert.equal(result.gone[0]?.route, '/api/channels.list');
+});
+
+test('an OpenAPI 3 server URL carrying a path is a base path too', () => {
+  const spec = JSON.stringify({
+    openapi: '3.0.0',
+    info: { title: 'Acme', version: '1' },
+    servers: [{ url: 'https://api.acme.com/v2' }],
+    paths: { '/charges': { get: {} } },
+  });
+  const source = `await fetch('https://api.acme.com/v2/charges');`;
+  const result = checkAgainstSpec(findHttpCalls('src/pay.ts', source), 'api.acme.com', candidate({ body: spec }));
+  assert.equal(result.matched, 1);
+});
+
+test('a description whose paths are already absolute keeps working', () => {
+  // The regression guard. Most descriptions have no base path at all, and
+  // prefixing one that is not there would break every vendor that works today.
+  const result = checkAgainstSpec(calls(GOOD), 'api.acme.com', candidate());
+  assert.equal(result.matched, 2);
+});
+
 test('nothing is claimed from a description that is not the provider’s word', () => {
   // The rule `specs.ts` exists to enforce, applied where it bites. Telling
   // somebody their integration is broken on the strength of a copy that may be

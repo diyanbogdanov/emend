@@ -123,6 +123,53 @@ function readParams(op: Doc, deref: (node: unknown) => unknown): Map<string, Par
   return params;
 }
 
+/**
+ * The path prefixes a description's routes are stated relative to.
+ *
+ * A description spells its paths relative to a base the call site must write out
+ * in full: Slack's own Swagger says `basePath: "/api"` and lists `/auth.test`,
+ * while every call in every repository reads `https://slack.com/api/auth.test`.
+ * Comparing the two directly matches nothing, and a contract check that matches
+ * nothing reports a clean integration — the exact shape of "could not check"
+ * being rendered as "checked and clean".
+ *
+ * Deliberately *not* folded into `readOperations`. Those keys are also the keys
+ * `diffSpecs` compares two descriptions by, where a base path is common to both
+ * sides and prefixing it would only churn every path in the diff. Alignment is
+ * the caller's business, and only the caller that meets a real URL has it.
+ *
+ * The empty prefix is always included: a description that declares a base and
+ * then lists absolute paths anyway is common, and the cost of allowing both is a
+ * call matching when it should not — which understates breakage. Erring toward
+ * the finding Emend does not make is the right direction to err in.
+ */
+export function basePathsOf(doc: unknown): string[] {
+  const bases = new Set<string>(['']);
+  if (typeof doc !== 'object' || doc === null) return [...bases];
+  const d = doc as Doc;
+
+  const add = (raw: string): void => {
+    // A server URL may be absolute, origin-relative, or templated with `{}`
+    // variables that no URL parser will accept — so the authority is stripped
+    // textually rather than parsed, and what is left is the path.
+    const path = raw.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, '');
+    const trimmed = path.replace(/\/+$/, '');
+    if (trimmed.startsWith('/')) bases.add(trimmed);
+  };
+
+  // Swagger 2.0.
+  if (typeof d['basePath'] === 'string') add(d['basePath']);
+  // OpenAPI 3, where the base moved into the server URL.
+  if (Array.isArray(d['servers'])) {
+    for (const server of d['servers']) {
+      if (typeof server === 'object' && server !== null && typeof (server as Doc)['url'] === 'string') {
+        add((server as Doc)['url'] as string);
+      }
+    }
+  }
+  return [...bases];
+}
+
 /** Every `METHOD /path` an description defines, with what each one expects. */
 export function readOperations(doc: unknown): Map<string, Operation> {
   const ops = new Map<string, Operation>();

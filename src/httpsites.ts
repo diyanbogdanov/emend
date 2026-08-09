@@ -23,7 +23,7 @@
 
 import ts from 'typescript';
 import { canAssertBreakage, describeProvenance, type SpecCandidate } from './specs.ts';
-import { parseSpec, readOperations } from './specdiff.ts';
+import { basePathsOf, parseSpec, readOperations } from './specdiff.ts';
 import type { CallSite, SurfaceChange } from './types.ts';
 
 export interface HttpCall {
@@ -94,7 +94,12 @@ function readUrl(node: ts.Expression): { host: string; route: string } | { reaso
   }
 
   // `{}` is not legal in a URL, so it is swapped out and back around parsing.
-  const placeholder = '__EMEND_SEG__';
+  // Lowercase deliberately: the URL parser normalises the host's case but not
+  // the path's, so an uppercase placeholder came back changed in `hostname` and
+  // the check below stopped recognising it — `https://${domain}/x` was then
+  // reported as a call to a host literally named for the placeholder. A
+  // lowercase marker survives both halves unchanged.
+  const placeholder = '__emend_seg__';
   let parsed: URL;
   try {
     parsed = new URL(raw.replaceAll('{}', placeholder));
@@ -252,7 +257,14 @@ export function checkAgainstSpec(
   const ops = readOperations(doc);
   if (ops.size === 0) return { ...empty, note: 'the description could not be read as OpenAPI or Swagger' };
 
-  const described = [...ops.keys()].map((key) => endpointOf(key)).filter((e) => e !== null);
+  // A route in a description is stated relative to the description's base; a
+  // route at a call site is written out in full. Aligning them is what lets a
+  // Swagger 2.0 document with `basePath: "/api"` meet `https://slack.com/api/…`.
+  const bases = basePathsOf(doc);
+  const described = [...ops.keys()]
+    .map((key) => endpointOf(key))
+    .filter((e) => e !== null)
+    .flatMap((e) => bases.map((base) => ({ method: e.method, route: `${base}${e.route}` })));
   const present = (call: HttpCall): boolean =>
     described.some((e) => e.method === call.method && call.route && sameRoute(call.route, e.route));
 

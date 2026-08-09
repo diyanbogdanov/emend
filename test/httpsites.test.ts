@@ -90,6 +90,24 @@ test('a template literal whose host is substituted is unresolved', () => {
   assert.equal(calls[0]?.resolved, false);
 });
 
+test('a host substituted after the scheme is unresolved, not a host named for the placeholder', () => {
+  // `https://${domain}/x` writes the scheme literally, so it clears the
+  // starts-with-a-substitution guard and reaches the parser. Measured across
+  // eight repositories, this is the shape that leaked: the placeholder survived
+  // into `hostname`, the call was recorded as resolved, and a runtime-decided
+  // host was reported as one Emend had read. Unreadable must stay unreadable.
+  const calls = find('await fetch(`https://${domain}/open-apis/im/v1/messages`);');
+  assert.equal(calls[0]?.resolved, false);
+  assert.match(calls[0]?.reason ?? '', /host is substituted/i);
+});
+
+test('a host only partly substituted is unresolved too', () => {
+  // `sts.${region}.amazonaws.com` names a different endpoint per region, and
+  // which one is a runtime fact. A partial read is not a read.
+  const calls = find('await fetch(`https://sts.${region}.amazonaws.com/`, { method: "POST" });');
+  assert.equal(calls[0]?.resolved, false);
+});
+
 test('a relative URL is unresolved rather than guessed at', () => {
   // Same-origin calls go to the application's own server, whose description
   // Emend was never given. Assuming a vendor would invent a finding.
