@@ -185,6 +185,48 @@ test('a parameter does not span where the description defines something deeper',
   assert.equal(result.gone[0]?.route, '/repos/acme/widget/pulls/5/comments');
 });
 
+// The mirror of the spanning problem, on the call's side. `${project.repo}` is
+// one substitution holding "owner/name", so the call reads `/repos/{}/git/...`
+// where the description has two parameters. Measured on fastrepl/anarlog: eight
+// findings, of which seven were this — including `DELETE .../git/refs/{ref}`
+// and `POST .../git/refs`, both of which GitHub documents.
+test('one substitution may stand for several parameters the description names', () => {
+  const spec = JSON.stringify({
+    openapi: '3.0.0',
+    info: { title: 'GitHub', version: '1' },
+    paths: {
+      '/repos/{owner}/{repo}': { get: {} },
+      '/repos/{owner}/{repo}/git/refs': { post: {} },
+      '/repos/{owner}/{repo}/git/blobs/{file_sha}': { get: {} },
+    },
+  });
+  const source = `
+    await fetch(\`https://api.github.com/repos/\${slug}\`);
+    await fetch(\`https://api.github.com/repos/\${slug}/git/refs\`, { method: 'POST' });
+    await fetch(\`https://api.github.com/repos/\${slug}/git/blobs/\${sha}\`);
+  `;
+  const result = checkAgainstSpec(
+    findHttpCalls('src/gh.ts', source),
+    'api.github.com',
+    candidate({ vendor: 'api.github.com', provenance: 'official-github', body: spec }),
+  );
+  assert.equal(result.matched, 3);
+  assert.deepEqual(result.gone, []);
+});
+
+test('a substitution stands for parameters, never for a literal in the route', () => {
+  // The limit that keeps the call side from swallowing the signal too. If a
+  // substitution could absorb `git`, then `.../git/refs/heads/x` would match
+  // `.../git/ref/{ref}` by absorbing the very segment that differs — and
+  // `refs` versus `ref` is exactly the drift this tier exists to report.
+  const source = `await fetch(\`https://api.github.com/repos/\${o}/\${r}/git/refs/heads/\${b}\`);
+    await fetch(\`https://api.github.com/repos/\${o}/\${r}/git/ref/heads/\${b}\`);`;
+  const result = checkAgainstSpec(findHttpCalls('src/gh.ts', source), 'api.github.com', github());
+  assert.equal(result.matched, 1, 'the singular route is the one that is described');
+  assert.equal(result.gone.length, 1);
+  assert.equal(result.gone[0]?.route, '/repos/{}/{}/git/refs/heads/{}');
+});
+
 test('nothing is claimed from a description that is not the provider’s word', () => {
   // The rule `specs.ts` exists to enforce, applied where it bites. Telling
   // somebody their integration is broken on the strength of a copy that may be

@@ -326,21 +326,53 @@ function sameRoute(callRoute: string, specRoute: string, spans = false): boolean
   const a = callRoute.split('/');
   const b = specRoute.split('/');
   const templated = (segment: string): boolean => /^\{.*\}$/.test(segment);
+  const lastSpec = b.length - 1;
 
-  // A trailing parameter allowed to span covers every segment left over, so the
-  // comparison stops one short and the remainder is what the parameter stands
-  // for. `spans` is decided by the description's shape, not here.
-  const spanning = spans && a.length > b.length && templated(b[b.length - 1] ?? '');
-  if (!spanning && a.length !== b.length) return false;
+  // Segment counts do not line up on either side, so the walk considers what
+  // each side's unknowns are allowed to cover. Both indices only move forward,
+  // so the memo is for speed rather than for termination.
+  const memo = new Map<number, boolean>();
 
-  const fixed = spanning ? b.length - 1 : b.length;
-  for (let i = 0; i < fixed; i++) {
-    const segment = a[i] ?? '';
-    const other = b[i] ?? '';
-    if (segment === '{}' || templated(other)) continue;
-    if (segment !== other) return false;
-  }
-  return true;
+  const match = (i: number, j: number): boolean => {
+    if (i === a.length && j === b.length) return true;
+    if (i === a.length || j === b.length) return false;
+
+    const key = i * (b.length + 1) + j;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
+
+    const call = a[i] ?? '';
+    const spec = b[j] ?? '';
+    let result: boolean;
+
+    if (call === '{}') {
+      // A substitution holds a runtime value, so it may fill more than one of
+      // the parameters the description names — `${slug}` is `owner/name`. It may
+      // never stand for a literal: the developer wrote `git` out and so did the
+      // description, and letting a value absorb that would match the very
+      // segment whose difference is the finding.
+      result = false;
+      for (let k = j; k < b.length && templated(b[k] ?? ''); k++) {
+        if (match(i + 1, k + 1)) { result = true; break; }
+      }
+    } else if (templated(spec)) {
+      if (spans && j === lastSpec) {
+        // The description defines nothing deeper here, so this parameter is
+        // what the rest of the call spells out — GitHub's `{ref}` is `heads/main`.
+        result = false;
+        for (let k = i + 1; k <= a.length; k++) if (match(k, j + 1)) { result = true; break; }
+      } else {
+        result = match(i + 1, j + 1);
+      }
+    } else {
+      result = call === spec && match(i + 1, j + 1);
+    }
+
+    memo.set(key, result);
+    return result;
+  };
+
+  return match(0, 0);
 }
 
 /**
