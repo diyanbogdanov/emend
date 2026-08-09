@@ -261,12 +261,38 @@ export function checkAgainstSpec(
   // route at a call site is written out in full. Aligning them is what lets a
   // Swagger 2.0 document with `basePath: "/api"` meet `https://slack.com/api/…`.
   const bases = basePathsOf(doc);
-  const described = [...ops.keys()]
-    .map((key) => endpointOf(key))
-    .filter((e) => e !== null)
-    .flatMap((e) => bases.map((base) => ({ method: e.method, route: `${base}${e.route}` })));
+  const endpoints = [...ops.keys()].map((key) => endpointOf(key)).filter((e) => e !== null);
+
+  // Whether a route's trailing parameter may stand for more than one segment.
+  //
+  // GitHub writes `/repos/{owner}/{repo}/git/matching-refs/{ref}` and every real
+  // call spells the ref as `heads/main`, so a strict segment count reports a
+  // correct, modern call as one to a deleted endpoint — a pull request against
+  // working code, which costs more than saying nothing.
+  //
+  // Bounded by the description's own shape rather than by a guess: a parameter
+  // may span only where nothing deeper is defined beneath it. `{repo}` in
+  // `/repos/{owner}/{repo}` is trailing too, and letting it span would match
+  // every call to the host and silence every finding this detector can make.
+  const routes = new Set(endpoints.map((e) => e.route));
+  const spansByRoute = new Map<string, boolean>();
+  for (const route of routes) {
+    let deeper = false;
+    for (const other of routes) {
+      if (other.length > route.length && other.startsWith(`${route}/`)) { deeper = true; break; }
+    }
+    spansByRoute.set(route, !deeper);
+  }
+
+  const described = endpoints.flatMap((e) =>
+    bases.map((base) => ({
+      method: e.method,
+      route: `${base}${e.route}`,
+      spans: spansByRoute.get(e.route) === true,
+    })),
+  );
   const present = (call: HttpCall): boolean =>
-    described.some((e) => e.method === call.method && call.route && sameRoute(call.route, e.route));
+    described.some((e) => e.method === call.method && call.route && sameRoute(call.route, e.route, e.spans));
 
   const matched = mine.filter(present).length;
   if (matched === 0) {
@@ -296,15 +322,25 @@ function endpointOf(changePath: string): { method: string; route: string } | nul
  * which `findHttpCalls` records as `{}`. Either side being templated matches the
  * other, since both mean "some value goes here".
  */
-function sameRoute(callRoute: string, specRoute: string): boolean {
+function sameRoute(callRoute: string, specRoute: string, spans = false): boolean {
   const a = callRoute.split('/');
   const b = specRoute.split('/');
-  if (a.length !== b.length) return false;
-  return a.every((segment, i) => {
+  const templated = (segment: string): boolean => /^\{.*\}$/.test(segment);
+
+  // A trailing parameter allowed to span covers every segment left over, so the
+  // comparison stops one short and the remainder is what the parameter stands
+  // for. `spans` is decided by the description's shape, not here.
+  const spanning = spans && a.length > b.length && templated(b[b.length - 1] ?? '');
+  if (!spanning && a.length !== b.length) return false;
+
+  const fixed = spanning ? b.length - 1 : b.length;
+  for (let i = 0; i < fixed; i++) {
+    const segment = a[i] ?? '';
     const other = b[i] ?? '';
-    if (segment === '{}' || /^\{.*\}$/.test(other)) return true;
-    return segment === other;
-  });
+    if (segment === '{}' || templated(other)) continue;
+    if (segment !== other) return false;
+  }
+  return true;
 }
 
 /**

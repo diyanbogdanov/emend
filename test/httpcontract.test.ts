@@ -119,6 +119,72 @@ test('a description whose paths are already absolute keeps working', () => {
   assert.equal(result.matched, 2);
 });
 
+// GitHub states `/repos/{owner}/{repo}/git/matching-refs/{ref}` and every real
+// call spells the ref out as `heads/main` — two segments where the description
+// has one. Comparing segment counts made a correct, modern call look like a call
+// to an endpoint that no longer exists, which is the one failure mode that costs
+// more than silence: a pull request "fixing" working code. Measured on
+// live-codes/livecodes, where two of two findings were this.
+const REFS = JSON.stringify({
+  openapi: '3.0.0',
+  info: { title: 'GitHub', version: '1' },
+  paths: {
+    '/repos/{owner}/{repo}/git/matching-refs/{ref}': { get: {} },
+    '/repos/{owner}/{repo}/git/refs/{ref}': { patch: {}, delete: {} },
+    '/repos/{owner}/{repo}/git/ref/{ref}': { get: {} },
+  },
+});
+
+const github = (): SpecCandidate =>
+  candidate({ vendor: 'api.github.com', provenance: 'official-github', body: REFS });
+
+test('a path parameter that spans slashes matches the call that spells it out', () => {
+  const source = `await fetch(\`https://api.github.com/repos/\${o}/\${r}/git/matching-refs/heads/\${b}\`);`;
+  const result = checkAgainstSpec(findHttpCalls('src/gh.ts', source), 'api.github.com', github());
+  assert.equal(result.matched, 1);
+  assert.deepEqual(result.gone, [], 'heads/${b} is the {ref} the description names');
+});
+
+test('a spanning parameter does not excuse a route the description really lacks', () => {
+  // The guard on the guard. GitHub retired `GET .../git/refs/{ref}` in favour of
+  // `git/ref/{ref}`; `refs` and `ref` are different literal segments, so
+  // permitting a parameter to span slashes must not quietly match them up.
+  const source = `await fetch(\`https://api.github.com/repos/\${o}/\${r}/git/refs/heads/\${b}\`);
+    await fetch(\`https://api.github.com/repos/\${o}/\${r}/git/matching-refs/heads/\${b}\`);`;
+  const result = checkAgainstSpec(findHttpCalls('src/gh.ts', source), 'api.github.com', github());
+  assert.equal(result.gone.length, 1);
+  assert.equal(result.gone[0]?.route, '/repos/{}/{}/git/refs/heads/{}');
+});
+
+test('a parameter does not span where the description defines something deeper', () => {
+  // The limit that keeps spanning from swallowing the signal. `{repo}` in
+  // `/repos/{owner}/{repo}` is trailing, but the description defines routes
+  // beneath it, so it plainly means one segment. Letting it span would match
+  // every call to the host and no GitHub finding could ever be reported again.
+  const spec = JSON.stringify({
+    openapi: '3.0.0',
+    info: { title: 'GitHub', version: '1' },
+    paths: {
+      '/repos/{owner}/{repo}': { get: {} },
+      '/repos/{owner}/{repo}/branches/{branch}': { get: {} },
+    },
+  });
+  // One call that plainly aligns, so the "could not be aligned" guard stays out
+  // of the way and this measures the spanning rule rather than that guard.
+  const source = `
+    await fetch('https://api.github.com/repos/acme/widget');
+    await fetch('https://api.github.com/repos/acme/widget/pulls/5/comments');
+  `;
+  const result = checkAgainstSpec(
+    findHttpCalls('src/gh.ts', source),
+    'api.github.com',
+    candidate({ vendor: 'api.github.com', provenance: 'official-github', body: spec }),
+  );
+  assert.equal(result.matched, 1);
+  assert.equal(result.gone.length, 1, 'nothing described reaches it, and {repo} may not span to cover that');
+  assert.equal(result.gone[0]?.route, '/repos/acme/widget/pulls/5/comments');
+});
+
 test('nothing is claimed from a description that is not the provider’s word', () => {
   // The rule `specs.ts` exists to enforce, applied where it bites. Telling
   // somebody their integration is broken on the strength of a copy that may be
