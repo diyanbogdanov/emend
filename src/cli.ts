@@ -684,6 +684,44 @@ async function cmdFix(args: Args): Promise<number> {
       console.log(c.dim(`    · ${f.change.path} (${f.change.kind}, ${f.id})`));
     }
 
+    // Same as the vulnerability path: hand the loop to an opencode session
+    // pointed at Emend's own tools. Deleting runAgentRepair left drift with no
+    // repair mechanism at all — `--agent` became a no-op here — and drift is the
+    // thesis, so it needed this more than vulnerabilities did.
+    if (args.flags.get('drive')) {
+      const permitted = harnessPermitted({ untrusted: args.flags.get('untrusted') === true });
+      if (!permitted.ok) {
+        console.log(c.yellow(`    declining to drive: ${permitted.reason}`));
+        return 1;
+      }
+      const model = args.flags.get('drive');
+      const driver = drivingHarness({
+        ...(typeof model === 'string' ? { model } : {}),
+        emendCommand: [process.execPath, '--experimental-strip-types', fileURLToPath(import.meta.url), 'mcp'],
+      });
+      const availability = await driver.available();
+      if (!availability.ok) {
+        console.log(c.yellow(`    cannot drive: ${availability.reason}`));
+        return 1;
+      }
+      console.log(c.dim(`    driving ${driver.id} against emend's own tools`));
+      const run = await driver.run(repoDir, {
+        instruction: drivePrompt({
+          repo: repoDir,
+          findingId: first.id,
+          pkg: first.pkg,
+        }),
+        failureOutput: '',
+      });
+      const said = assistantText(run.log).trim();
+      const summary = (run.summary ?? '').trim();
+      if (summary) console.log(c.dim(`    ${summary.slice(0, 2000)}`));
+      if (said) console.log(said.slice(0, 4000).split('\n').map((l) => `    ${l}`).join('\n'));
+      if (!run.ok) console.log(c.red(`    ${run.error ?? 'the session failed'}`));
+      if (run.ok && !said && !summary) console.log(c.yellow('    the session produced no output'));
+      return run.ok ? 0 : 1;
+    }
+
     const harness = harnessFrom(args);
     const reviewHarness = reviewHarnessFrom(args);
     const result = await fixPackage(repoDir, findings, {
@@ -1183,6 +1221,12 @@ ${c.bold('COMMANDS')}
                   plain bump. Everything is verified against a real baseline.
     --finding <id>  Fix one finding (default: all open findings)
     --agent         Let an LLM attempt findings the deterministic planner declines
+    --drive[=m]     Hand the whole fix to an opencode session pointed at Emend's
+                    own MCP tools. Emend keeps the deterministic half — which
+                    version clears the advisory, did the build survive, did the
+                    vulnerable version actually leave the tree — and the session
+                    does the repairing, which it can because it has edit rights.
+                    Works on both the drift and vulnerability paths.
     --harness[=m]   Escalate to opencode when structured edits still leave the
                     build red, pinning provider/model if given. Every hunk it
                     writes is held to the same evidence rule; anything the
