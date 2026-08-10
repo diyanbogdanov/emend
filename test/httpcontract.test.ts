@@ -513,3 +513,84 @@ test('a removal inside a path the description does cover is still reported', () 
   assert.equal(result.gone[0]?.route, '/repos/{}/{}/git/refs/heads/{}');
   assert.deepEqual(result.uncovered, []);
 });
+
+// ---------------------------------------------------------------------------
+// Comparing two versions of a description
+// ---------------------------------------------------------------------------
+
+// `checkAgainstSpec` asks whether a route is in today's description, which
+// cannot see a deprecation and cannot see a new capability — both are described.
+// Only a diff between two versions carries either, and until now nothing ran
+// one: `matchAgainstDiff` was exported, tested, and wired into no detector.
+const BEFORE = JSON.stringify({
+  openapi: '3.0.0',
+  info: { title: 'Acme', version: '1' },
+  paths: {
+    '/v1/charges': { post: {} },
+    '/v1/legacy-charges': { post: {} },
+  },
+});
+const AFTER = JSON.stringify({
+  openapi: '3.0.0',
+  info: { title: 'Acme', version: '2' },
+  paths: {
+    '/v1/charges': { post: { parameters: [{ name: 'idempotency_key', in: 'query' }] } },
+  },
+});
+
+const TWO_VERSIONS = {
+  'src/pay.ts': `
+    await fetch('https://api.acme.com/v1/charges', { method: 'POST' });
+    await fetch('https://api.acme.com/v1/legacy-charges', { method: 'POST' });
+  `,
+};
+
+function versioned(over: Partial<SpecCandidate> = {}) {
+  return {
+    resolve: async () => [candidate({ body: AFTER, ...over })],
+    previous: async () => candidate({ body: BEFORE }),
+  };
+}
+
+test('an endpoint the provider dropped between versions becomes a finding', async () => {
+  const { findings } = await httpContractDetector(versioned()).detect(context(TWO_VERSIONS));
+  const gone = findings.filter((f) => f.change.severity === 'breaking');
+  assert.ok(gone.some((f) => f.change.path.includes('/v1/legacy-charges')));
+  assert.equal(gone[0]?.sites[0]?.file, 'src/pay.ts');
+});
+
+test('a capability added to an endpoint already called is a finding too, marked feature', async () => {
+  // The other half of the job, and the more plentiful one. A provider ships far
+  // more capability than it removes, and this is the same work — find the call
+  // sites, offer the edit — on an endpoint the code already uses.
+  const { findings } = await httpContractDetector(versioned()).detect(context(TWO_VERSIONS));
+  const features = findings.filter((f) => f.change.severity === 'feature');
+  assert.ok(features.length > 0, 'the new query parameter reaches a call site');
+  assert.ok(features.every((f) => f.sites.length > 0));
+});
+
+test('a removal and a new capability do not collide in the store', async () => {
+  // Findings are tracked across scans by id, so two different changes on one
+  // host must not fingerprint alike or one will erase the other.
+  const { findings } = await httpContractDetector(versioned()).detect(context(TWO_VERSIONS));
+  assert.equal(new Set(findings.map((f) => f.id)).size, findings.length);
+});
+
+test('no earlier version is said out loud, not passed over', async () => {
+  // "Could not compare" and "nothing changed" are different answers, and a
+  // reader shown neither will take the silence for the second.
+  const { notes } = await httpContractDetector({
+    resolve: async () => [candidate({ body: AFTER })],
+    previous: async () => null,
+  }).detect(context(TWO_VERSIONS));
+  assert.ok((notes ?? []).some((n) => /earlier version/i.test(n)), (notes ?? []).join(' | '));
+});
+
+test('a description that may not assert breakage compares nothing either', async () => {
+  // Currency and provenance gate the diff exactly as they gate the single-spec
+  // check. A five-year-dead copy is no better a before-picture than an after.
+  const { findings } = await httpContractDetector(
+    versioned({ provenance: 'official-github', updatedAt: '2020-01-01T00:00:00.000Z' }),
+  ).detect(context(TWO_VERSIONS));
+  assert.deepEqual(findings, []);
+});

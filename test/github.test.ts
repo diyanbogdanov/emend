@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { claimsVendor, githubSpecUrls, lastChangedAt } from '../src/github.ts';
+import { claimsVendor, githubSpecUrls, lastChangedAt, previousVersion } from '../src/github.ts';
 import type { FetchResponse, Fetcher } from '../src/specfetch.ts';
 
 function fakeFetch(routes: Record<string, Partial<FetchResponse>>): Fetcher & { asked: string[] } {
@@ -313,4 +313,29 @@ test('an organisation pointing somewhere unrelated does not count', () => {
   assert.equal(claimsVendor('https://stripe-fan-club.io', 'stripe.com'), false);
   assert.equal(claimsVendor('', 'stripe.com'), false);
   assert.equal(claimsVendor('not a url', 'stripe.com'), false);
+});
+
+test('an earlier version is fetched at the commit that preceded the date asked for', async () => {
+  const listing = `${API}/repos/acme/openapi/commits?path=openapi%2Fspec.json&until=2024-01-01T00%3A00%3A00.000Z&per_page=1`;
+  const blob = 'https://raw.githubusercontent.com/acme/openapi/abc123/openapi/spec.json';
+  const found = await previousVersion(
+    fakeFetch({
+      [listing]: { body: JSON.stringify([{ sha: 'abc123', commit: { committer: { date: '2023-11-02T00:00:00Z' } } }]) },
+      [blob]: { body: '{"openapi":"3.0.0","paths":{}}' },
+    }),
+    'https://raw.githubusercontent.com/acme/openapi/main/openapi/spec.json',
+    new Date('2024-01-01T00:00:00.000Z'),
+    {},
+  );
+  assert.equal(found?.updatedAt, '2023-11-02T00:00:00Z');
+  assert.equal(found?.body, '{"openapi":"3.0.0","paths":{}}');
+});
+
+test('no earlier version is null, never today’s copy wearing an old date', async () => {
+  // Returning the current file would make every comparison empty and every
+  // repository look settled, which is the quiet failure this tier exists to
+  // avoid. A description served from the provider's own origin has no history
+  // at all and must say so rather than pretend to be unchanged.
+  assert.equal(await previousVersion(fakeFetch({}), 'https://raw.githubusercontent.com/a/b/main/x.json', new Date('2024-01-01'), {}), null);
+  assert.equal(await previousVersion(fakeFetch({}), 'https://api.acme.com/openapi.json', new Date('2024-01-01'), {}), null);
 });

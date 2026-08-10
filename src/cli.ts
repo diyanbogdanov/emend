@@ -25,6 +25,7 @@ import { PROVIDERS, resolveLlmConfig, type LlmConfig } from './llm/providers.ts'
 import { serve as serveMcp } from './mcp.ts';
 import { openCodeHarness, drivingHarness, drivePrompt, harnessPermitted, type Harness } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
+import { previousVersion } from './github.ts';
 import { scanPackages, goSymbolRecord } from './osv.ts';
 import { goSymbolSites, symbolTargets } from './goreach.ts';
 import { LINT_ADAPTERS } from './lint.ts';
@@ -156,7 +157,10 @@ function reviewHarnessFrom(args: Args): Harness | undefined {
  * `--contracts=<dir>` puts the description cache somewhere durable; a hosted
  * scan wants that, a one-off does not care.
  */
-function contractsFrom(args: Args): { resolve: (v: { domain: string }) => Promise<SpecCandidate[]> } | undefined {
+function contractsFrom(args: Args): {
+  resolve: (v: { domain: string }) => Promise<SpecCandidate[]>;
+  previous?: (c: SpecCandidate) => Promise<SpecCandidate | null>;
+} | undefined {
   const flag = args.flags.get('contracts');
   if (flag === undefined || flag === false) return undefined;
   const cacheDir =
@@ -174,7 +178,26 @@ function contractsFrom(args: Args): { resolve: (v: { domain: string }) => Promis
   const orgFlag = args.flags.get('github-org');
   const orgs = typeof orgFlag === 'string' ? githubOrgs(orgFlag) : new Map<string, string>();
 
+  // Comparing against an earlier version is its own opt-in, because it is its
+  // own outbound cost — two more requests per vendor — and it answers a
+  // different question: not "is this route still described" but "what changed,
+  // and does any of it reach this code". Deprecations and new capabilities are
+  // only visible that way, since both are still in the description.
+  const sinceFlag = args.flags.get('since');
+  const sinceDays = typeof sinceFlag === 'string' ? Number(sinceFlag) : sinceFlag === true ? 365 : 0;
+  const previous =
+    Number.isFinite(sinceDays) && sinceDays > 0
+      ? async (candidate: SpecCandidate): Promise<SpecCandidate | null> => {
+          const at = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000);
+          const found = await previousVersion(fetch, candidate.url, at, token ? { token } : {});
+          return found
+            ? { ...candidate, url: found.url, body: found.body, updatedAt: found.updatedAt }
+            : null;
+        }
+      : undefined;
+
   return {
+    ...(previous ? { previous } : {}),
     resolve: (vendor) => {
       const org = orgFor(vendor.domain, orgs);
       return resolveSpec(
@@ -1210,8 +1233,18 @@ ${c.bold('COMMANDS')}
                     Set GITHUB_TOKEN: only a description from the provider's own
                     repository may be used to assert a call is broken, and
                     unauthenticated GitHub allows 60 requests an hour.
-    --github-org o  Name the provider's GitHub organisation, for vendors whose
-                    own records do not link back to their API domain.
+    --github-org p  Name a provider's GitHub organisation, as domain=org pairs
+                    (stripe.com=stripe,openai.com=openai), for vendors whose own
+                    records do not link back to their API domain. Per vendor:
+                    one organisation for all of them would search the wrong
+                    repositories and credit the wrong provider's description.
+    --since[=days]  Also compare each description against itself as it stood
+                    that many days ago (365 by default) and report what changed that
+                    reaches your code — including deprecations and newly
+                    available capabilities, which reading today's description
+                    alone can never show, because both are still in it.
+                    Needs a GitHub-hosted description: that is what carries its
+                    own history.
     --freshness     Also list packages that are behind their latest version where
                     nothing this repository calls changed. Never counted in the
                     headline: every repository has some, and producing them

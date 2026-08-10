@@ -16,6 +16,7 @@
 import { createHash } from 'node:crypto';
 import ts from 'typescript';
 import { readLockfile } from './lockfile.ts';
+import { diffSpecs } from './specdiff.ts';
 import { packageOfSpecifier } from './callsites.ts';
 import { remediationTarget, type InstalledPackage, type VulnerablePackage } from './osv.ts';
 import { ordinal, rankVulnerable, type AdvisoryFacts } from './advisory.ts';
@@ -24,12 +25,13 @@ import { goInventory } from './goreach.ts';
 import { extractPins, findPinConflicts, resolvedVersions, PIN_FILES } from './pins.ts';
 import {
   checkAgainstSpec,
+  matchAgainstDiff,
   exportedUrlConstants,
   findHttpCalls,
   mergeExportedConstants,
   type HttpCall,
 } from './httpsites.ts';
-import { describeProvenance, type SpecCandidate } from './specs.ts';
+import { canAssertBreakage, describeProvenance, type SpecCandidate } from './specs.ts';
 import type { CallSite, Detector, Finding, InstalledDependency } from './types.ts';
 
 /**
@@ -149,9 +151,24 @@ function httpFindingId(host: string, method: string, route: string): string {
     .slice(0, 12);
 }
 
+/** A second fingerprint, so a change between versions cannot erase a removal. */
+function driftFindingId(host: string, path: string, kind: string): string {
+  return createHash('sha256').update(`http-drift|${host}|${path}|${kind}`).digest('hex').slice(0, 12);
+}
+
 /** Everything this detector needs beyond the ordinary context. */
 export interface HttpContractOptions {
   resolve: (vendor: { domain: string }) => Promise<SpecCandidate[]>;
+  /**
+   * The same description as it stood earlier, when one can be had.
+   *
+   * Injected like `resolve`, and for the same reason: obtaining it means more
+   * outbound requests, and that is the operator's call. Without it this detector
+   * answers only "is this route still described", which cannot see a deprecation
+   * or a new capability — both of those are described, and only a comparison
+   * between two versions carries them.
+   */
+  previous?: (candidate: SpecCandidate) => Promise<SpecCandidate | null>;
   /** Where a scan is willing to spend its network budget. */
   maxHosts?: number;
 }
@@ -291,6 +308,45 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
             sites: [{ file: call.file, line: call.line, column: call.column, text: call.text, via: 'import' }],
             confidence: 'medium',
           });
+        }
+
+        // What changed since, which is a different question from what is
+        // described now. A deprecation and a new capability are both *in* the
+        // description, so no reading of it alone can surface either — only a
+        // comparison with an earlier version does, and this is where that runs.
+        if (options.previous && spec.body && canAssertBreakage(spec)) {
+          const before = await options.previous(spec);
+          if (!before?.body) {
+            notes.push(
+              `${host}: no earlier version of its description could be had, so what changed was not compared`,
+            );
+          } else {
+            const diff = diffSpecs(host, before.body, spec.body);
+            if (diff.unanalyzable) {
+              notes.push(`${host}: ${diff.note ?? 'the earlier description could not be read'}`);
+            } else {
+              // A route the current description has lost is already reported
+              // above, from today's description alone. Reporting it again from
+              // the comparison would be one fact twice.
+              const reported = new Set(check.gone.map((c) => `${c.method} ${c.route}`));
+              for (const hit of matchAgainstDiff(calls, host, diff.changes, before.body)) {
+                if (reported.has(hit.change.path)) continue;
+                findings.push({
+                  id: driftFindingId(host, hit.change.path, hit.change.kind),
+                  detector: 'http-contract',
+                  pkg: host,
+                  // Two dates rather than two versions: a wire API has no
+                  // number to bump, and when the description last moved is what
+                  // a reader needs to judge the claim.
+                  fromVersion: before.updatedAt?.slice(0, 10) ?? 'earlier',
+                  toVersion: spec.updatedAt?.slice(0, 10) ?? 'today',
+                  change: hit.change,
+                  sites: hit.sites,
+                  confidence: hit.change.confidence,
+                });
+              }
+            }
+          }
         }
       }
       return { findings, notes };

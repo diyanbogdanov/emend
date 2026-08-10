@@ -291,3 +291,66 @@ export async function lastChangedAt(
     return undefined;
   }
 }
+
+/**
+ * The same description as it stood some days ago.
+ *
+ * The before-picture a version comparison needs, and it is free for anything
+ * GitHub-hosted: the file carries its own history. A description served from
+ * the provider's own origin has no past to fetch, so this returns nothing for
+ * one — honestly, since a caller that took silence for "nothing changed" would
+ * be reading a gap as a result.
+ *
+ * `null` means no earlier version could be had, for any reason: not a
+ * repository file, rate limited, or the file is newer than the window asked
+ * for. It never returns today's copy as though it were the older one, which
+ * would make every comparison empty and every repository look settled.
+ */
+export async function previousVersion(
+  fetch: Fetcher,
+  url: string,
+  before: Date,
+  options: GithubOptions,
+): Promise<{ url: string; body: string; updatedAt: string } | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.hostname.toLowerCase() !== 'raw.githubusercontent.com') return null;
+
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  const [owner, repo, ...rest] = parts;
+  if (!owner || !repo || rest.length === 0) return null;
+  const path = (rest[0] === 'refs' && rest[1] === 'heads' ? rest.slice(3) : rest.slice(1)).join('/');
+  if (!path) return null;
+
+  const headers: Record<string, string> = {
+    accept: 'application/vnd.github+json',
+    ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
+  };
+
+  try {
+    const listing = await fetch(
+      `${API}/repos/${owner}/${repo}/commits?path=${encodeURIComponent(path)}` +
+        `&until=${encodeURIComponent(before.toISOString())}&per_page=1`,
+      { headers },
+    );
+    if (!listing.ok) return null;
+    const commits: unknown = JSON.parse(listing.body);
+    if (!Array.isArray(commits) || commits.length === 0) return null;
+
+    const entry = commits[0] as { sha?: unknown; commit?: { committer?: { date?: unknown } } };
+    const sha = typeof entry.sha === 'string' ? entry.sha : null;
+    const date = entry.commit?.committer?.date;
+    if (!sha || typeof date !== 'string') return null;
+
+    const raw = `https://raw.githubusercontent.com/${owner}/${repo}/${sha}/${path}`;
+    const body = await fetch(raw);
+    if (!body.ok) return null;
+    return { url: raw, body: body.body, updatedAt: date };
+  } catch {
+    return null;
+  }
+}
