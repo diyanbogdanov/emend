@@ -299,6 +299,13 @@ function printScan(report: ScanReport, showAll: boolean): void {
     }
 
     console.log(header);
+    // An analyzed package has notes too, and they are the ones that say what
+    // was *not* claimed: a surface truncated before its end, a symbol reported
+    // as moved rather than removed. This branch computed them, carried them
+    // through the report, and dropped them here — so a finding that vanished
+    // between two runs did so without explanation, which is the silence the
+    // rest of this tier exists to prevent.
+    if (p.note) console.log(`    ${c.dim(p.note)}`);
     for (const f of p.findings) {
       console.log(
         `    ${severityLabel(f.change.severity)} ${c.cyan(f.change.path)} ${c.dim(`(${f.change.kind}, ${f.confidence} confidence, id ${f.id})`)}`,
