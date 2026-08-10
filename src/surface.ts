@@ -153,7 +153,21 @@ function kindOf(flags: ts.SymbolFlags): SymbolKind {
  * essentially every symbol would look "changed".
  */
 export function normaliseSignature(raw: string): string {
-  let s = raw.replace(/import\((?:"[^"]*"|'[^']*')\)\./g, '');
+  // A cached module path names a place on this disk, and that place carries the
+  // version: `…/cache/@radix-ui+react-accordion/1.2.12/package/dist/index`. Left
+  // alone it changes on every upgrade whether or not the API did, so every
+  // namespace re-export reported as breaking every time. Measured on
+  // activepieces, that was 26 of 81 breaking findings — radix-ui alone 21.
+  //
+  // Reduced to the module rather than removed: the package and the subpath are
+  // what say *which* module this is, and dropping them would make every
+  // re-export in a package compare equal to every other. It also keeps somebody's
+  // home directory out of stored findings and pull request bodies.
+  let s = raw.replace(
+    /(["'])[^"']*?\/cache\/([^/"']+)\/[^/"']+\/package\/([^"']*)\1/g,
+    '$1$2/$3$1',
+  );
+  s = s.replace(/import\((?:"[^"]*"|'[^']*')\)\./g, '');
   s = s.replace(/\s+/g, ' ').trim();
   if (s.length > MAX_SIGNATURE_CHARS) {
     s = s.slice(0, MAX_SIGNATURE_CHARS) + '…<truncated>';
