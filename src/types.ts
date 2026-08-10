@@ -21,6 +21,21 @@ export type SymbolKind =
   | 'variable'
   | 'unknown';
 
+/**
+ * One of a declaration's type parameters, and whether a caller may omit it.
+ *
+ * Recorded because the signature cannot say. `checker.typeToString()` prints
+ * type parameters by name and never by declaration, so `Config<D>` becoming
+ * `Config<D, P>` gives no clue whether `P` has a default — and that is the
+ * whole difference between a widening every existing use survives and a break.
+ * The answer exists only where the declaration does, so it is taken there.
+ */
+export interface TypeParam {
+  name: string;
+  /** True when the declaration gives it a default, so it may be left out. */
+  defaulted: boolean;
+}
+
 export interface ApiSymbol {
   /** Dotted path from the module root, e.g. "Stripe.charges.create". */
   path: string;
@@ -40,6 +55,8 @@ export interface ApiSymbol {
    */
   doc?: string;
   optional: boolean;
+  /** Present only where the declaration takes type parameters. */
+  typeParams?: TypeParam[];
 }
 
 export interface ApiSurface {

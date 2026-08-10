@@ -189,3 +189,120 @@ test('a symbol absent from both symbols and aliases is still a removal', () => {
   assert.equal(removed.length, 1);
   assert.equal(removed[0]?.path, 'gone');
 });
+
+// ---------------------------------------------------------------------------
+// A widening is not a break
+// ---------------------------------------------------------------------------
+
+// The signatures below are the real ones, read out of the store after scanning
+// activepieces — not invented. A first attempt at this rule worked on fixtures
+// I made up and could not fire on any of them, which is why they are copied
+// verbatim here.
+//
+// `checker.typeToString()` prints type parameters by name and never by
+// declaration, so `AxiosRequestConfig<D>` -> `AxiosRequestConfig<D, P>` carries
+// no clue whether `P` has a default. That answer only exists where the
+// declaration does, which is why `surface.ts` now records it.
+
+test('a type parameter added with a default is a feature, not a break', () => {
+  // axios 1.18.0 -> 1.19.0, verbatim. Every existing use still compiles:
+  // `AxiosRequestConfig` and `AxiosRequestConfig<Foo>` both still bind.
+  const changes = diffSurfaces(
+    surface('1.18.0', [
+      sym('AxiosRequestConfig', 'AxiosRequestConfig<D>', {
+        typeParams: [{ name: 'D', defaulted: true }],
+      }),
+    ]),
+    surface('1.19.0', [
+      sym('AxiosRequestConfig', 'AxiosRequestConfig<D, P>', {
+        typeParams: [
+          { name: 'D', defaulted: true },
+          { name: 'P', defaulted: true },
+        ],
+      }),
+    ]),
+  ).changes;
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]?.severity, 'feature');
+});
+
+test('a widening is still one when the new parameter threads through the signature', () => {
+  // `isAxiosError`, verbatim. The return type mentions the new parameter, so the
+  // strings differ in more than the parameter list — and it is still compatible,
+  // because everything that bound before still binds.
+  const changes = diffSurfaces(
+    surface('1.18.0', [
+      sym('isAxiosError', '<T = any, D = any>(payload: any) => payload is AxiosError<T, D>', {
+        typeParams: [
+          { name: 'T', defaulted: true },
+          { name: 'D', defaulted: true },
+        ],
+      }),
+    ]),
+    surface('1.19.0', [
+      sym(
+        'isAxiosError',
+        '<T = any, D = any, P = any>(payload: any) => payload is AxiosError<T, D, P>',
+        {
+          typeParams: [
+            { name: 'T', defaulted: true },
+            { name: 'D', defaulted: true },
+            { name: 'P', defaulted: true },
+          ],
+        },
+      ),
+    ]),
+  ).changes;
+  assert.equal(changes[0]?.severity, 'feature');
+});
+
+test('a type parameter added without a default still breaks', () => {
+  // `Config<Foo>` no longer binds: the second has nothing to fall back to.
+  const changes = diffSurfaces(
+    surface('1.0.0', [sym('Config', 'Config<D>', { typeParams: [{ name: 'D', defaulted: true }] })]),
+    surface('2.0.0', [
+      sym('Config', 'Config<D, P>', {
+        typeParams: [
+          { name: 'D', defaulted: true },
+          { name: 'P', defaulted: false },
+        ],
+      }),
+    ]),
+  ).changes;
+  assert.equal(changes[0]?.severity, 'breaking');
+});
+
+test('a defaulted type parameter does not excuse the rest of the signature', () => {
+  // The limit that keeps this from swallowing real breaks. Adding a defaulted
+  // parameter is provably compatible on its own and says nothing about a value
+  // parameter that changed beside it — `path` went from string to number.
+  const changes = diffSurfaces(
+    surface('1.0.0', [
+      sym('read', '<T = any>(path: string) => T', { typeParams: [{ name: 'T', defaulted: true }] }),
+    ]),
+    surface('2.0.0', [
+      sym('read', '<T = any, P = any>(path: number) => T', {
+        typeParams: [
+          { name: 'T', defaulted: true },
+          { name: 'P', defaulted: true },
+        ],
+      }),
+    ]),
+  ).changes;
+  assert.equal(changes[0]?.severity, 'breaking');
+});
+
+test('a renamed type parameter is not a widening', () => {
+  const changes = diffSurfaces(
+    surface('1.0.0', [sym('Box', 'Box<T>', { typeParams: [{ name: 'T', defaulted: true }] })]),
+    surface('2.0.0', [
+      sym('Box', 'Box<U, P>', {
+        typeParams: [
+          { name: 'U', defaulted: true },
+          { name: 'P', defaulted: true },
+        ],
+      }),
+    ]),
+  ).changes;
+  assert.equal(changes[0]?.severity, 'breaking');
+});

@@ -9,7 +9,7 @@
  * rather than trusted.
  */
 
-import type { ApiSurface, SurfaceChange, SurfaceDiff } from './types.ts';
+import type { ApiSurface, ApiSymbol, SurfaceChange, SurfaceDiff } from './types.ts';
 
 /**
  * Split the first parameter list of a signature into top-level parameters.
@@ -86,6 +86,47 @@ export function requiredArity(signature: string): number | null {
   const params = parameterList(signature);
   if (params === null) return null;
   return params.filter((p) => !isOptionalParam(p)).length;
+}
+
+/**
+ * Whether the new declaration only added type parameters a caller may omit.
+ *
+ * `Config` and `Config<Foo>` both still bind when `P = any` is appended, so
+ * nothing that compiled stops compiling. Reporting that as breaking reads a
+ * structural difference as a semantic one — measured on activepieces, where
+ * axios 1.18 -> 1.19 reported `AxiosRequestConfig`, `AxiosResponse` and
+ * `isAxiosError` as breaking on the default path, with no flags, on a package
+ * in nearly every TypeScript repository.
+ *
+ * Two things have to hold, and the second is what keeps this from swallowing
+ * real breaks. The parameters already there must be untouched and every added
+ * one must be defaulted — which only `TypeParam` can answer, since the
+ * signature omits defaults entirely. And the rest of the signature must be
+ * unchanged *once the added parameters are taken back out*: a widening threads
+ * its new parameter through the return type, so the strings legitimately
+ * differ, while `(path: string)` becoming `(path: number)` alongside it does
+ * not survive the removal and stays breaking.
+ */
+export function widenedByDefaultedTypeParams(before: ApiSymbol, after: ApiSymbol): boolean {
+  const had = before.typeParams ?? [];
+  const has = after.typeParams ?? [];
+  if (has.length <= had.length) return false;
+  for (let i = 0; i < had.length; i++) if (has[i]?.name !== had[i]?.name) return false;
+
+  const added = has.slice(had.length);
+  if (!added.every((p) => p.defaulted)) return false;
+
+  // Take the added parameters back out of the new signature. What is left must
+  // be what the old one said, or something else changed too.
+  let reduced = after.signature;
+  for (const { name } of added) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    reduced = reduced.replace(
+      new RegExp(`,\\s*${escaped}(\\s*=\\s*[^,>]+)?(?=\\s*[,>])`, 'g'),
+      '',
+    );
+  }
+  return reduced === before.signature;
 }
 
 export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
@@ -168,15 +209,18 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
           afterRequired !== null &&
           afterRequired > beforeRequired;
 
+        // A widening is not a break: everything that bound before still binds.
+        const widened = widenedByDefaultedTypeParams(before, after);
+
         changes.push({
           path,
           kind: 'signature-changed',
-          severity: 'breaking',
+          severity: widened ? 'feature' : 'breaking',
           // A new *required* parameter is unambiguously breaking. Any other
           // signature edit might be a widening (safe) or a narrowing (breaking);
           // string comparison alone cannot tell, so it stays medium and is never
           // auto-applied without verification.
-          confidence: gainedRequiredParam ? 'high' : 'medium',
+          confidence: widened || gainedRequiredParam ? 'high' : 'medium',
           before: before.signature,
           after: after.signature,
         });

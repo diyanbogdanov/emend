@@ -10,7 +10,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import ts from 'typescript';
-import type { ApiSurface, ApiSymbol, SymbolKind } from './types.ts';
+import type { ApiSurface, ApiSymbol, SymbolKind, TypeParam } from './types.ts';
 import { materializeTypeDeps } from './registry.ts';
 
 /**
@@ -46,6 +46,20 @@ interface PackageJson {
  * Returns null when the package ships no types — which the caller must treat as
  * "unanalyzable", never as "no changes".
  */
+/**
+ * A declaration's type parameters, with whether each carries a default.
+ *
+ * Taken from the declaration rather than the type string because the type
+ * string does not carry it — see `TypeParam`. Absent on the great majority of
+ * symbols, which is why the field is optional rather than an empty array.
+ */
+function readTypeParams(decl: ts.Declaration): TypeParam[] {
+  const params = (decl as { typeParameters?: ts.NodeArray<ts.TypeParameterDeclaration> })
+    .typeParameters;
+  if (!params) return [];
+  return params.map((p) => ({ name: p.name.text, defaulted: p.default !== undefined }));
+}
+
 export async function resolveTypesEntry(pkgDir: string): Promise<string | null> {
   let manifest: PackageJson;
   try {
@@ -471,6 +485,7 @@ export async function extractSurface(
       signature = 'unresolved';
     }
 
+    const typeParams = readTypeParams(decl);
     const deprecated = isDeprecated(resolved, checker);
     // Only for deprecations. Every symbol has documentation, a surface holds
     // thousands of them, and none of the rest is a migration instruction.
@@ -482,6 +497,7 @@ export async function extractSurface(
       deprecated,
       ...(guidance ? { doc: guidance } : {}),
       optional: Boolean(resolved.flags & ts.SymbolFlags.Optional),
+      ...(typeParams.length > 0 ? { typeParams } : {}),
     };
 
     if (depth >= MAX_DEPTH) return;
