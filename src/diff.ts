@@ -144,8 +144,27 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
   // A truncated surface cannot support absence claims. If the *new* surface was
   // cut short, a symbol missing from it may simply be past the cutoff — reporting
   // that as a removal would invent breaking changes that do not exist.
-  const suppressRemovals = Boolean(to.truncated) || unanalyzable;
-  const suppressAdditions = Boolean(from.truncated) || unanalyzable;
+  // A surface whose entry resolved but yielded nothing is the same failure one
+  // step later, and it read as a deleted API. Measured on activepieces: every
+  // package reporting a removal reported *only* removals — slugify 1 of 1,
+  // fuse.js 1 of 1, react-table 5 of 5 — and slugify 1.6.6 -> 1.6.9 is a patch
+  // whose published types still export the same symbol. Could not read is not
+  // was removed.
+  const readNothing = (s: ApiSurface): boolean =>
+    s.entry !== null && Object.keys(s.symbols).length === 0;
+
+  const suppressRemovals = Boolean(to.truncated) || readNothing(to) || unanalyzable;
+  const suppressAdditions = Boolean(from.truncated) || readNothing(from) || unanalyzable;
+  if (readNothing(to)) {
+    notes.push(
+      `${to.pkg}@${to.version} declares types but no symbols could be read from them; removals are not reported`,
+    );
+  }
+  if (readNothing(from)) {
+    notes.push(
+      `${from.pkg}@${from.version} declares types but no symbols could be read from them; additions are not reported`,
+    );
+  }
   if (to.truncated) {
     notes.push(
       `${to.pkg}@${to.version} surface was truncated; removals are not reported`,

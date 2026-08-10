@@ -39,7 +39,7 @@ test('guidance is only carried for the deprecation that needs it', () => {
   // budget on prose the model must ignore.
   const diff = diffSurfaces(
     surface('1.0.0', [sym('gone', 'string', { doc: 'A perfectly ordinary description.' })]),
-    surface('2.0.0', []),
+    surface('2.0.0', [sym('stayed', 'string')]),
   );
   assert.equal(diff.changes.find((c) => c.path === 'gone')?.guidance, undefined);
 });
@@ -86,8 +86,10 @@ test('requiredArity ignores optional markers nested inside parameter types', () 
 });
 
 test('a removed export is breaking with high confidence', () => {
-  const from = surface('1.0.0', [sym('doThing', '(a: string) => void')]);
-  const to = surface('2.0.0', []);
+  // The new surface has to contain *something*, or the absence of `doThing`
+  // says only that nothing could be read out of it — see the empty-surface test.
+  const from = surface('1.0.0', [sym('doThing', '(a: string) => void'), sym('kept', 'string')]);
+  const to = surface('2.0.0', [sym('kept', 'string')]);
   const change = diffSurfaces(from, to).changes.find((c) => c.path === 'doThing');
   assert.equal(change?.kind, 'removed');
   assert.equal(change?.severity, 'breaking');
@@ -305,4 +307,32 @@ test('a renamed type parameter is not a widening', () => {
     ]),
   ).changes;
   assert.equal(changes[0]?.severity, 'breaking');
+});
+
+test('a new surface with no symbols cannot support a removal claim', () => {
+  // Measured on activepieces. Every package that reported a removal reported
+  // *only* removals — slugify 1 of 1, fuse.js 1 of 1, react-table 5 of 5 — which
+  // is the shape of the new version's declarations failing to read, not of an
+  // API being deleted. Proven on slugify 1.6.6 -> 1.6.9, a patch release: npm
+  // shows the same `types` field, the same `main`, no exports map, and more
+  // exported declarations after than before. Nothing was removed.
+  //
+  // `entry === null` was already guarded. An entry that resolved and yielded
+  // nothing is the same failure one step later, and it read as a deleted API.
+  const diff = diffSurfaces(
+    surface('1.6.6', [sym('slugify', 'typeof slugify')]),
+    surface('1.6.9', []),
+  );
+  assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 0);
+  assert.match(diff.note ?? '', /no symbols|could not be read/i);
+});
+
+test('a genuine removal alongside symbols that survived is still reported', () => {
+  // The limit. @tanstack/react-table 8 -> 9 really did restructure, and a new
+  // surface that reads fine and simply lacks a symbol is evidence of removal.
+  const diff = diffSurfaces(
+    surface('8.19.2', [sym('useReactTable', 'typeof useReactTable'), sym('flexRender', 'typeof flexRender')]),
+    surface('9.1.2', [sym('flexRender', 'typeof flexRender')]),
+  );
+  assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 1);
 });
