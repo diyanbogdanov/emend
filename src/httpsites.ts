@@ -41,6 +41,15 @@ export interface HttpCall {
   route: string | null;
   /** Why it could not be read, when it could not. */
   reason?: string;
+  /**
+   * Query parameters this call already sends, by name.
+   *
+   * What separates "this endpoint now supports X" from "you already do that".
+   * Measured on activepieces: Xero added `pageSize` to six endpoints its
+   * triggers call, and all six were already sending it — five of seven feature
+   * findings suggested doing what the code does.
+   */
+  params: string[];
 }
 
 /**
@@ -224,7 +233,7 @@ function importedNames(sf: ts.SourceFile): Map<string, string> {
 function readUrl(
   node: ts.Expression,
   constants: Map<string, string>,
-): { host: string; route: string } | { reason: string } {
+): { host: string; route: string; params: string[] } | { reason: string } {
   let raw: string;
 
   if (ts.isStringLiteralLike(node)) {
@@ -277,6 +286,7 @@ function readUrl(
   return {
     host: parsed.hostname.toLowerCase(),
     route: routeOf(parsed.pathname).replaceAll(placeholder, '{}'),
+    params: [...parsed.searchParams.keys()].map((k) => k.replaceAll(placeholder, '{}')),
   };
 }
 
@@ -334,12 +344,25 @@ function methodFromOptions(node: ts.Expression | undefined): string | null {
  */
 function requestOptions(
   node: ts.Expression | undefined,
-): { url: ts.Expression; method: string | null } | null {
+): { url: ts.Expression; method: string | null; params: string[] } | null {
   if (!node || !ts.isObjectLiteralExpression(node)) return null;
   const url = property(node, ['url', 'uri']);
   const method = property(node, ['method']);
   if (!url || !method) return null;
-  return { url, method: verbOf(method) };
+  return { url, method: verbOf(method), params: queryNames(property(node, ['queryparams', 'params', 'searchparams', 'query'])) };
+}
+
+/** The names an options object's query bag declares, where it declares them. */
+function queryNames(node: ts.Expression | undefined): string[] {
+  if (!node || !ts.isObjectLiteralExpression(node)) return [];
+  const names: string[] = [];
+  for (const prop of node.properties) {
+    if (ts.isPropertyAssignment(prop) || ts.isShorthandPropertyAssignment(prop)) {
+      const name = ts.isIdentifier(prop.name) || ts.isStringLiteralLike(prop.name) ? prop.name.text : '';
+      if (name) names.push(name);
+    }
+  }
+  return names;
 }
 
 /**
@@ -426,8 +449,14 @@ export function findHttpCalls(
 
         calls.push(
           'reason' in read2
-            ? { ...base, resolved: false, host: null, route: null, reason: read2.reason }
-            : { ...base, resolved: true, host: read2.host, route: read2.route },
+            ? { ...base, resolved: false, host: null, route: null, params: [], reason: read2.reason }
+            : {
+                ...base,
+                resolved: true,
+                host: read2.host,
+                route: read2.route,
+                params: [...new Set([...read2.params, ...(options?.params ?? [])])],
+              },
         );
       }
     }
@@ -734,7 +763,18 @@ export function matchAgainstDiff(
     // spells out, and a trailing parameter that may stand for several segments.
     const spans = spansByRoute.get(endpoint.route) === true;
     const routes = bases.map((base) => `${base}${endpoint.route}`);
+
+    // A capability already taken up is not a suggestion. `query:pageSize` added
+    // to an endpoint whose call already sends `pageSize` is a note telling the
+    // author to do what they did — measured on activepieces, five of seven
+    // feature findings were exactly that, and noise is what buries the two that
+    // were real. Only for additions: already using a parameter is a reason not
+    // to suggest adopting it, and the opposite of a reason to stay quiet when
+    // it breaks.
+    const offered = change.severity === 'feature' ? change.path.match(/ query:(\S+)$/)?.[1] : undefined;
+
     const sites = mine
+      .filter((c) => offered === undefined || !c.params.includes(offered))
       .filter(
         (c) =>
           c.method === endpoint.method &&

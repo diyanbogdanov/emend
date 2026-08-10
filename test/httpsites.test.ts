@@ -492,3 +492,56 @@ test('without a description the diff still matches what it plainly can', () => {
   const hits = matchAgainstDiff(CALLS, 'api.stripe.com', [change('POST /v1/charges', 'removed', 'breaking')]);
   assert.equal(hits.length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// A capability already taken up is not a suggestion
+// ---------------------------------------------------------------------------
+
+test('a call records which query parameters it already sends', () => {
+  const inUrl = find(`await fetch('https://api.stripe.com/v1/charges?limit=3&expand=data');`);
+  assert.deepEqual(inUrl[0]?.params?.sort(), ['expand', 'limit']);
+
+  // The options-object form, which is how every wrapper passes them.
+  const inOptions = find(`
+    await httpClient.sendRequest({
+      method: 'GET',
+      url: 'https://api.stripe.com/v1/charges',
+      queryParams: { page: String(page), pageSize: String(size) },
+    });
+  `);
+  assert.deepEqual(inOptions[0]?.params?.sort(), ['page', 'pageSize']);
+});
+
+test('a new parameter the call already passes is not offered back to it', () => {
+  // Measured on activepieces. Xero added `pageSize` to six endpoints its Xero
+  // triggers call, and all six triggers were already sending it — five of seven
+  // feature findings were a suggestion to do what the code does. A feature path
+  // that reports adopted capability is noise, and noise is what buries the two
+  // that were real.
+  const calls = find(`
+    await httpClient.sendRequest({
+      method: 'GET',
+      url: 'https://api.xero.com/BankTransactions',
+      queryParams: { page: '1', pageSize: '100' },
+    });
+  `);
+  const hits = matchAgainstDiff(calls, 'api.xero.com', [
+    change('GET /BankTransactions query:pageSize', 'added', 'feature'),
+    change('GET /BankTransactions query:References', 'added', 'feature'),
+  ]);
+  assert.deepEqual(
+    hits.map((h) => h.change.path),
+    ['GET /BankTransactions query:References'],
+    'only the one it has not taken up',
+  );
+});
+
+test('a breaking change on a parameter the call sends is still reported', () => {
+  // The limit. Already using a parameter is a reason not to suggest adopting it,
+  // and the opposite of a reason to stay quiet when it breaks.
+  const calls = find(`await fetch('https://api.stripe.com/v1/charges?limit=3', { method: 'POST' });`);
+  const hits = matchAgainstDiff(calls, 'api.stripe.com', [
+    change('POST /v1/charges query:limit', 'signature-changed', 'breaking'),
+  ]);
+  assert.equal(hits.length, 1);
+});
