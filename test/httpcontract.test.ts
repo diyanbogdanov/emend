@@ -416,3 +416,37 @@ test('the number of hosts a scan will resolve is bounded, and the bound is a cho
   );
   assert.equal(resolved, 2);
 });
+
+test('the detector resolves a base URL one file exports and another calls', async () => {
+  // The wiring is the whole feature: `findHttpCalls` cannot see a second file,
+  // so the detector gathers the repository's exported base URLs first and hands
+  // them down. Measured as 362 calls across eight repositories that read as
+  // unresolvable while their base URL sat one import away.
+  const detector = httpContractDetector({ resolve: async () => [candidate()] });
+  const { findings } = await detector.detect(
+    context({
+      'src/config.ts': `export const API_BASE = 'https://api.acme.com';`,
+      'src/billing.ts': `import { API_BASE } from './config';
+        await fetch(\`\${API_BASE}/v1/charges\`, { method: 'POST' });
+        await fetch(\`\${API_BASE}/v1/invoices/upcoming\`);`,
+    }),
+  );
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.change.path, 'GET /v1/invoices/upcoming');
+  assert.equal(findings[0]?.sites[0]?.file, 'src/billing.ts');
+});
+
+test('the detector still runs where no call reads on its own', async () => {
+  // `applies` used to require a call that resolved standalone, which is exactly
+  // what a repository keeping its base URLs in one module never has. Gating on
+  // it would skip the repositories cross-module resolution was added for.
+  const detector = httpContractDetector({ resolve: async () => [candidate()] });
+  const applies = await detector.applies(
+    context({
+      'src/config.ts': `export const API_BASE = 'https://api.acme.com';`,
+      'src/billing.ts': `import { API_BASE } from './config';
+        await fetch(\`\${API_BASE}/v1/invoices/upcoming\`);`,
+    }),
+  );
+  assert.equal(applies, true);
+});

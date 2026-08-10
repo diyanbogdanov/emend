@@ -22,7 +22,13 @@ import { ordinal, rankVulnerable, type AdvisoryFacts } from './advisory.ts';
 import type { LintAdapter } from './lint.ts';
 import { goInventory } from './goreach.ts';
 import { extractPins, findPinConflicts, resolvedVersions, PIN_FILES } from './pins.ts';
-import { checkAgainstSpec, findHttpCalls, type HttpCall } from './httpsites.ts';
+import {
+  checkAgainstSpec,
+  exportedUrlConstants,
+  findHttpCalls,
+  mergeExportedConstants,
+  type HttpCall,
+} from './httpsites.ts';
 import { describeProvenance, type SpecCandidate } from './specs.ts';
 import type { CallSite, Detector, Finding, InstalledDependency } from './types.ts';
 
@@ -173,12 +179,34 @@ export interface HttpContractOptions {
 export function httpContractDetector(options: HttpContractOptions): Detector {
   const maxHosts = options.maxHosts ?? 8;
 
+  /**
+   * The base URLs the repository exports, gathered before any call is read.
+   *
+   * A separate pass is what cross-module resolution costs: a call in one file
+   * cannot be resolved until every file that might declare its base URL has
+   * been seen. The substring gate keeps that affordable — a module with no
+   * exported constant and no `http` in it anywhere cannot contribute, and that
+   * is the overwhelming majority of files.
+   */
+  async function exportedConstantsIn(ctx: DetectorContext): Promise<Map<string, string>> {
+    const perFile: Array<Map<string, string>> = [];
+    for (const file of ctx.sourceFiles) {
+      if (!/\.[cm]?tsx?$/.test(file)) continue;
+      const source = await ctx.read(file);
+      if (source === null) continue;
+      if (!source.includes('export const') || !source.includes('http')) continue;
+      perFile.push(exportedUrlConstants(source));
+    }
+    return mergeExportedConstants(perFile);
+  }
+
   async function callsIn(ctx: DetectorContext): Promise<HttpCall[]> {
+    const exported = await exportedConstantsIn(ctx);
     const calls: HttpCall[] = [];
     for (const file of ctx.sourceFiles) {
       if (!/\.[cm]?tsx?$/.test(file)) continue;
       const source = await ctx.read(file);
-      if (source !== null) calls.push(...findHttpCalls(file, source));
+      if (source !== null) calls.push(...findHttpCalls(file, source, exported));
     }
     return calls;
   }
@@ -187,14 +215,19 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
     id: 'http-contract',
 
     async applies(ctx: DetectorContext): Promise<boolean> {
-      // Cheap enough to be a precondition: the first resolved outbound call
-      // anywhere is the answer, and most repositories have one in the first file
-      // that has any.
+      // The first outbound call anywhere is the answer, and most repositories
+      // have one in the first file that has any.
+      //
+      // Resolved-or-not, deliberately. Once a base URL can come from another
+      // module, whether a call reads standalone no longer predicts whether
+      // `detect` can resolve it, and gating on that would skip exactly the
+      // repositories this pass was added for. A repository whose calls all stay
+      // unreadable costs one walk and finds no hosts, so nothing is fetched.
       for (const file of ctx.sourceFiles) {
         if (!/\.[cm]?tsx?$/.test(file)) continue;
         const source = await ctx.read(file);
         if (source === null) continue;
-        if (findHttpCalls(file, source).some((c) => c.resolved)) return true;
+        if (findHttpCalls(file, source).length > 0) return true;
       }
       return false;
     },

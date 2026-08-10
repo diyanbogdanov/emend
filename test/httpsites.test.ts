@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findHttpCalls, matchAgainstDiff } from '../src/httpsites.ts';
+import {
+  exportedUrlConstants,
+  findHttpCalls,
+  matchAgainstDiff,
+  mergeExportedConstants,
+} from '../src/httpsites.ts';
 import type { SurfaceChange } from '../src/types.ts';
 
 function find(source: string) {
@@ -263,4 +268,91 @@ test('`request` is not treated as an HTTP client', () => {
     request('https://api.acme.com/v1/charges');
   `);
   assert.deepEqual(calls, []);
+});
+
+// ---------------------------------------------------------------------------
+// A base URL another module declares
+// ---------------------------------------------------------------------------
+
+test('an exported absolute URL is collected; anything else is not', () => {
+  // Only absolute URLs, because the whole point is unlocking a host. A path
+  // fragment resolves nothing on its own — the host stays substituted and the
+  // call is refused anyway — and every extra name is another chance for two
+  // modules to disagree about what it means.
+  const found = exportedUrlConstants(`
+    export const API_BASE = 'https://api.acme.com';
+    export const VERSION = 'v1';
+    const PRIVATE_BASE = 'https://internal.acme.com';
+    export let MUTABLE = 'https://mutable.acme.com';
+  `);
+  assert.deepEqual([...found], [['API_BASE', 'https://api.acme.com']]);
+});
+
+test('two modules exporting the same name differently cancel out', () => {
+  // The intra-file ambiguity rule at repository scope. Picking one would
+  // attribute a call to whichever module happened to be read second.
+  const merged = mergeExportedConstants([
+    new Map([['BASE', 'https://api.acme.com']]),
+    new Map([['BASE', 'https://api.other.com']]),
+    new Map([['ONLY', 'https://api.only.com']]),
+  ]);
+  assert.deepEqual([...merged], [['ONLY', 'https://api.only.com']]);
+});
+
+test('a constant imported from another module resolves the host', () => {
+  // The largest remaining shape: 362 calls across eight repositories whose base
+  // URL is declared in a different file. Nothing about the call is ambiguous —
+  // the file says where the name comes from and one module defines it.
+  const calls = findHttpCalls(
+    'src/pay.ts',
+    `import { API_BASE } from './config';
+     await fetch(\`\${API_BASE}/v1/charges\`);`,
+    new Map([['API_BASE', 'https://api.acme.com']]),
+  );
+  assert.equal(calls[0]?.resolved, true);
+  assert.equal(calls[0]?.host, 'api.acme.com');
+  assert.equal(calls[0]?.route, '/v1/charges');
+});
+
+test('an aliased import is looked up by the name the other module exports', () => {
+  const calls = findHttpCalls(
+    'src/pay.ts',
+    `import { API_BASE as BASE } from './config';
+     await fetch(\`\${BASE}/v1/charges\`);`,
+    new Map([['API_BASE', 'https://api.acme.com']]),
+  );
+  assert.equal(calls[0]?.host, 'api.acme.com');
+});
+
+test('a name the file never imported is not resolved from elsewhere', () => {
+  // The guard that makes name-based lookup safe without resolving module paths.
+  // `base` here is a parameter; some unrelated module exporting that name says
+  // nothing about it, and substituting would invent a vendor.
+  const calls = findHttpCalls(
+    'src/pay.ts',
+    `export async function charge(base: string) {
+       return fetch(\`\${base}/v1/charges\`);
+     }`,
+    new Map([['base', 'https://api.acme.com']]),
+  );
+  assert.equal(calls[0]?.resolved, false);
+  assert.match(calls[0]?.reason ?? '', /host is substituted/i);
+});
+
+test('a file may take one base from another module and declare another itself', () => {
+  // A name cannot be both imported and declared in one module, so the two
+  // sources never contend for the same identifier. What matters is that
+  // enabling the wider lookup does not disturb the local one.
+  const calls = findHttpCalls(
+    'src/pay.ts',
+    `import { REMOTE } from './config';
+     const LOCAL = 'https://local.acme.com';
+     await fetch(\`\${REMOTE}/v1/charges\`);
+     await fetch(\`\${LOCAL}/v1/refunds\`);`,
+    new Map([['REMOTE', 'https://remote.acme.com']]),
+  );
+  assert.deepEqual(
+    calls.map((c) => c.host),
+    ['remote.acme.com', 'local.acme.com'],
+  );
 });

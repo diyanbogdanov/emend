@@ -121,6 +121,97 @@ function stringConstants(sf: ts.SourceFile): Map<string, string> {
 }
 
 /**
+ * The absolute-URL constants a file exports, for callers in other modules.
+ *
+ * The largest shape left after in-file constants: 362 calls across eight
+ * repositories take their base URL from a different file. Nothing about them is
+ * ambiguous to a reader — the import says where the name comes from — and they
+ * were all being reported as URLs nobody could read.
+ *
+ * Only absolute URLs, because the point is unlocking a *host*. A constant
+ * holding a path fragment resolves nothing on its own: the host stays
+ * substituted and `readUrl` refuses the call regardless. Every extra name in
+ * this map is another chance for two modules to disagree about what it means,
+ * so the map holds only the names that can actually decide a vendor.
+ *
+ * Only `export const`, for the reason the in-file version takes only `const`: a
+ * binding that may be reassigned is a value assumed rather than read.
+ */
+export function exportedUrlConstants(source: string): Map<string, string> {
+  const sf = ts.createSourceFile('m.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
+  const found = new Map<string, string>();
+
+  for (const statement of sf.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    const exported = statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+    if (!exported) continue;
+    if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+
+    for (const decl of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+      if (!ts.isStringLiteralLike(decl.initializer)) continue;
+      if (!/^https?:\/\//i.test(decl.initializer.text)) continue;
+      found.set(decl.name.text, decl.initializer.text);
+    }
+  }
+  return found;
+}
+
+/**
+ * One map for the repository, minus every name it defines two ways.
+ *
+ * The in-file ambiguity rule at a wider scope. A repository where two modules
+ * both export `BASE`, pointing at different hosts, cannot be resolved by name,
+ * and choosing one would attribute a call to whichever file happened to be read
+ * second. Dropping the name costs a resolution; keeping it would cost a finding
+ * against the wrong vendor.
+ */
+export function mergeExportedConstants(
+  perFile: Iterable<Map<string, string>>,
+): Map<string, string> {
+  const merged = new Map<string, string>();
+  const ambiguous = new Set<string>();
+
+  for (const file of perFile) {
+    for (const [name, value] of file) {
+      const seen = merged.get(name);
+      if (seen !== undefined && seen !== value) ambiguous.add(name);
+      else merged.set(name, value);
+    }
+  }
+  for (const name of ambiguous) merged.delete(name);
+  return merged;
+}
+
+/**
+ * The names a file imports, mapped to the names their modules export.
+ *
+ * This is what makes resolving by name safe without resolving module paths. A
+ * bare name matching some export somewhere says nothing — `base` is as likely
+ * to be a parameter — so a substitution is only taken from another module when
+ * this file actually asked that module for it. Aliases are recorded the way
+ * they are written: `import { API_BASE as BASE }` looks up `API_BASE`.
+ *
+ * Resolving the specifier to a file is deliberately not attempted. Path
+ * aliases, index files and workspace packages are what a TypeScript `Program`
+ * exists to work out, and this detector's value is that it runs over one file
+ * at a time without a build. Requiring the name to be unambiguous across the
+ * repository buys the same safety without any of that machinery.
+ */
+function importedNames(sf: ts.SourceFile): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const statement of sf.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const element of bindings.elements) {
+      names.set(element.name.text, (element.propertyName ?? element.name).text);
+    }
+  }
+  return names;
+}
+
+/**
  * Read a URL out of a string or template literal.
  *
  * A template is read as far as its substitutions allow. `/v1/charges/${id}` is a
@@ -208,9 +299,31 @@ function methodFromOptions(node: ts.Expression | undefined): string | null {
  * information — the shape of the call is the whole signal — and a detector that
  * can run over a single file is one that can run before a build succeeds.
  */
-export function findHttpCalls(file: string, source: string): HttpCall[] {
+export function findHttpCalls(
+  file: string,
+  source: string,
+  /**
+   * Absolute-URL constants the rest of the repository exports, from
+   * `mergeExportedConstants`. Optional, and omitting it keeps this function
+   * exactly what its docstring promises — one file, no build, no resolver.
+   */
+  imported?: ReadonlyMap<string, string>,
+): HttpCall[] {
   const sf = ts.createSourceFile(file, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
+
+  // What this file says a name means, then what it asked another module for.
+  // A name only reaches the second step if this file imported it, so an
+  // unrelated module exporting `base` cannot decide what a parameter called
+  // `base` holds.
   const constants = stringConstants(sf);
+  if (imported) {
+    for (const [local, exportedAs] of importedNames(sf)) {
+      if (constants.has(local)) continue;
+      const value = imported.get(exportedAs);
+      if (value !== undefined) constants.set(local, value);
+    }
+  }
+
   const calls: HttpCall[] = [];
 
   const visit = (node: ts.Node): void => {
