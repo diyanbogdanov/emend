@@ -176,6 +176,14 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
     );
   }
 
+  // Signatures that appear in the new surface and did not exist in the old one,
+  // by signature, so a removal can ask whether anything took its place.
+  const appeared = new Map<string, string>();
+  for (const [path, sym] of Object.entries(to.symbols)) {
+    if (path in from.symbols) continue;
+    if (!appeared.has(sym.signature)) appeared.set(sym.signature, path);
+  }
+
   if (!unanalyzable) {
     for (const [path, before] of Object.entries(from.symbols)) {
       // A path absent from `symbols` may still be reachable through an alias.
@@ -192,6 +200,24 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
 
       if (!after) {
         if (suppressRemovals) continue;
+
+        // A symbol may have moved rather than gone. Adding a default export
+        // changes which root the extractor walks, so every path is renamed at
+        // once and a whole surface reads as deleted — measured on slugify
+        // 1.6.6 -> 1.6.9, a patch release whose function is still exported.
+        //
+        // The evidence is an identically signatured symbol that is *newly*
+        // present: `_default :: typeof slugify` is byte-for-byte what `slugify`
+        // was. Requiring it to be new is what keeps this from swallowing real
+        // deletions — a symbol that existed in both versions cannot be where a
+        // third one went, however well its signature matches.
+        const movedTo = appeared.get(before.signature);
+        if (movedTo !== undefined) {
+          notes.push(
+            `${to.pkg}@${to.version}: ${path} is no longer at that path, but ${movedTo} has its exact signature — reported as moved rather than removed`,
+          );
+          continue;
+        }
         changes.push({
           path,
           kind: 'removed',
