@@ -450,3 +450,66 @@ test('the detector still runs where no call reads on its own', async () => {
   );
   assert.equal(applies, true);
 });
+
+// ---------------------------------------------------------------------------
+// A description that does not cover where the call goes
+// ---------------------------------------------------------------------------
+
+// One host may serve several APIs, each with its own description, and the
+// resolver brings back one of them. Xero's `api.xero.com` resolved
+// `xero_accounting.yaml` — 138 paths, all /Accounts and /Invoices — while the
+// call was `/projects.xro/2.0/Projects`, which lives in a different Xero
+// document entirely. GitHub is the same shape: its REST description has no
+// `/graphql`, and the GraphQL API is not missing, it is described elsewhere.
+//
+// Absence from the description in hand is not absence from the API. The signal
+// that separates the two is whether the description names anything at all under
+// the same top-level path: a real removal leaves its neighbours behind, and
+// `/repos/{owner}/{repo}/git/refs/{ref}` still has its PATCH and DELETE.
+const PARTIAL = JSON.stringify({
+  openapi: '3.0.0',
+  info: { title: 'Xero Accounting API', version: '1' },
+  paths: {
+    '/Accounts': { get: {} },
+    '/Accounts/{AccountID}': { get: {} },
+    '/Invoices': { get: {} },
+  },
+});
+
+const partial = (): SpecCandidate =>
+  candidate({ vendor: 'api.xero.com', provenance: 'official-domain', body: PARTIAL });
+
+test('a call under a path the description never mentions is not a removal', () => {
+  const source = `
+    await fetch('https://api.xero.com/Accounts');
+    await fetch('https://api.xero.com/projects.xro/2.0/Projects');
+  `;
+  const result = checkAgainstSpec(findHttpCalls('src/xero.ts', source), 'api.xero.com', partial());
+  assert.equal(result.matched, 1);
+  assert.deepEqual(result.gone, [], 'this description is not a description of the Projects API');
+});
+
+test('a path the description does not cover is reported as unchecked, not dropped', () => {
+  // The rule this whole detector turns on. Suppressing the claim is right;
+  // suppressing the fact that nobody checked would be the same silence the
+  // "could not check is not checked and clean" rule exists to prevent.
+  const source = `
+    await fetch('https://api.xero.com/Accounts');
+    await fetch('https://api.xero.com/projects.xro/2.0/Projects');
+  `;
+  const result = checkAgainstSpec(findHttpCalls('src/xero.ts', source), 'api.xero.com', partial());
+  assert.deepEqual(result.uncovered, ['/projects.xro']);
+});
+
+test('a removal inside a path the description does cover is still reported', () => {
+  // The regression guard, and the reason coverage is judged by the top-level
+  // path rather than by whether anything nearby matched. GitHub describes
+  // `/repos/.../git/refs/{ref}` for patch and delete, so the region is plainly
+  // covered and the missing GET is a real finding — this is XPoet/picx.
+  const source = `await fetch(\`https://api.github.com/repos/\${o}/\${r}/git/refs/heads/\${b}\`);
+    await fetch(\`https://api.github.com/repos/\${o}/\${r}/git/ref/heads/\${b}\`);`;
+  const result = checkAgainstSpec(findHttpCalls('src/gh.ts', source), 'api.github.com', github());
+  assert.equal(result.gone.length, 1);
+  assert.equal(result.gone[0]?.route, '/repos/{}/{}/git/refs/heads/{}');
+  assert.deepEqual(result.uncovered, []);
+});

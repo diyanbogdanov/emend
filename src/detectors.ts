@@ -261,6 +261,15 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
             `${host}: ${check.unresolvedCalls} call(s) build their URL at runtime and could not be checked`,
           );
         }
+        // The description covers part of what this host serves, and calls reach
+        // the rest. Saying so is the difference between "checked and clean" and
+        // "not described here" — one host commonly serves several APIs, each
+        // documented separately.
+        if (check.uncovered.length > 0) {
+          notes.push(
+            `${host}: this description says nothing about ${check.uncovered.join(', ')}, so calls under ${check.uncovered.length === 1 ? 'it were' : 'those were'} not checked`,
+          );
+        }
         for (const call of check.gone) {
           findings.push({
             id: httpFindingId(host, call.method, call.route ?? ''),

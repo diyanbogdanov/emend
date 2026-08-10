@@ -461,6 +461,14 @@ export interface ContractCheck {
   /** How many of this host's calls the description accounted for. */
   matched: number;
   unresolvedCalls: number;
+  /**
+   * Top-level paths this description says nothing about, which calls reach.
+   *
+   * Carried rather than folded into silence: those calls were not checked, and
+   * a reader who is not told that will read their absence from `gone` as a
+   * clean result. Same rule as `unresolvedCalls`, one level up.
+   */
+  uncovered: string[];
   /** Why nothing is claimed, when nothing is. */
   note?: string;
 }
@@ -495,7 +503,7 @@ export function checkAgainstSpec(
 ): ContractCheck {
   const mine = calls.filter((c) => c.resolved && c.host === host);
   const unresolvedCalls = calls.filter((c) => !c.resolved).length;
-  const empty = { gone: [], matched: 0, unresolvedCalls };
+  const empty = { gone: [], matched: 0, unresolvedCalls, uncovered: [] };
 
   if (!spec.body) return { ...empty, note: 'the description was located but not fetched' };
   if (!canAssertBreakage(spec)) {
@@ -558,7 +566,35 @@ export function checkAgainstSpec(
     };
   }
 
-  return { gone: mine.filter((c) => !present(c)), matched, unresolvedCalls };
+  // A description in hand may describe only part of what a host serves. Xero's
+  // accounting document is 138 paths of `/Accounts` and `/Invoices` and says
+  // nothing about `/projects.xro`, which is a different Xero API in a different
+  // file; GitHub's REST description has no `/graphql`, and GraphQL is not
+  // missing, it is described elsewhere. Reading absence as removal turns "this
+  // is not a description of that" into a claim that the endpoint is gone.
+  //
+  // A real removal leaves its neighbours behind — GitHub still describes
+  // `/repos/{owner}/{repo}/git/refs/{ref}` for patch and delete, which is why
+  // the missing GET is a finding — so the question is whether the description
+  // names anything at all under the same top-level path. Nothing there means
+  // this document does not cover that part of the API, and Emend says so
+  // instead of claiming from it.
+  const describedTops = new Set(described.map((e) => topSegment(e.route)));
+  const covered = (call: HttpCall): boolean =>
+    call.route !== null && describedTops.has(topSegment(call.route));
+
+  const missing = mine.filter((c) => !present(c));
+  const uncovered = [
+    ...new Set(missing.filter((c) => !covered(c)).map((c) => topSegment(c.route ?? ''))),
+  ].sort();
+
+  return { gone: missing.filter(covered), matched, unresolvedCalls, uncovered };
+}
+
+/** `/repos/{}/git/refs` -> `/repos`. The API surface a route belongs to. */
+function topSegment(route: string): string {
+  const first = route.split('/')[1] ?? '';
+  return `/${first}`;
 }
 
 /** `POST /v1/charges query:x` and `POST /v1/charges` both name that endpoint. */
