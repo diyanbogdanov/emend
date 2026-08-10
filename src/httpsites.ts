@@ -48,13 +48,76 @@ export interface HttpCall {
  *
  * `fetch` is the platform. The rest are the libraries people actually reach for,
  * and they share a shape: `client.verb(url, …)` or `client(url, …)`.
+ *
+ * `request` is deliberately absent.
+ *
+ * The npm package of that name was deprecated in 2020, and the identifier is
+ * overwhelmingly something else: `request(app.getHttpServer())` is supertest,
+ * `request.get('Authorization')` is Express reading a header off the inbound
+ * request. Measured across six repositories, some 2,300 of 3,079 matches were
+ * one of those two — and because none of them reads as a URL, every one was
+ * counted into the "could not be checked" figure a user is shown. That
+ * overstates what Emend failed to read and buries the calls it genuinely
+ * could not, which is the honesty rule pointing the other way.
  */
-const CLIENTS = new Set(['fetch', 'axios', 'got', 'ky', 'request', 'superagent']);
+const CLIENTS = new Set(['fetch', 'axios', 'got', 'ky', 'superagent']);
 const VERBS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options']);
 
 /** The route with query and fragment removed — the same endpoint either way. */
 function routeOf(pathname: string): string {
-  return pathname.replace(/[?#].*$/, '') || '/';
+  // Repeated separators collapse. A base URL that ends in a slash joined to a
+  // path that starts with one yields `//v1/charges`, which names the same
+  // endpoint and matches no description — so leaving it would manufacture a
+  // finding out of a formatting detail.
+  return pathname.replace(/[?#].*$/, '').replace(/\/{2,}/g, '/') || '/';
+}
+
+/**
+ * The string constants a file declares, where the name means one thing.
+ *
+ * A base URL in a constant is the largest readable-but-unread shape there is:
+ * measured across eight repositories, 60 calls reach a real vendor this way —
+ * gmail, Anthropic, Microsoft Graph, PagerDuty, Azure — and each was reported
+ * as a URL that could not be read. The value is in the file and a `const`
+ * cannot change after its initializer, so resolving it is reading rather than
+ * assuming.
+ *
+ * Collected in a pass of its own, and that is a correctness requirement rather
+ * than a convenience: a call inside a function body runs after the module has
+ * finished evaluating, so it sees a constant declared further down the file.
+ * Collecting as we walk would read those as unknown depending on source order.
+ *
+ * Only `const`. A `let` may hold something else by the time the call runs, and
+ * a value read here would be a value assumed. A name declared twice with
+ * different values is dropped rather than resolved to whichever came last —
+ * two functions each with their own `url` is ordinary code, and picking one
+ * would attribute a call to whichever vendor was collected second.
+ */
+function stringConstants(sf: ts.SourceFile): Map<string, string> {
+  const found = new Map<string, string>();
+  const ambiguous = new Set<string>();
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      ts.isStringLiteralLike(node.initializer) &&
+      ts.isVariableDeclarationList(node.parent) &&
+      (node.parent.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      const name = node.name.text;
+      const value = node.initializer.text;
+      const seen = found.get(name);
+      if (seen !== undefined && seen !== value) ambiguous.add(name);
+      else found.set(name, value);
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sf);
+  for (const name of ambiguous) found.delete(name);
+  return found;
 }
 
 /**
@@ -67,16 +130,26 @@ function routeOf(pathname: string): string {
  * different: the host decides which API this is, and without it there is nothing
  * to check against.
  */
-function readUrl(node: ts.Expression): { host: string; route: string } | { reason: string } {
+function readUrl(
+  node: ts.Expression,
+  constants: Map<string, string>,
+): { host: string; route: string } | { reason: string } {
   let raw: string;
 
   if (ts.isStringLiteralLike(node)) {
     raw = node.text;
   } else if (ts.isTemplateExpression(node)) {
     // `{}` marks a substituted segment, so a path parameter stays one segment
-    // rather than collapsing into its neighbours.
+    // rather than collapsing into its neighbours. A substitution the file
+    // declares as a constant is not a runtime value at all, so it goes in as
+    // what it is — which is what turns `${BASE}/v1/charges` into a readable URL.
     let text = node.head.text;
-    for (const span of node.templateSpans) text += `{}${span.literal.text}`;
+    for (const span of node.templateSpans) {
+      const known = ts.isIdentifier(span.expression)
+        ? constants.get(span.expression.text)
+        : undefined;
+      text += `${known ?? '{}'}${span.literal.text}`;
+    }
     raw = text;
   } else if (ts.isNoSubstitutionTemplateLiteral(node)) {
     raw = node.text;
@@ -137,6 +210,7 @@ function methodFromOptions(node: ts.Expression | undefined): string | null {
  */
 export function findHttpCalls(file: string, source: string): HttpCall[] {
   const sf = ts.createSourceFile(file, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
+  const constants = stringConstants(sf);
   const calls: HttpCall[] = [];
 
   const visit = (node: ts.Node): void => {
@@ -161,7 +235,7 @@ export function findHttpCalls(file: string, source: string): HttpCall[] {
 
       const url = node.arguments[0];
       if (recognised && url) {
-        const read = readUrl(url);
+        const read = readUrl(url, constants);
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
         const base = {
           file,

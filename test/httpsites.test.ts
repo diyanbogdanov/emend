@@ -186,3 +186,81 @@ test('unresolved calls are carried alongside, not counted as clean', () => {
   const hits = matchAgainstDiff(CALLS, 'api.stripe.com', [change('POST /v1/charges', 'removed', 'breaking')]);
   assert.equal(hits[0]?.unresolvedCalls, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Reading a base URL the file declares
+// ---------------------------------------------------------------------------
+
+test('a base URL held in a constant is read, because the file says what it is', () => {
+  // The single biggest readable-but-unread shape. Measured across eight
+  // repositories, 60 calls reach a real vendor this way — gmail, Anthropic,
+  // Microsoft Graph, PagerDuty, Azure — and every one of them was being
+  // reported as a URL nobody could read. The constant is right there in the
+  // file and cannot change, so resolving it is reading, not guessing.
+  const calls = find(`
+    const BASE = 'https://api.acme.com';
+    await fetch(\`\${BASE}/v1/charges\`);
+  `);
+  assert.equal(calls[0]?.resolved, true);
+  assert.equal(calls[0]?.host, 'api.acme.com');
+  assert.equal(calls[0]?.route, '/v1/charges');
+});
+
+test('a constant resolves the host and leaves the unknowns unknown', () => {
+  const calls = find(`
+    const BASE = 'https://api.acme.com';
+    await fetch(\`\${BASE}/v1/charges/\${id}\`);
+  `);
+  assert.equal(calls[0]?.route, '/v1/charges/{}', 'the id is still a runtime value');
+});
+
+test('a reassignable binding is not read, because it may not hold that value', () => {
+  // `const` cannot change after its initializer; `let` and `var` can, and a
+  // value read here would be a value assumed. The whole point of resolving the
+  // constant is that the file guarantees it.
+  const calls = find(`
+    let base = 'https://api.acme.com';
+    await fetch(\`\${base}/v1/charges\`);
+  `);
+  assert.equal(calls[0]?.resolved, false);
+  assert.match(calls[0]?.reason ?? '', /host is substituted/i);
+});
+
+test('a name declared twice with different values is not read', () => {
+  // Two functions each declaring their own `url` is ordinary code, and picking
+  // either one would attribute a call to whichever vendor happened to be
+  // collected last.
+  const calls = find(`
+    function a() { const BASE = 'https://api.acme.com'; return fetch(\`\${BASE}/v1/a\`); }
+    function b() { const BASE = 'https://api.other.com'; return fetch(\`\${BASE}/v1/b\`); }
+  `);
+  assert.equal(calls[0]?.resolved, false, 'ambiguous, so unread rather than guessed');
+  assert.equal(calls[1]?.resolved, false);
+});
+
+test('a constant that is not an absolute URL stays out of scope', () => {
+  const calls = find(`
+    const BASE = '/api/internal';
+    await fetch(\`\${BASE}/thing\`);
+  `);
+  assert.equal(calls[0]?.resolved, false);
+  assert.match(calls[0]?.reason ?? '', /relative/i);
+});
+
+test('`request` is not treated as an HTTP client', () => {
+  // Measured across six repositories: of 3,079 calls matching the client list,
+  // some 2,300 were `request(app.getHttpServer())` from supertest or
+  // `request.get('Authorization')` from Express reading a header. None is an
+  // outbound call, and every one of them was being counted into the
+  // "could not be checked" total a user is shown — overstating what Emend
+  // failed to read, and burying the calls it genuinely could not.
+  //
+  // The npm package of that name was deprecated in 2020. The identifier is far
+  // more often somebody's request object, and it is not worth the noise.
+  const calls = find(`
+    request.get('Authorization');
+    request(app.getHttpServer());
+    request('https://api.acme.com/v1/charges');
+  `);
+  assert.deepEqual(calls, []);
+});
