@@ -474,6 +474,40 @@ export interface ContractCheck {
 }
 
 /**
+ * How a description's routes line up with the URLs a call site writes out.
+ *
+ * Shared by both halves of this tier on purpose. `checkAgainstSpec` asks whether
+ * a route is in today's description; `matchAgainstDiff` asks where a change
+ * between two versions lands. They face the same two mismatches — a base path
+ * the call spells out and the description omits, and a parameter that stands
+ * for several segments — and they had drifted: every fix landed on the first
+ * and none on the second, so seventeen vendors mined against three
+ * repositories, 175 breaking Klaviyo changes among them, matched nothing at all.
+ * One function now decides it for both.
+ */
+function alignmentFor(doc: unknown): { bases: string[]; spansByRoute: Map<string, boolean> } {
+  const bases = basePathsOf(doc);
+  const routes = new Set(
+    [...readOperations(doc).keys()].map((key) => endpointOf(key)?.route).filter((r) => r !== undefined),
+  );
+
+  // A trailing parameter may stand for more than one segment — GitHub writes
+  // `/git/matching-refs/{ref}` and every real call spells it `heads/main` — but
+  // only where the description defines nothing deeper. `{repo}` in
+  // `/repos/{owner}/{repo}` is trailing too, and letting that span would match
+  // every call to the host and silence every finding this tier can make.
+  const spansByRoute = new Map<string, boolean>();
+  for (const route of routes) {
+    let deeper = false;
+    for (const other of routes) {
+      if (other.length > route.length && other.startsWith(`${route}/`)) { deeper = true; break; }
+    }
+    spansByRoute.set(route, !deeper);
+  }
+  return { bases, spansByRoute };
+}
+
+/**
  * Check a host's calls against the description of it, without needing a previous
  * one to compare against.
  *
@@ -521,29 +555,8 @@ export function checkAgainstSpec(
   // A route in a description is stated relative to the description's base; a
   // route at a call site is written out in full. Aligning them is what lets a
   // Swagger 2.0 document with `basePath: "/api"` meet `https://slack.com/api/…`.
-  const bases = basePathsOf(doc);
+  const { bases, spansByRoute } = alignmentFor(doc);
   const endpoints = [...ops.keys()].map((key) => endpointOf(key)).filter((e) => e !== null);
-
-  // Whether a route's trailing parameter may stand for more than one segment.
-  //
-  // GitHub writes `/repos/{owner}/{repo}/git/matching-refs/{ref}` and every real
-  // call spells the ref as `heads/main`, so a strict segment count reports a
-  // correct, modern call as one to a deleted endpoint — a pull request against
-  // working code, which costs more than saying nothing.
-  //
-  // Bounded by the description's own shape rather than by a guess: a parameter
-  // may span only where nothing deeper is defined beneath it. `{repo}` in
-  // `/repos/{owner}/{repo}` is trailing too, and letting it span would match
-  // every call to the host and silence every finding this detector can make.
-  const routes = new Set(endpoints.map((e) => e.route));
-  const spansByRoute = new Map<string, boolean>();
-  for (const route of routes) {
-    let deeper = false;
-    for (const other of routes) {
-      if (other.length > route.length && other.startsWith(`${route}/`)) { deeper = true; break; }
-    }
-    spansByRoute.set(route, !deeper);
-  }
 
   const described = endpoints.flatMap((e) =>
     bases.map((base) => ({
@@ -679,11 +692,28 @@ export function matchAgainstDiff(
   calls: HttpCall[],
   host: string,
   changes: SurfaceChange[],
+  /**
+   * The description these change paths were read out of — the older one, since
+   * that is where a removed route is still defined.
+   *
+   * Without it the routes are compared exactly, which is what
+   * `checkAgainstSpec` did before it learned about base paths and parameters
+   * that span segments. Measured: seventeen vendors mined against three
+   * repositories, 175 breaking Klaviyo changes and 112 GitHub ones among them,
+   * landed on nothing at all — not because nothing was reached, but because
+   * nothing could match.
+   */
+  spec?: string,
 ): ContractHit[] {
   const mine = calls.filter((c) => c.resolved && c.host === host);
   // Unresolved calls have no host by definition, so they count against every
   // vendor rather than none. Attributing them would be a guess.
   const unresolvedCalls = calls.filter((c) => !c.resolved).length;
+
+  const doc = spec ? parseSpec(spec) : null;
+  const { bases, spansByRoute } = doc
+    ? alignmentFor(doc)
+    : { bases: [''], spansByRoute: new Map<string, boolean>() };
 
   const hits: ContractHit[] = [];
   for (const change of changes) {
@@ -691,8 +721,17 @@ export function matchAgainstDiff(
     const endpoint = endpointOf(change.path);
     if (!endpoint) continue;
 
+    // The same alignment `checkAgainstSpec` applies: a base path the call site
+    // spells out, and a trailing parameter that may stand for several segments.
+    const spans = spansByRoute.get(endpoint.route) === true;
+    const routes = bases.map((base) => `${base}${endpoint.route}`);
     const sites = mine
-      .filter((c) => c.method === endpoint.method && c.route && sameRoute(c.route, endpoint.route))
+      .filter(
+        (c) =>
+          c.method === endpoint.method &&
+          c.route !== null &&
+          routes.some((route) => sameRoute(c.route as string, route, spans)),
+      )
       .map(
         (c): CallSite => ({ file: c.file, line: c.line, column: c.column, text: c.text, via: 'import' }),
       );

@@ -424,3 +424,54 @@ test('a framework injecting its own routes invents no vendor', () => {
   assert.equal(calls[0]?.resolved, false);
   assert.match(calls[0]?.reason ?? '', /relative/i);
 });
+
+// ---------------------------------------------------------------------------
+// Matching a version diff onto call sites
+// ---------------------------------------------------------------------------
+
+// `matchAgainstDiff` is the other half of this tier: `checkAgainstSpec` asks
+// whether a route is in today's description and so can never see a deprecation,
+// because a deprecated endpoint is still described. Only a diff between two
+// versions carries that.
+//
+// It was matching routes the way `checkAgainstSpec` did before the base path
+// and spanning fixes, and the consequence was measured: seventeen vendors mined
+// against activepieces, n8n and sim — including 175 breaking or deprecated
+// Klaviyo changes and 112 GitHub ones — produced zero hits. Not because nothing
+// was reached, but because nothing could match.
+const REFS_SPEC = JSON.stringify({
+  openapi: '3.0.0',
+  info: { title: 'GitHub', version: '1' },
+  paths: { '/repos/{owner}/{repo}/git/refs/{ref}': { get: {} } },
+});
+
+test('a removed endpoint matches the call that spells its parameter out', () => {
+  const calls = findHttpCalls('src/gh.ts', 'await fetch(`https://api.github.com/repos/${o}/${r}/git/refs/heads/${b}`);');
+  const hits = matchAgainstDiff(
+    calls,
+    'api.github.com',
+    [change('GET /repos/{owner}/{repo}/git/refs/{ref}', 'removed', 'breaking')],
+    REFS_SPEC,
+  );
+  assert.equal(hits.length, 1, 'heads/${b} is the {ref} the description names');
+  assert.equal(hits[0]?.sites[0]?.file, 'src/gh.ts');
+});
+
+test('a version diff is aligned to the description’s base path too', () => {
+  const spec = JSON.stringify({
+    swagger: '2.0',
+    info: { title: 'Slack', version: '1' },
+    basePath: '/api',
+    paths: { '/channels.list': { get: {} } },
+  });
+  const calls = findHttpCalls('src/slack.ts', `await fetch('https://slack.com/api/channels.list');`);
+  const hits = matchAgainstDiff(calls, 'slack.com', [change('GET /channels.list', 'removed', 'breaking')], spec);
+  assert.equal(hits.length, 1);
+});
+
+test('without a description the diff still matches what it plainly can', () => {
+  // The regression guard: callers that have no spec to hand keep working, and
+  // an exact route still lands on its call site.
+  const hits = matchAgainstDiff(CALLS, 'api.stripe.com', [change('POST /v1/charges', 'removed', 'breaking')]);
+  assert.equal(hits.length, 1);
+});
