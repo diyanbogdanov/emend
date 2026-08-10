@@ -6,6 +6,8 @@ import {
   bestSpec,
   canAssertBreakage,
   provenanceOfPointer,
+  githubOrgs,
+  orgFor,
   wellKnownSpecPaths,
   type SpecCandidate,
 } from '../src/specs.ts';
@@ -233,4 +235,37 @@ test('the swagger spellings are tried too, because half the web still uses them'
 
 test('a malformed origin yields no candidates rather than a malformed URL', () => {
   assert.deepEqual(wellKnownSpecPaths('not a url'), []);
+});
+
+// ---------------------------------------------------------------------------
+// An operator naming an organisation names it for one vendor
+// ---------------------------------------------------------------------------
+
+test('a named organisation applies to the vendor it was named for, and no other', () => {
+  // A single organisation applied to every vendor is not merely useless for the
+  // others, it is unsafe. `githubSpecUrls` skips discovery when an organisation
+  // is given, so scanning Twilio with `stripe` named would search Stripe's
+  // repositories, and `provenanceOfPointer` credits a github.com URL whose first
+  // path segment equals the named organisation — so a Stripe description would
+  // be recorded as Twilio's own word, at 95/100, licensed to assert breakage.
+  // That is the highest-stakes attribution in the resolver getting it exactly
+  // backwards.
+  const orgs = githubOrgs('stripe.com=stripe, openai.com=openai');
+  assert.equal(orgs.get('stripe.com'), 'stripe');
+  assert.equal(orgs.get('openai.com'), 'openai');
+  assert.equal(orgs.get('twilio.com'), undefined);
+});
+
+test('a bare organisation is refused rather than applied to everything', () => {
+  // The old spelling. Silently treating it as "for every vendor" is the unsafe
+  // reading, and silently ignoring it would drop something the operator meant.
+  assert.throws(() => githubOrgs('stripe'), /domain=org/);
+});
+
+test('an organisation named for a domain covers the hosts under it', () => {
+  // A call site reaches `api.stripe.com`; an operator names `stripe.com`.
+  const orgs = githubOrgs('stripe.com=stripe');
+  assert.equal(orgFor('api.stripe.com', orgs), 'stripe');
+  assert.equal(orgFor('stripe.com', orgs), 'stripe');
+  assert.equal(orgFor('api.twilio.com', orgs), undefined);
 });

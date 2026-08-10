@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { githubSpecUrls, lastChangedAt } from '../src/github.ts';
+import { claimsVendor, githubSpecUrls, lastChangedAt } from '../src/github.ts';
 import type { FetchResponse, Fetcher } from '../src/specfetch.ts';
 
 function fakeFetch(routes: Record<string, Partial<FetchResponse>>): Fetcher & { asked: string[] } {
@@ -283,4 +283,34 @@ test('a date that cannot be established is undefined, never today', async () => 
   // the whole point of asking.
   assert.equal(await lastChangedAt(fakeFetch({}), 'https://raw.githubusercontent.com/a/b/main/x.json', {}), undefined);
   assert.equal(await lastChangedAt(fakeFetch({}), 'https://api.acme.com/openapi.json', {}), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Claiming the domain back
+// ---------------------------------------------------------------------------
+
+test('an organisation whose site is a sibling domain of the vendor still counts', () => {
+  // The measured failure, and the reason Stripe — the worked example in the
+  // brief this is meant to serve — resolved to a third-party mirror that may
+  // assert nothing. Stripe's organisation records `stripe.dev` as its site, not
+  // `stripe.com`, so demanding the blog sit *under* the vendor's domain rejected
+  // the provider's own organisation. Publishing docs on a sibling domain is
+  // ordinary; `vercel.com`/`vercel.app`, `stripe.com`/`stripe.dev`.
+  //
+  // The login already had to be derived from the vendor's own label, so this
+  // asks for a second, independent claim on the same name rather than loosening
+  // to nothing.
+  assert.equal(claimsVendor('https://stripe.dev', 'stripe.com'), true);
+  assert.equal(claimsVendor('https://stripe.com', 'stripe.com'), true);
+  assert.equal(claimsVendor('https://docs.stripe.com', 'stripe.com'), true);
+});
+
+test('an organisation pointing somewhere unrelated does not count', () => {
+  // The guard. Attribution here is the highest-stakes call the resolver makes:
+  // everywhere else a wrong vendor costs a bad lead, here it costs a confident
+  // claim that somebody's integration is broken.
+  assert.equal(claimsVendor('https://example.com', 'stripe.com'), false);
+  assert.equal(claimsVendor('https://stripe-fan-club.io', 'stripe.com'), false);
+  assert.equal(claimsVendor('', 'stripe.com'), false);
+  assert.equal(claimsVendor('not a url', 'stripe.com'), false);
 });

@@ -180,6 +180,49 @@ export function isCurrent(candidate: SpecCandidate, now: number = Date.now()): b
   return now - changed <= CURRENCY_WINDOW_MS;
 }
 
+/**
+ * Organisations an operator has named, each for the vendor they named it for.
+ *
+ * `domain=org`, comma separated. A single organisation applied to every vendor
+ * is not merely useless for the others, it is unsafe: `githubSpecUrls` skips
+ * discovery when an organisation is given, so a scan of Twilio with `stripe`
+ * named would search Stripe's repositories, and `provenanceOfPointer` credits a
+ * github.com URL whose first path segment equals the named organisation. A
+ * Stripe description would be recorded as Twilio's own word, at 95/100, licensed
+ * to assert that somebody's integration is broken.
+ *
+ * A bare value is refused rather than guessed at. Reading it as "for every
+ * vendor" is the unsafe reading, and ignoring it would drop something the
+ * operator meant.
+ */
+export function githubOrgs(flag: string): Map<string, string> {
+  const orgs = new Map<string, string>();
+  for (const pair of flag.split(',')) {
+    const trimmed = pair.trim();
+    if (trimmed === '') continue;
+    const [domain, org] = trimmed.split('=');
+    if (!domain || !org) {
+      throw new Error(
+        `--github-org expects domain=org pairs, e.g. stripe.com=stripe; got "${trimmed}"`,
+      );
+    }
+    orgs.set(domain.trim().toLowerCase(), org.trim());
+  }
+  return orgs;
+}
+
+/**
+ * The organisation named for this host, if one was.
+ *
+ * A call site reaches `api.stripe.com` while an operator names `stripe.com`, so
+ * the host is matched against the domains named and everything under them.
+ */
+export function orgFor(host: string, orgs: Map<string, string>): string | undefined {
+  const lower = host.toLowerCase();
+  for (const [domain, org] of orgs) if (isUnder(lower, domain)) return org;
+  return undefined;
+}
+
 /** Whether `host` is `domain` or something under it — `api.stripe.com` for `stripe.com`. */
 function isUnder(host: string, domain: string): boolean {
   return host === domain || host.endsWith(`.${domain}`);

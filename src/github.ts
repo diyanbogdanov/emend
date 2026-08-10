@@ -107,6 +107,37 @@ function isUnder(host: string, domain: string): boolean {
 }
 
 /**
+ * Whether the site an organisation publishes claims the vendor back.
+ *
+ * The organisation's login was already derived from the vendor's own label, so
+ * this is the second, independent claim on that name — not a loosening to
+ * nothing, which is what would make attribution here dangerous. Everywhere else
+ * in the resolver a wrong vendor costs a bad lead; here it costs a confident
+ * claim that somebody's integration is broken.
+ *
+ * A sibling domain counts. Stripe's organisation records `stripe.dev` as its
+ * site rather than `stripe.com`, and demanding the site sit *under* the vendor's
+ * domain rejected the provider's own organisation — which is why Stripe, the
+ * worked example this work exists to serve, resolved to a third-party mirror
+ * that may assert nothing. Publishing on a sibling is ordinary practice:
+ * `stripe.com`/`stripe.dev`, `vercel.com`/`vercel.app`.
+ */
+export function claimsVendor(blog: string, domain: string): boolean {
+  let host: string;
+  try {
+    host = new URL(blog).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (isUnder(host, domain)) return true;
+
+  // Same name, different suffix. `stripe.dev` and `stripe.com` share `stripe`.
+  const label = (d: string): string => registrable(d).split('.')[0] ?? '';
+  const mine = label(domain);
+  return mine.length > 0 && label(host) === mine;
+}
+
+/**
  * Every description this provider publishes in their own repositories.
  *
  * Four requests for a typical vendor — the organisation, its repository list,
@@ -149,13 +180,9 @@ export async function githubSpecUrls(
         | null;
       if (!record) continue;
       const blog = typeof record.blog === 'string' ? record.blog : '';
-      try {
-        if (isUnder(new URL(blog).hostname.toLowerCase(), domain)) {
-          org = candidate;
-          break;
-        }
-      } catch {
-        continue;
+      if (claimsVendor(blog, domain)) {
+        org = candidate;
+        break;
       }
     }
   }

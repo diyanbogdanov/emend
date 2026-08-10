@@ -680,10 +680,20 @@ function sameRoute(callRoute: string, specRoute: string, spans = false): boolean
 /**
  * Which changes actually reach this codebase.
  *
- * Only what breaks or is deprecated. A new optional parameter on an endpoint
- * somebody calls is not a task, and raising it would bury the seven real breaks
- * of a Stripe upgrade under its hundred and eighty-three additions — the same
- * reason `severity` exists at all.
+ * Every change that lands on a call site, whatever its severity, with the
+ * severity carried on the hit so a caller can lead with the breaks.
+ *
+ * This used to drop anything that was not breaking or deprecated, reasoning
+ * that a new optional parameter is not a task and that raising it would bury
+ * the seven real breaks of an upgrade under its hundred and eighty-three
+ * additions. The burying is real and the silence was the wrong cure: what to
+ * lead with is a reporting decision, and it was being taken here, where the
+ * only question is whether a change touches this code.
+ *
+ * It also discarded the larger half of the work. A provider ships far more
+ * capability than it removes, and "the endpoint you already call now supports
+ * X" is the same job as "the endpoint you call is gone" — find the sites, offer
+ * the edit — with far more of it to do.
  *
  * Nothing here decides whether a finding may be *asserted*: that depends on how
  * authoritative the description was, and `canAssertBreakage` owns it.
@@ -717,7 +727,6 @@ export function matchAgainstDiff(
 
   const hits: ContractHit[] = [];
   for (const change of changes) {
-    if (change.severity !== 'breaking' && change.severity !== 'deprecation') continue;
     const endpoint = endpointOf(change.path);
     if (!endpoint) continue;
 

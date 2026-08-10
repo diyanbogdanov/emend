@@ -30,7 +30,7 @@ import { goSymbolSites, symbolTargets } from './goreach.ts';
 import { LINT_ADAPTERS } from './lint.ts';
 import { enrichAdvisories } from './advisory.ts';
 import type { VulnerabilityOptions } from './detectors.ts';
-import type { SpecCandidate } from './specs.ts';
+import { githubOrgs, orgFor, type SpecCandidate } from './specs.ts';
 import { listModels } from './llm/client.ts';
 import {
   loadCases,
@@ -168,14 +168,25 @@ function contractsFrom(args: Args): { resolve: (v: { domain: string }) => Promis
   // requests an hour is exhausted by a handful of vendors, measured. A token
   // raises it to five thousand.
   const token = process.env['GITHUB_TOKEN'] ?? process.env['GH_TOKEN'];
+  // Named by the operator, per vendor, when no automatic check can connect the
+  // two. A scan reaches many hosts, so one organisation for all of them would
+  // search the wrong repositories and credit the wrong provider's file.
   const orgFlag = args.flags.get('github-org');
-  const github = {
-    ...(token ? { token } : {}),
-    // Named by the operator when no automatic check can connect the two:
-    // Stripe's organisation records `stripe.dev` as its site, not `stripe.com`.
-    ...(typeof orgFlag === 'string' ? { org: orgFlag } : {}),
+  const orgs = typeof orgFlag === 'string' ? githubOrgs(orgFlag) : new Map<string, string>();
+
+  return {
+    resolve: (vendor) => {
+      const org = orgFor(vendor.domain, orgs);
+      return resolveSpec(
+        { ...vendor, ...(org ? { org } : {}) },
+        {
+          fetch,
+          cacheDir,
+          github: { ...(token ? { token } : {}), ...(org ? { org } : {}) },
+        },
+      );
+    },
   };
-  return { resolve: (vendor) => resolveSpec(vendor, { fetch, cacheDir, github }) };
 }
 
 /**

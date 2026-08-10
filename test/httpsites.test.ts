@@ -160,11 +160,28 @@ test('a call to a different host is not matched against this vendor’s changes'
   assert.deepEqual(matchAgainstDiff(CALLS, 'api.twilio.com', [change('POST /v1/charges', 'removed', 'breaking')]), []);
 });
 
-test('features are not reported as work, because nothing has to change', () => {
-  // A new optional parameter on an endpoint someone calls is not a task. Raising
-  // it would bury the seven real breaks in a hundred and eighty-three additions.
+test('a new capability on an endpoint somebody calls is reported, and marked as one', () => {
+  // This used to return nothing, on the reasoning that a new optional parameter
+  // is not a task and raising it would bury seven real breaks under a hundred
+  // and eighty-three additions. The burying is real; the silence was the wrong
+  // cure. Whether to lead with something is a reporting decision, and it was
+  // being made here, where the only question is whether a change reaches code.
+  //
+  // It also threw away the more common half of the work. A provider ships far
+  // more capability than it removes, and "this endpoint you already call now
+  // supports X" is the same job as "this endpoint is gone" — find the call
+  // sites, offer the edit — with a much larger supply of it.
+  const hits = matchAgainstDiff(CALLS, 'api.stripe.com', [change('POST /v1/charges', 'added', 'feature')]);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.change.severity, 'feature', 'the caller can still lead with breaks');
+  assert.equal(hits[0]?.sites[0]?.line, 2);
+});
+
+test('a change reaching no call site is still not reported', () => {
+  // The filter that does belong here: this one is about whether the code is
+  // touched at all, which is the question this function exists to answer.
   assert.deepEqual(
-    matchAgainstDiff(CALLS, 'api.stripe.com', [change('POST /v1/charges', 'added', 'feature')]),
+    matchAgainstDiff(CALLS, 'api.stripe.com', [change('POST /v1/coupons', 'added', 'feature')]),
     [],
   );
 });
