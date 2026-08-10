@@ -160,6 +160,7 @@ function reviewHarnessFrom(args: Args): Harness | undefined {
 function contractsFrom(args: Args): {
   resolve: (v: { domain: string }) => Promise<SpecCandidate[]>;
   previous?: (c: SpecCandidate) => Promise<SpecCandidate | null>;
+  maxHosts?: number;
 } | undefined {
   const flag = args.flags.get('contracts');
   if (flag === undefined || flag === false) return undefined;
@@ -196,8 +197,12 @@ function contractsFrom(args: Args): {
         }
       : undefined;
 
+  const maxFlag = args.flags.get('max-hosts');
+  const maxHosts = typeof maxFlag === 'string' && Number.isFinite(Number(maxFlag)) ? Number(maxFlag) : undefined;
+
   return {
     ...(previous ? { previous } : {}),
+    ...(maxHosts && maxHosts > 0 ? { maxHosts } : {}),
     resolve: (vendor) => {
       const org = orgFor(vendor.domain, orgs);
       return resolveSpec(
@@ -1238,6 +1243,10 @@ ${c.bold('COMMANDS')}
                     records do not link back to their API domain. Per vendor:
                     one organisation for all of them would search the wrong
                     repositories and credit the wrong provider's description.
+    --max-hosts n   How many distinct vendors one scan may resolve descriptions
+                    for. 8 by default, because each one is outbound requests.
+                    A repository that talks to a hundred services needs this
+                    raised; the scan says how many it skipped either way.
     --since[=days]  Also compare each description against itself as it stood
                     that many days ago (365 by default) and report what changed that
                     reaches your code — including deprecations and newly

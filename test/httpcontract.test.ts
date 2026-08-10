@@ -594,3 +594,28 @@ test('a description that may not assert breakage compares nothing either', async
   ).detect(context(TWO_VERSIONS));
   assert.deepEqual(findings, []);
 });
+
+test('hosts beyond the budget are named as unchecked, not dropped', async () => {
+  // The bound is real and necessary — a repository talking to a hundred
+  // services should not turn one scan into a hundred resolutions. But it was
+  // silent, while the comment above it claimed otherwise, so a scan of
+  // activepieces checked eight of its hundred hosts and said nothing about the
+  // other ninety-two. Their absence from the findings reads exactly like a
+  // clean result, which is the one thing this detector may never do.
+  const { notes } = await httpContractDetector({
+    resolve: async () => [candidate()],
+    maxHosts: 1,
+  }).detect(
+    context({
+      'src/a.ts': `
+        await fetch('https://api.acme.com/v1/charges', { method: 'POST' });
+        await fetch('https://api.other.com/v1/things');
+        await fetch('https://api.third.com/v1/stuff');
+      `,
+    }),
+  );
+  assert.ok(
+    (notes ?? []).some((n) => /2 (other )?host/i.test(n) && /not checked|were not/i.test(n)),
+    (notes ?? []).join(' | '),
+  );
+});

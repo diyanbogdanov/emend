@@ -255,9 +255,18 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
 
       const findings: Finding[] = [];
       const notes: string[] = [];
-      // Bounded, and the bound is stated rather than silent: a repository
-      // talking to thirty services should not turn one scan into thirty
-      // resolutions without somebody choosing that.
+      // Bounded, because a repository talking to a hundred services should not
+      // turn one scan into a hundred resolutions without somebody choosing
+      // that. The bound is stated rather than silent — it was silent, while the
+      // comment here claimed otherwise, and a scan that checks eight hosts of a
+      // hundred and mentions neither the eight nor the ninety-two reads exactly
+      // like a clean result for all of them.
+      if (hosts.length > maxHosts) {
+        notes.push(
+          `${hosts.length - maxHosts} other host(s) were not checked: this scan resolves at most ` +
+            `${maxHosts}, and ${hosts.length} were found. Raise the budget to check the rest.`,
+        );
+      }
       for (const host of hosts.slice(0, maxHosts)) {
         const candidates = await options.resolve({ domain: host });
         const spec = candidates[0];
