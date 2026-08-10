@@ -88,66 +88,6 @@ export function requiredArity(signature: string): number | null {
   return params.filter((p) => !isOptionalParam(p)).length;
 }
 
-/**
- * Whether the only difference is type parameters added with defaults.
- *
- * A defaulted type parameter cannot break an existing consumer: `Config` and
- * `Config<Foo>` both still bind, because the new one falls back. Reporting it
- * as breaking is a structural difference read as a semantic one — the same
- * mistake, on the type side, that comparing route segment counts made on the
- * wire side.
- *
- * Measured on activepieces, and it matters more than a niche bug because this
- * is the default path with no flags: axios 1.18 -> 1.19 added `P = any` to
- * `AxiosRequestConfig`, `AxiosResponse` and `isAxiosError`, and all three were
- * reported breaking. axios is in nearly every TypeScript repository.
- *
- * Deliberately narrow. It downgrades only when the type parameter list is the
- * *whole* difference — a defaulted parameter is provably compatible on its own
- * and says nothing about a value parameter that changed alongside it, and
- * claiming otherwise would trade this false positive for a false negative.
- */
-export function widenedByDefaultedTypeParams(before: string, after: string): boolean {
-  const split = (signature: string): { head: string; params: string[]; tail: string } | null => {
-    const open = signature.indexOf('<');
-    if (open === -1) return null;
-    let depth = 0;
-    for (let i = open; i < signature.length; i++) {
-      const ch = signature[i];
-      if (ch === '<') depth++;
-      else if (ch === '>') {
-        depth--;
-        if (depth === 0) {
-          const inner = signature.slice(open + 1, i);
-          // Split on top-level commas only; a parameter's own bound may nest.
-          const params: string[] = [];
-          let level = 0;
-          let current = '';
-          for (const c of inner) {
-            if (c === '<' || c === '(' || c === '{') level++;
-            else if (c === '>' || c === ')' || c === '}') level--;
-            if (c === ',' && level === 0) { params.push(current.trim()); current = ''; continue; }
-            current += c;
-          }
-          if (current.trim() !== '') params.push(current.trim());
-          return { head: signature.slice(0, open), params, tail: signature.slice(i + 1) };
-        }
-      }
-    }
-    return null;
-  };
-
-  const a = split(before);
-  const b = split(after);
-  if (!a || !b) return false;
-  if (a.head !== b.head || a.tail !== b.tail) return false;
-  if (b.params.length <= a.params.length) return false;
-  // The ones that were already there must be untouched...
-  for (let i = 0; i < a.params.length; i++) if (a.params[i] !== b.params[i]) return false;
-  // ...and every new one must carry a default to fall back to.
-  return b.params.slice(a.params.length).every((p) => p.includes('='));
-}
-
 export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
   const changes: SurfaceChange[] = [];
   const notes: string[] = [];
@@ -228,18 +168,15 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
           afterRequired !== null &&
           afterRequired > beforeRequired;
 
-        // A widening is not a break. Everything that bound before still binds.
-        const widened = widenedByDefaultedTypeParams(before.signature, after.signature);
-
         changes.push({
           path,
           kind: 'signature-changed',
-          severity: widened ? 'feature' : 'breaking',
+          severity: 'breaking',
           // A new *required* parameter is unambiguously breaking. Any other
           // signature edit might be a widening (safe) or a narrowing (breaking);
           // string comparison alone cannot tell, so it stays medium and is never
           // auto-applied without verification.
-          confidence: widened || gainedRequiredParam ? 'high' : 'medium',
+          confidence: gainedRequiredParam ? 'high' : 'medium',
           before: before.signature,
           after: after.signature,
         });
