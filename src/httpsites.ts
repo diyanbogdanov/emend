@@ -280,16 +280,66 @@ function readUrl(
   };
 }
 
+/** A named property of an object literal, if it assigns one. */
+function property(object: ts.ObjectLiteralExpression, names: string[]): ts.Expression | undefined {
+  for (const prop of object.properties) {
+    if (!ts.isPropertyAssignment(prop)) continue;
+    const name = ts.isIdentifier(prop.name) || ts.isStringLiteralLike(prop.name) ? prop.name.text : '';
+    if (names.includes(name.toLowerCase())) return prop.initializer;
+  }
+  return undefined;
+}
+
+/**
+ * The verb an expression names, where it names one.
+ *
+ * A string literal is the obvious case. A property access is read by its final
+ * name, because `HttpMethod.POST` is how activepieces and most typed clients
+ * spell it — 2,570 calls in one repository — and taking those as unreadable
+ * would throw away the method on nearly every wrapper call there is.
+ */
+function verbOf(node: ts.Expression | undefined): string | null {
+  if (!node) return null;
+  if (ts.isStringLiteralLike(node)) {
+    const verb = node.text.toLowerCase();
+    return VERBS.has(verb) ? verb.toUpperCase() : null;
+  }
+  if (ts.isPropertyAccessExpression(node)) {
+    const verb = node.name.text.toLowerCase();
+    return VERBS.has(verb) ? verb.toUpperCase() : null;
+  }
+  return null;
+}
+
 /** The method an options object declares, if it declares one. */
 function methodFromOptions(node: ts.Expression | undefined): string | null {
   if (!node || !ts.isObjectLiteralExpression(node)) return null;
-  for (const prop of node.properties) {
-    if (!ts.isPropertyAssignment(prop)) continue;
-    const name = ts.isIdentifier(prop.name) || ts.isStringLiteralLike(prop.name) ? prop.name.text : '';
-    if (name !== 'method') continue;
-    if (ts.isStringLiteralLike(prop.initializer)) return prop.initializer.text.toUpperCase();
-  }
-  return null;
+  return verbOf(property(node, ['method']));
+}
+
+/**
+ * A request written as an options object rather than as a URL argument.
+ *
+ * Recognised by the shape of the argument, not the name of the callee. This is
+ * axios's own documented form, and it is the shape every hand-rolled client
+ * copies — `httpClient.sendRequest({ method, url })` alone is 2,570 calls in
+ * activepieces. Keying on callee names instead would mean an allowlist that has
+ * to learn each project's private wrapper, and would still miss axios.
+ *
+ * Both properties are required. Measured across five repositories, an object
+ * carrying `url` without `method` is a Zod schema, a config record, or metadata
+ * about a URL rather than a request to one; requiring the method is what
+ * separates a request from a record about one. It costs the wrappers that
+ * default to GET, and none of the ones that matter do.
+ */
+function requestOptions(
+  node: ts.Expression | undefined,
+): { url: ts.Expression; method: string | null } | null {
+  if (!node || !ts.isObjectLiteralExpression(node)) return null;
+  const url = property(node, ['url', 'uri']);
+  const method = property(node, ['method']);
+  if (!url || !method) return null;
+  return { url, method: verbOf(method) };
 }
 
 /**
@@ -346,8 +396,13 @@ export function findHttpCalls(
         }
       }
 
-      const url = node.arguments[0];
-      if (recognised && url) {
+      // A request may be written either way: a URL argument to a client this
+      // file recognises, or an options object naming both, which no callee
+      // list can anticipate because every project writes its own wrapper.
+      const options = requestOptions(node.arguments[0]);
+      const url = options ? options.url : recognised ? node.arguments[0] : undefined;
+
+      if (url) {
         const read = readUrl(url, constants);
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
         const base = {
@@ -356,12 +411,23 @@ export function findHttpCalls(
           column: character + 1,
           text: node.getText(sf).split('\n')[0]?.slice(0, 160) ?? '',
           // Unspecified means GET, which is what every one of these clients does.
-          method: method ?? methodFromOptions(node.arguments[1]) ?? 'GET',
+          method: method ?? options?.method ?? methodFromOptions(node.arguments[1]) ?? 'GET',
         };
+
+        // An options object that declares a method Emend cannot evaluate is a
+        // question, not an answer. `fetch(url)` with no method genuinely is a
+        // GET; defaulting here would invent a request the code does not make,
+        // and a GET reported against an endpoint the description offers only as
+        // POST is a finding about nothing.
+        const read2 =
+          options && options.method === null
+            ? { reason: 'the request method is decided at runtime, so which endpoint this is cannot be told' }
+            : read;
+
         calls.push(
-          'reason' in read
-            ? { ...base, resolved: false, host: null, route: null, reason: read.reason }
-            : { ...base, resolved: true, host: read.host, route: read.route },
+          'reason' in read2
+            ? { ...base, resolved: false, host: null, route: null, reason: read2.reason }
+            : { ...base, resolved: true, host: read2.host, route: read2.route },
         );
       }
     }

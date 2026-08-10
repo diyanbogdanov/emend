@@ -356,3 +356,71 @@ test('a file may take one base from another module and declare another itself', 
     ['remote.acme.com', 'local.acme.com'],
   );
 });
+
+// ---------------------------------------------------------------------------
+// A request written as an options object
+// ---------------------------------------------------------------------------
+
+test('a call taking { method, url } is a request, whoever wrote the function', () => {
+  // Recognised by the shape of the argument rather than the name of the callee.
+  // `axios({ method, url })` is axios's own documented form and was unreadable
+  // too, so this is not a special case for one project's wrapper — it is the
+  // shape every hand-rolled client copies. Measured across five repositories:
+  // 3,718 calls carry both properties and 2,119 of those name an absolute URL,
+  // against a total of about 112 calls Emend could read at all.
+  const calls = find(`
+    await httpClient.sendRequest({ method: 'GET', url: 'https://api.acme.com/v1/charges' });
+    await axios({ method: 'post', url: 'https://api.acme.com/v1/refunds' });
+  `);
+  assert.deepEqual(
+    calls.map((c) => `${c.method} ${c.host}${c.route}`),
+    ['GET api.acme.com/v1/charges', 'POST api.acme.com/v1/refunds'],
+  );
+});
+
+test('a method named through a constant is read, not defaulted', () => {
+  // activepieces writes `method: HttpMethod.POST`. Reading the property's name
+  // is what keeps a POST from being recorded as a GET — and a GET recorded
+  // against an endpoint the description only offers as POST is a false finding
+  // of exactly the kind this tier keeps producing when it guesses.
+  const calls = find(`
+    await httpClient.sendRequest({ method: HttpMethod.POST, url: 'https://api.acme.com/v1/charges' });
+  `);
+  assert.equal(calls[0]?.method, 'POST');
+});
+
+test('a method that cannot be read leaves the call unread', () => {
+  // The alternative is defaulting to GET, which invents a request the code does
+  // not make. `fetch(url)` with no method genuinely is a GET; an options object
+  // that declares a method Emend cannot evaluate is a question, not an answer.
+  const calls = find(`
+    await httpClient.sendRequest({ method: options.method, url: 'https://api.acme.com/v1/charges' });
+  `);
+  assert.equal(calls[0]?.resolved, false);
+  assert.match(calls[0]?.reason ?? '', /method/i);
+});
+
+test('an object with a url but no method is not a request', () => {
+  // Measured noise: `z.object({ url: z.string() })`, config builders, metadata.
+  // The method property is what separates a request from a record about one.
+  const calls = find(`
+    const schema = z.object({ url: z.string() });
+    const meta = { name: 'docs', url: 'https://api.acme.com/v1/charges' };
+  `);
+  assert.deepEqual(calls, []);
+});
+
+test('uri is the same property under another name', () => {
+  const calls = find(`await client.request({ method: 'GET', uri: 'https://api.acme.com/v1/charges' });`);
+  assert.equal(calls[0]?.host, 'api.acme.com');
+});
+
+test('a framework injecting its own routes invents no vendor', () => {
+  // Fastify's test helper is `app.inject({ method, url })` and matches this
+  // shape exactly — 547 calls across the repositories measured. Its URLs are
+  // relative, so they resolve to the application's own server and are refused
+  // there, which is where that guard was always meant to catch them.
+  const calls = find(`await app.inject({ method: 'GET', url: '/api/internal/health' });`);
+  assert.equal(calls[0]?.resolved, false);
+  assert.match(calls[0]?.reason ?? '', /relative/i);
+});
