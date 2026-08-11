@@ -143,8 +143,16 @@ export function widenedByDefaultedTypeParams(before: ApiSymbol, after: ApiSymbol
  * nominal, and a narrow rule that suppresses two false removals is worth more
  * than a broad one that hides an unknown number of real ones.
  */
-function namesADeclaration(signature: string): boolean {
-  return /^typeof [A-Za-z_$][\w$]*$/.test(signature.trim());
+function namesADeclaration(signature: string, path: string): boolean {
+  const named = /^typeof ([A-Za-z_$][\w$]*)$/.exec(signature.trim());
+  if (!named) return false;
+  // And it must name *itself*. `AddressModule :: typeof LocationModule` is an
+  // alias, and removing an alias removes an export however well its target
+  // survives — @faker-js/faker 10 dropped `AddressModule` and
+  // `import { AddressModule }` breaks, which is in their own migration guide.
+  // A declaration reachable under some other name is not the same fact as a
+  // name that still works, and for a consumer only the second one matters.
+  return named[1] === (path.split('.').pop() ?? path);
 }
 
 export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
@@ -200,7 +208,7 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
   const appeared = new Map<string, string | null>();
   for (const [path, sym] of Object.entries(to.symbols)) {
     if (path in from.symbols) continue;
-    if (!namesADeclaration(sym.signature)) continue;
+    if (!/^typeof [A-Za-z_$][\w$]*$/.test(sym.signature.trim())) continue;
     appeared.set(sym.signature, appeared.has(sym.signature) ? null : path);
   }
 
@@ -225,7 +233,7 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
         // changes which root the extractor walks and renames every path at
         // once — slugify 1.6.6 -> 1.6.9 is a patch whose function is still
         // exported, read as `_default` instead of `slugify`.
-        const movedTo = namesADeclaration(before.signature)
+        const movedTo = namesADeclaration(before.signature, path)
           ? appeared.get(before.signature)
           : undefined;
         if (movedTo) {

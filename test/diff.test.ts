@@ -392,3 +392,29 @@ test('a destination that existed before is not where anything moved', () => {
   );
   assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 1);
 });
+
+test('a removed alias is a removed export, even though its target survives', () => {
+  // @faker-js/faker 8.2.0 -> 10.5.0, from the extractor. In 8.2.0 `AddressModule`
+  // is a deprecated alias: its type is `typeof LocationModule`, naming a *different*
+  // declaration. Faker 10 removed the alias, and `import { AddressModule }` breaks —
+  // it is in their migration guide.
+  //
+  // The rule proves the declaration is still reachable, which is not the same as
+  // the name still working, and for a consumer the name is what matters. What
+  // separates this from slugify is whose name the type gives: `slugify` is
+  // `typeof slugify` and names itself; an alias names something else.
+  const diff = diffSurfaces(
+    surface('8.2.0', [sym('AddressModule', 'typeof LocationModule')]),
+    surface('10.5.0', [sym('LocationModule', 'typeof LocationModule')]),
+  );
+  assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 1);
+});
+
+test('a symbol whose type names itself is still recognised where it moved', () => {
+  // The regression guard: slugify must keep working. `slugify :: typeof slugify`.
+  const diff = diffSurfaces(
+    surface('1.6.6', [sym('slugify', 'typeof slugify')]),
+    surface('1.6.9', [sym('_default', 'typeof slugify')]),
+  );
+  assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 0);
+});
