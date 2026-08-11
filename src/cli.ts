@@ -790,17 +790,54 @@ async function cmdFix(args: Args): Promise<number> {
       }
       if (f.change.guidance) console.log(c.dim(`      ${f.change.guidance}`));
     }
-    // Said rather than attempted. A wire API has no version to bump, so there is
-    // no deterministic repair to offer: the replacement route is the vendor's to
-    // publish and picking one would be the guess `plan.ts` refuses to make. The
-    // call sites above are what an edit needs, and `--drive` hands exactly this
-    // to a session that can make it.
-    console.log(
-      c.dim(
-        '    No mechanical repair: a wire API has no version to bump and the replacement route',
-      ),
-    );
-    console.log(c.dim('    is the vendor’s to publish. Use --drive to hand these to an agent.'));
+    // A wire API has no version to bump, so there is no deterministic repair to
+    // offer: the replacement route is the vendor's to publish and picking one
+    // would be the guess `plan.ts` refuses to make. The call sites above are
+    // what an edit needs, and a driven session can make it.
+    if (args.flags.get('drive')) {
+      const permitted = harnessPermitted({ untrusted: args.flags.get('untrusted') === true });
+      const model = args.flags.get('drive');
+      if (!permitted.ok) {
+        console.log(c.yellow(`    declining to drive: ${permitted.reason}`));
+      } else {
+        const harness = drivingHarness({
+          ...(typeof model === 'string' ? { model } : {}),
+          emendCommand: [
+            process.execPath,
+            '--experimental-strip-types',
+            fileURLToPath(import.meta.url),
+            'mcp',
+          ],
+        });
+        const availability = await harness.available();
+        if (!availability.ok) {
+          console.log(c.yellow(`    cannot drive: ${availability.reason}`));
+        } else {
+          for (const f of contractTargets) {
+            console.log(c.dim(`    driving ${harness.id} for ${f.change.path}`));
+            const run = await harness.run(repoDir, {
+              instruction: drivePrompt({ repo: repoDir, findingId: f.id, pkg: f.pkg }),
+              failureOutput: '',
+            });
+            const said = assistantText(run.log).trim();
+            const summary = (run.summary ?? '').trim();
+            if (summary) console.log(c.dim(`    ${summary.slice(0, 2000)}`));
+            if (said) console.log(said.slice(0, 4000).split('\n').map((l) => `    ${l}`).join('\n'));
+            if (!run.ok) console.log(c.red(`    ${run.error ?? 'the session failed'}`));
+            if (run.ok && !said && !summary) {
+              console.log(c.yellow('    the session produced no output'));
+            }
+          }
+        }
+      }
+    } else {
+      console.log(
+        c.dim(
+          '    No mechanical repair: a wire API has no version to bump and the replacement route',
+        ),
+      );
+      console.log(c.dim('    is the vendor’s to publish. Use --drive to hand these to an agent.'));
+    }
     console.log('');
   }
 
