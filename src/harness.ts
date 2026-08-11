@@ -686,3 +686,53 @@ export function drivePrompt(input: { repo: string; findingId: string; pkg: strin
     'A green build with the vulnerable version still installed is not a fix; it is the failure most easily mistaken for one. Report both facts plainly, including when one of them is false.',
   ].join('\n');
 }
+
+/**
+ * The instruction for a wire-contract finding, which is a different job.
+ *
+ * `drivePrompt` describes a vulnerability: bump a package, repair what the bump
+ * broke, confirm the advisory cleared. Handing that text to a wire-contract
+ * finding sent a session looking for a GitHub advisory for ten minutes before
+ * timing out — it opened by calling the finding "the api.github.com
+ * vulnerability", because that is what it had been told.
+ *
+ * Nothing is bumped here. A call reaches a route the vendor's own description
+ * does not contain, the replacement is in that same description, and the repair
+ * is an edit at the call sites. So the tools named are the ones that apply and
+ * the finishing condition is different: there is no advisory to clear, and a
+ * green build proves nothing on its own, because a wrong URL compiles.
+ */
+export function driveContractPrompt(input: {
+  repo: string;
+  findingId: string;
+  host: string;
+  route: string;
+  sites: Array<{ file: string; line: number }>;
+  description: string;
+}): string {
+  return [
+    `In the repository at ${input.repo}, a call reaches \`${input.route}\` on ${input.host}, and ${input.host}'s own published description does not contain that route.`,
+    '',
+    `The description is at ${input.description}. Read it — the replacement route is in there.`,
+    '',
+    'Call sites:',
+    ...input.sites.map((s) => `- ${s.file}:${s.line}`),
+    '',
+    'Use the emend MCP tools:',
+    '- `emend_scan` with `contracts: true` lists this finding and any others like it, with their call sites.',
+    '- `emend_impact` tells you what else references a symbol before you change its shape.',
+    '- `emend_verify` runs the repository’s own typecheck and tests.',
+    '',
+    'What to do:',
+    '1. Find the route the description offers in place of the one being called. Vendors usually rename rather than delete — a singular for a plural, a different noun on the same resource.',
+    '2. Decide which replacement fits *this* call by what the code does with the response. A route returning one object and a route returning an array are different replacements, and the surrounding code says which one is expected.',
+    '3. Change the URL. Change nothing else unless the response shape forces it.',
+    '4. Run `emend_verify`.',
+    '',
+    'Two things to be honest about, because both are easy to get wrong here:',
+    '- A green build is not evidence. A wrong URL is a string and compiles perfectly; only the description says whether the route exists.',
+    '- If the description offers no replacement you can justify from the code, say so and change nothing. A guessed URL is worse than the finding, because it looks fixed.',
+    '',
+    `Report which route you chose, why the surrounding code picked that one over the alternatives, and what \`emend_verify\` said. If you changed nothing, say that plainly and why.`,
+  ].join('\n');
+}

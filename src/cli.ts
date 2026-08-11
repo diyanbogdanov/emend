@@ -23,7 +23,14 @@ import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
 import { serve as serveMcp } from './mcp.ts';
-import { openCodeHarness, drivingHarness, drivePrompt, harnessPermitted, type Harness } from './harness.ts';
+import {
+  openCodeHarness,
+  drivingHarness,
+  drivePrompt,
+  driveContractPrompt,
+  harnessPermitted,
+  type Harness,
+} from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
 import { parseSpec } from './specdiff.ts';
 import { behindCurrent } from './pins.ts';
@@ -816,7 +823,17 @@ async function cmdFix(args: Args): Promise<number> {
           for (const f of contractTargets) {
             console.log(c.dim(`    driving ${harness.id} for ${f.change.path}`));
             const run = await harness.run(repoDir, {
-              instruction: drivePrompt({ repo: repoDir, findingId: f.id, pkg: f.pkg }),
+              // The wire-contract instruction, not the vulnerability one. The
+              // difference is not cosmetic: told it was fixing a vulnerability,
+              // a session went looking for a GitHub advisory until it timed out.
+              instruction: driveContractPrompt({
+                repo: repoDir,
+                findingId: f.id,
+                host: f.pkg,
+                route: f.change.path,
+                sites: f.sites.map((site) => ({ file: site.file, line: site.line })),
+                description: f.change.guidance ?? f.toVersion,
+              }),
               failureOutput: '',
             });
             const said = assistantText(run.log).trim();

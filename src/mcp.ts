@@ -32,7 +32,8 @@ import { readRepo } from './inventory.ts';
 import { readLockfile } from './lockfile.ts';
 import { runPhase, compare } from './verify.ts';
 import { analyseImpact, renderImpact } from './impact.ts';
-import { httpFetcher } from './specfetch.ts';
+import { httpFetcher, resolveSpec } from './specfetch.ts';
+import os from 'node:os';
 import { scanPackages } from './osv.ts';
 import type { Finding } from './types.ts';
 
@@ -65,6 +66,24 @@ function vulnScan() {
   return (packages: Parameters<typeof scanPackages>[1]) => scanPackages(fetch, packages);
 }
 
+/**
+ * Contract checking for a driven session, on the same terms the CLI offers it.
+ *
+ * A session asked to fix a wire-contract finding cannot see one without this —
+ * measured: it scanned, got a different finding back, and spent ten minutes
+ * deciding the id must be a GitHub advisory. Off unless the caller asks, because
+ * it makes outbound requests to every host in the source tree.
+ */
+function contractOptions(): { resolve: (v: { domain: string }) => ReturnType<typeof resolveSpec> } {
+  const fetch = httpFetcher();
+  const cacheDir = path.join(os.tmpdir(), 'emend-specs');
+  const token = process.env['GITHUB_TOKEN'] ?? process.env['GH_TOKEN'];
+  return {
+    resolve: (vendor) =>
+      resolveSpec(vendor, { fetch, cacheDir, github: { ...(token ? { token } : {}) } }),
+  };
+}
+
 export function tools(): ToolDef[] {
   return [
     {
@@ -75,11 +94,24 @@ export function tools(): ToolDef[] {
         'question could not be answered, never that the answer was clean.',
       inputSchema: {
         type: 'object',
-        properties: { repo: { type: 'string', description: 'Absolute path to the repository' } },
+        properties: {
+          repo: { type: 'string', description: 'Absolute path to the repository' },
+          contracts: {
+            type: 'boolean',
+            description:
+              'Also check outbound HTTP calls against each vendor’s published API description. ' +
+              'Off by default because it makes outbound requests. A wire-contract finding is ' +
+              'invisible without it — a session asked to fix one and scanning without this will ' +
+              'not find the id it was given.',
+          },
+        },
         required: ['repo'],
       },
       run: async (args) => {
-        const report = await scanRepo(str(args, 'repo'), { vulnerabilities: vulnOptions() });
+        const report = await scanRepo(str(args, 'repo'), {
+          vulnerabilities: vulnOptions(),
+          ...(args?.['contracts'] === true ? { contracts: contractOptions() } : {}),
+        });
         return {
           findings: report.packages.flatMap((p) =>
             p.findings.map((f) => ({
