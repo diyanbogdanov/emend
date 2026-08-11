@@ -1,19 +1,5 @@
 # Emend Contributor Licence Agreement
 
-> ## ⚠️ Not legal advice, and not yet reviewed by a lawyer
->
-> This is a starting point, modelled on the structure of widely-used contributor
-> agreements such as the Apache Individual Contributor License Agreement. It has
-> **not** been reviewed by a lawyer.
->
-> Have counsel review it before making the repository public or accepting an
-> outside contribution. A defective agreement is worse than an obvious absence of
-> one, because it produces confidence in a chain of title that does not hold — and
-> unlike most mistakes in this repository, it cannot be fixed by editing a file
-> afterwards.
-
----
-
 By contributing to Emend you agree to the following, for every contribution you
 submit.
 

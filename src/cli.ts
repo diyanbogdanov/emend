@@ -180,12 +180,6 @@ function reviewHarnessFrom(args: Args): Harness | undefined {
  * being behind is a claim about somebody's code, and a stale mirror cannot
  * support it.
  */
-const PIN_VENDOR_DOMAINS: Record<string, string> = {
-  stripe: 'api.stripe.com',
-  anthropic: 'api.anthropic.com',
-  openai: 'api.openai.com',
-};
-
 async function publishedVersions(
   report: ScanReport,
   contracts: { resolve: (v: { domain: string }) => Promise<SpecCandidate[]> } | undefined,
@@ -194,17 +188,26 @@ async function publishedVersions(
   if (!contracts || report.apiVersionPins.length === 0) return found;
 
   for (const subject of new Set(report.apiVersionPins.map((p) => p.subject))) {
-    const domain = PIN_VENDOR_DOMAINS[subject];
-    if (!domain) continue;
-    try {
-      const spec = (await contracts.resolve({ domain }))[0];
-      if (!spec?.body || !canAssertBreakage(spec, Date.now())) continue;
-      const doc = parseSpec(spec.body) as { info?: { version?: unknown } } | null;
-      const version = doc?.info?.version;
-      if (typeof version === 'string' && version !== '') found.set(subject, version);
-    } catch {
-      // A vendor that cannot be reached is one that was not checked, which the
-      // unchanged line below already says.
+    // Where the vendor lives is derived, not listed. A table of
+    // subject-to-domain would need an entry before Emend could say anything
+    // about a vendor, which makes every new one a code change — and the
+    // resolver already decides whether a domain is real: it walks the
+    // provider's own origin, their APIs.json, their GitHub organisation, and
+    // refuses anything it cannot trace back to them. So the candidates are
+    // offered and the resolver is left to reject the ones that are nothing.
+    for (const domain of [`api.${subject}.com`, `${subject}.com`, `api.${subject}.io`, `${subject}.io`]) {
+      try {
+        const spec = (await contracts.resolve({ domain }))[0];
+        if (!spec?.body || !canAssertBreakage(spec, Date.now())) continue;
+        const doc = parseSpec(spec.body) as { info?: { version?: unknown } } | null;
+        const version = doc?.info?.version;
+        if (typeof version === 'string' && version !== '') {
+          found.set(subject, version);
+          break;
+        }
+      } catch {
+        // Unreachable is unchecked, which the caller's unchanged line says.
+      }
     }
   }
   return found;
@@ -866,6 +869,14 @@ async function cmdFix(args: Args): Promise<number> {
               harness: openCodeHarness({
                 readOnly: true,
                 allowBash: true,
+                // Its own budget, not the ten minutes the repair already spent.
+                // Measured: the review started after a drive that had used most
+                // of the default and produced nothing but a step_start, so the
+                // run could only report that behaviour went unreviewed. The
+                // question it answers — does this still return the same rows —
+                // needs the description read and the consuming code followed,
+                // which is not a cheaper job than the edit was.
+                timeoutMs: 20 * 60 * 1000,
                 ...(typeof model === 'string' ? { model } : {}),
               }),
               dir: repoDir,
