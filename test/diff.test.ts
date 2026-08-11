@@ -291,7 +291,9 @@ test('a defaulted type parameter does not excuse the rest of the signature', () 
       }),
     ]),
   ).changes;
-  assert.equal(changes[0]?.severity, 'breaking');
+  // Reported, but as drift: `string` becoming `number` is a real edit and a
+  // string comparison cannot show whether it breaks any particular caller.
+  assert.equal(changes[0]?.severity, 'drift');
 });
 
 test('a renamed type parameter is not a widening', () => {
@@ -306,7 +308,12 @@ test('a renamed type parameter is not a widening', () => {
       }),
     ]),
   ).changes;
-  assert.equal(changes[0]?.severity, 'breaking');
+  // Renamed *and* gained a defaulted parameter. `Box<Foo>` still binds, so this
+  // is not breaking — but the widening rule needs the existing names untouched
+  // to prove that, and they are not. Reported, and claimed no further than the
+  // evidence goes.
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]?.severity, 'drift');
 });
 
 test('a new surface with no symbols cannot support a removal claim', () => {
@@ -472,7 +479,8 @@ test('a rename alongside a real change is still reported', () => {
       sym('read', '<TSource>(path: number) => TSource', { typeParams: [{ name: 'TSource', defaulted: false }] }),
     ]),
   ).changes;
-  assert.equal(changes[0]?.severity, 'breaking');
+  assert.equal(changes.length, 1, 'the rename did not hide the parameter change');
+  assert.equal(changes[0]?.severity, 'drift');
 });
 
 test('reordering type parameters is a change, not a rename', () => {
@@ -490,7 +498,8 @@ test('reordering type parameters is a change, not a rename', () => {
       }),
     ]),
   ).changes;
-  assert.equal(changes[0]?.severity, 'breaking');
+  assert.equal(changes.length, 1, 'a reorder is still a change');
+  assert.equal(changes[0]?.severity, 'drift');
 });
 
 // ---------------------------------------------------------------------------
@@ -592,4 +601,59 @@ test('a type that really is named with a numeric suffix still differs', () => {
     surface('2.0.0', [sym('f', '() => Shape_3')]),
   ).changes;
   assert.deepEqual(changes, [], 'both normalise to Shape — indistinguishable, so nothing is claimed');
+});
+
+// ---------------------------------------------------------------------------
+// What a signature comparison can and cannot demonstrate
+// ---------------------------------------------------------------------------
+
+test('a new required parameter is breaking, because that is provable', () => {
+  // Every existing call site is now missing an argument. Nothing about the rest
+  // of the signature has to be understood to know that.
+  const changes = diffSurfaces(
+    surface('1.0.0', [sym('send', '(to: string) => void')]),
+    surface('2.0.0', [sym('send', '(to: string, from: string) => void')]),
+  ).changes;
+  assert.equal(changes[0]?.severity, 'breaking');
+  assert.equal(changes[0]?.confidence, 'high');
+});
+
+test('any other signature edit is drift, because breakage cannot be shown', () => {
+  // Measured, and the reason this is a calibration rather than a detection fix.
+  // Of 44 signature-changed findings on activepieces, none was a shape a string
+  // comparison could prove compatible or incompatible: 24 were not function
+  // signatures at all, and the other 20 changed more than one thing at once.
+  // Roughly half were additions — a wider input union, an extra property on a
+  // returned object — which break nobody.
+  //
+  // The finding is still reported with its call sites. What changes is the
+  // claim: something moved under you and Emend cannot tell whether it bites.
+  const changes = diffSurfaces(
+    surface('1.0.0', [sym('parse', '(input: string) => Result')]),
+    surface('2.0.0', [sym('parse', '(input: string | Uint8Array) => Result')]),
+  ).changes;
+  assert.equal(changes.length, 1, 'still reported');
+  assert.equal(changes[0]?.severity, 'drift');
+  assert.equal(changes[0]?.kind, 'signature-changed');
+});
+
+test('a removed symbol stays breaking', () => {
+  // The other thing a comparison can prove: it is not there any more.
+  const changes = diffSurfaces(
+    surface('1.0.0', [sym('gone', 'typeof gone'), sym('kept', 'string')]),
+    surface('2.0.0', [sym('kept', 'string')]),
+  ).changes;
+  assert.equal(changes.find((c) => c.path === 'gone')?.severity, 'breaking');
+});
+
+test('a widening is still a feature, not drift', () => {
+  const changes = diffSurfaces(
+    surface('1.0.0', [sym('C', 'C<D>', { typeParams: [{ name: 'D', defaulted: true }] })]),
+    surface('2.0.0', [
+      sym('C', 'C<D, P>', {
+        typeParams: [{ name: 'D', defaulted: true }, { name: 'P', defaulted: true }],
+      }),
+    ]),
+  ).changes;
+  assert.equal(changes[0]?.severity, 'feature');
 });

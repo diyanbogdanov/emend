@@ -341,6 +341,14 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
       ) {
         const beforeRequired = requiredArity(before.signature);
         const afterRequired = requiredArity(after.signature);
+        // A type parameter added without a default is a required type argument,
+        // provable the same way a required value parameter is: `Config<Foo>`
+        // stops binding because the second has nothing to fall back to.
+        const hadTp = before.typeParams ?? [];
+        const hasTp = after.typeParams ?? [];
+        const gainedRequiredTypeParam =
+          hasTp.length > hadTp.length && hasTp.slice(hadTp.length).some((t) => !t.defaulted);
+
         const gainedRequiredParam =
           beforeRequired !== null &&
           afterRequired !== null &&
@@ -352,12 +360,34 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
         changes.push({
           path,
           kind: 'signature-changed',
-          severity: widened ? 'feature' : 'breaking',
+          // What this comparison can actually demonstrate.
+          //
+          // A new *required* parameter is breaking and provably so: every
+          // existing call is now short an argument. Everything else is an edit
+          // whose effect a string comparison cannot determine — and measured on
+          // activepieces, of 44 such findings none had a shape that could be
+          // proved either way: 24 were not function signatures at all and the
+          // rest changed more than one thing at once. Roughly half were
+          // additions — a wider input union, an extra property on a returned
+          // object — which break nobody, and all of them were being called
+          // breaking.
+          //
+          // So the finding stays, with its call sites, and the claim is
+          // calibrated to the evidence: something moved under you, and Emend
+          // cannot tell whether it bites. Saying `breaking` there spends the
+          // word on cases that do not deserve it, which is what makes it
+          // ignorable on the ones that do.
+          severity:
+            widened
+              ? 'feature'
+              : gainedRequiredParam || gainedRequiredTypeParam
+                ? 'breaking'
+                : 'drift',
           // A new *required* parameter is unambiguously breaking. Any other
           // signature edit might be a widening (safe) or a narrowing (breaking);
           // string comparison alone cannot tell, so it stays medium and is never
           // auto-applied without verification.
-          confidence: widened || gainedRequiredParam ? 'high' : 'medium',
+          confidence: widened || gainedRequiredParam || gainedRequiredTypeParam ? 'high' : 'medium',
           before: before.signature,
           after: after.signature,
         });

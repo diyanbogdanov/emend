@@ -407,10 +407,16 @@ nothing.
 the count is shown. About a third of outbound calls in a typical repository are
 readable; the rest genuinely do not exist until the process runs.
 
-**Type-level findings are compared as text.** Package surfaces are diffed by
-comparing declaration signatures, which is exact for removals and renames and
-approximate for changes. Additions to a signature — a new optional parameter, a
-wider input union, an extra property on a returned object — are currently
-reported as breaking when they are not. Sampling one large repository, roughly
-half of `signature-changed` findings were of that shape. This is the largest
-known source of false positives and it is on by default.
+**Type-level findings are compared as text, and say so.** Package surfaces are
+diffed by comparing declaration signatures. Two things that comparison can
+demonstrate are reported as **breaking**: a symbol that is no longer there, and
+a new required parameter — value or type — because every existing call is then
+short an argument.
+
+Every other signature edit is reported as **drift**: something moved under you,
+with its call sites, and Emend cannot tell whether it bites. Measured on one
+large repository, of 44 such findings none had a shape a string comparison could
+prove either way — most were not function signatures at all, and roughly half
+were additions (a wider input union, an extra property on a returned object)
+that break nobody. Spending the word "breaking" on those is what makes it
+ignorable on the ones that deserve it.
