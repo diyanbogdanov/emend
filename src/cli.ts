@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
 import { reintroduced } from './remediate.ts';
-import { fixFinding, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
+import { fixFinding, needsSourceRepair, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
 import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
 import { assistantText } from './reviewharness.ts';
@@ -515,12 +515,16 @@ async function cmdFix(args: Args): Promise<number> {
   const vulnTargets = targets.filter((f) => f.detector === 'vulnerability');
   const lintTargets = targets.filter((f) => f.detector === 'external-lint');
   const freshTargets = targets.filter((f) => f.detector === 'freshness');
+  // A wire-contract finding names a host in `pkg`, not a package, and has no
+  // version to bump — the same reason version pins are routed away from here.
+  const contractTargets = targets.filter(needsSourceRepair);
   const packageTargets = targets.filter(
     (f) =>
       f.detector !== 'version-pin' &&
       f.detector !== 'vulnerability' &&
       f.detector !== 'external-lint' &&
-      f.detector !== 'freshness',
+      f.detector !== 'freshness' &&
+      !needsSourceRepair(f),
   );
 
   // Group by package: a version bump is atomic, so every finding for one
@@ -709,6 +713,29 @@ async function cmdFix(args: Args): Promise<number> {
       `    ${ok ? c.green('VERIFIED') : c.red('NOT VERIFIED')}  ${c.dim(freshResult.verification?.summary ?? '')}`,
     );
     if (freshResult.workspaceDir) console.log(c.dim(`    workspace kept at ${freshResult.workspaceDir}`));
+  }
+
+  if (contractTargets.length > 0) {
+    console.log(c.bold('  wire contracts') + c.dim(`  (${contractTargets.length} finding(s))`));
+    for (const f of contractTargets) {
+      console.log(`    ${c.cyan(f.pkg)}  ${f.change.path}`);
+      for (const site of f.sites.slice(0, 3)) {
+        console.log(c.dim(`      → ${site.file}:${site.line}  ${site.text.trim().slice(0, 80)}`));
+      }
+      if (f.change.guidance) console.log(c.dim(`      ${f.change.guidance}`));
+    }
+    // Said rather than attempted. A wire API has no version to bump, so there is
+    // no deterministic repair to offer: the replacement route is the vendor's to
+    // publish and picking one would be the guess `plan.ts` refuses to make. The
+    // call sites above are what an edit needs, and `--drive` hands exactly this
+    // to a session that can make it.
+    console.log(
+      c.dim(
+        '    No mechanical repair: a wire API has no version to bump and the replacement route',
+      ),
+    );
+    console.log(c.dim('    is the vendor’s to publish. Use --drive to hand these to an agent.'));
+    console.log('');
   }
 
   if (pinTargets.length > 0) {

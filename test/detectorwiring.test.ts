@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { needsSourceRepair } from '../src/fix.ts';
 import assert from 'node:assert/strict';
 import { detectorsFor, groupByDetector } from '../src/detectors.ts';
 import type { Finding } from '../src/types.ts';
@@ -72,4 +73,38 @@ test('a group carries no version pair, because a detector finding is not an upgr
   const group = groupByDetector([finding('http-contract')])[0];
   assert.equal(group?.fromVersion, null);
   assert.equal(group?.toVersion, null);
+});
+
+// ---------------------------------------------------------------------------
+// Routing a finding to something that can repair it
+// ---------------------------------------------------------------------------
+
+test('a wire-contract finding does not name an npm package', () => {
+  // `Finding.pkg` carries whatever the detector is about, and for `http-contract`
+  // that is a host. Routing it to the package path made `emend fix` ask
+  // registry.npmjs.org for `api.github.com` and fail with a 404 — the same
+  // nonsense `version-pin` is already excluded to avoid, one detector later.
+  //
+  // There is no version to bump here. The repair is a source edit at the call
+  // sites, which is the agent's job, and the routing has to say so rather than
+  // reach for a registry.
+  const finding: Finding = {
+    id: '45b3a8770413',
+    detector: 'http-contract',
+    pkg: 'api.github.com',
+    fromVersion: 'in use',
+    toVersion: 'official-github',
+    change: {
+      path: 'GET /repos/{}/{}/git/refs/heads/{}',
+      kind: 'removed',
+      severity: 'breaking',
+      confidence: 'medium',
+      before: 'present',
+      after: null,
+    },
+    sites: [{ file: 'src/gh.ts', line: 25, column: 5, text: 'axios.get(', via: 'import' }],
+    confidence: 'medium',
+  };
+  assert.equal(needsSourceRepair(finding), true);
+  assert.equal(needsSourceRepair({ ...finding, detector: 'api-drift' }), false);
 });

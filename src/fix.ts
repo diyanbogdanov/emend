@@ -1094,6 +1094,22 @@ export interface PackageFixResult {
  * will fail. This is only appropriate when the package has one finding, or for
  * rendering a single finding's evidence.
  */
+/**
+ * Whether a finding can only be repaired by editing source.
+ *
+ * `Finding.pkg` carries whatever its detector is about, and for `http-contract`
+ * that is a host — `api.github.com`. The package path took it for a package
+ * name and asked npm for it, which 404s; the same shape `version-pin` is
+ * already routed away from, because `npm install node@22` is nonsense too.
+ *
+ * There is no version to bump for a wire API. The description is the target and
+ * the repair is an edit at the call sites, so this belongs to the agent rather
+ * than to the registry.
+ */
+export function needsSourceRepair(finding: Finding): boolean {
+  return finding.detector === 'http-contract';
+}
+
 export async function fixFinding(
   repoDir: string,
   finding: Finding,
