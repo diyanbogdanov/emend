@@ -11,19 +11,27 @@ real baseline before proposing anything.
 $ emend scan ./my-service --only zod
 
   zod 3.22.4 → 4.4.3
-    breaking   record (signature-changed, high confidence, id 42c38dcf56ce)
+    breaking record (signature-changed, high confidence, id 42c38dcf56ce)
       → src/schema.ts:28:15  metadata: z.record(z.string()),
-    breaking   ZodError.errors (removed, high confidence, id 55028a971871)
-      → src/schema.ts:41:23  return result.error.errors.map(...)
+    breaking ZodError.errors (removed, high confidence, id 55028a971871)
+      → src/schema.ts:41:23  return result.error.errors.map((issue) => ...)
     deprecated ZodString.email (deprecated, high confidence, id 12c97d6d915a)
+      Use `z.email()` instead.
       → src/schema.ts:12:21  email: z.string().email(),
-    + 1210 other breaking change(s) in this upgrade do not appear anywhere in your code
+    + 1212 other breaking change(s) in this upgrade do not appear anywhere in your code
 
-  Summary  2 breaking · 3 deprecated · 5 call site(s)
+  Summary  4 breaking · 3 deprecated · 7 call site(s)
+           1 package(s) analyzed, 0 skipped (skipped ≠ clean)
 ```
 
-That last line is the product. zod 4 ships ~1,215 breaking changes; five touch
-this repository. Everything downstream operates on those five.
+That last line is the product. zod 4 ships roughly 1,219 breaking changes; seven
+call sites in this repository touch any of them. Everything downstream operates
+on those seven — and on the second line, which says how much of the repository
+went unexamined, because a summary that cannot be wrong about its own coverage
+is the only kind worth reading.
+
+*(That is the real output of `emend demo /tmp/d && emend scan /tmp/d --only zod`,
+not an illustration.)*
 
 The same question, asked of the HTTP calls no package describes, is
 [`--contracts`](#calls-to-apis-you-dont-have-a-package-for). How it all fits
@@ -52,6 +60,10 @@ node bin/emend.mjs serve
 ```
 
 `npm link` puts `emend` on your PATH if you prefer that to `node bin/emend.mjs`.
+
+**[docs/getting-started.md](docs/getting-started.md)** walks the whole thing:
+configuring a model, scanning a real repository, checking your HTTP calls, and
+what to do when something looks wrong.
 
 ---
 
