@@ -371,3 +371,27 @@ export function describePinConflicts(conflicts: PinConflict[]): string {
     })
     .join('\n');
 }
+
+/** A dated API version, which is the only shape that can be ordered. */
+const DATED = /^(\d{4}-\d{2}-\d{2})/;
+
+/**
+ * Whether a pinned wire-API version is behind the one the vendor publishes.
+ *
+ * `null` when the two cannot be compared, which is most of the time and is a
+ * real answer rather than a failure. A description's `info.version` is only the
+ * *API's* version where the vendor versions its API that way: Stripe publishes
+ * `2026-07-29.dahlia` and pins read `2024-10-21`, the same shape, so they order.
+ * OpenAI publishes `2.3.0`, which versions the document — comparing it against a
+ * date would report every OpenAI pin as behind on a number that does not mean
+ * what the pin means.
+ *
+ * Shape is what decides it, not a list of vendors, because the question is
+ * whether these two strings are the same kind of thing.
+ */
+export function behindCurrent(pinned: string, current: string): boolean | null {
+  const a = DATED.exec(pinned.trim())?.[1];
+  const b = DATED.exec(current.trim())?.[1];
+  if (!a || !b) return null;
+  return a < b;
+}

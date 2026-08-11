@@ -25,13 +25,15 @@ import { PROVIDERS, resolveLlmConfig, type LlmConfig } from './llm/providers.ts'
 import { serve as serveMcp } from './mcp.ts';
 import { openCodeHarness, drivingHarness, drivePrompt, harnessPermitted, type Harness } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
+import { parseSpec } from './specdiff.ts';
+import { behindCurrent } from './pins.ts';
 import { previousVersion } from './github.ts';
 import { scanPackages, goSymbolRecord } from './osv.ts';
 import { goSymbolSites, symbolTargets } from './goreach.ts';
 import { LINT_ADAPTERS } from './lint.ts';
 import { enrichAdvisories } from './advisory.ts';
 import type { VulnerabilityOptions } from './detectors.ts';
-import { githubOrgs, orgFor, type SpecCandidate } from './specs.ts';
+import { canAssertBreakage, githubOrgs, orgFor, type SpecCandidate } from './specs.ts';
 import { listModels } from './llm/client.ts';
 import {
   loadCases,
@@ -157,6 +159,45 @@ function reviewHarnessFrom(args: Args): Harness | undefined {
  * `--contracts=<dir>` puts the description cache somewhere durable; a hosted
  * scan wants that, a one-off does not care.
  */
+/**
+ * The API version each pinned vendor publishes, where a description says so.
+ *
+ * Reuses the resolver `--contracts` already hands over rather than adding a
+ * second way to reach a vendor, so provenance and currency are decided in one
+ * place. A pin is only judged against a description Emend may assert from —
+ * being behind is a claim about somebody's code, and a stale mirror cannot
+ * support it.
+ */
+const PIN_VENDOR_DOMAINS: Record<string, string> = {
+  stripe: 'api.stripe.com',
+  anthropic: 'api.anthropic.com',
+  openai: 'api.openai.com',
+};
+
+async function publishedVersions(
+  report: ScanReport,
+  contracts: { resolve: (v: { domain: string }) => Promise<SpecCandidate[]> } | undefined,
+): Promise<Map<string, string>> {
+  const found = new Map<string, string>();
+  if (!contracts || report.apiVersionPins.length === 0) return found;
+
+  for (const subject of new Set(report.apiVersionPins.map((p) => p.subject))) {
+    const domain = PIN_VENDOR_DOMAINS[subject];
+    if (!domain) continue;
+    try {
+      const spec = (await contracts.resolve({ domain }))[0];
+      if (!spec?.body || !canAssertBreakage(spec, Date.now())) continue;
+      const doc = parseSpec(spec.body) as { info?: { version?: unknown } } | null;
+      const version = doc?.info?.version;
+      if (typeof version === 'string' && version !== '') found.set(subject, version);
+    } catch {
+      // A vendor that cannot be reached is one that was not checked, which the
+      // unchanged line below already says.
+    }
+  }
+  return found;
+}
+
 function contractsFrom(args: Args): {
   resolve: (v: { domain: string }) => Promise<SpecCandidate[]>;
   previous?: (c: SpecCandidate) => Promise<SpecCandidate | null>;
@@ -273,7 +314,13 @@ function severityLabel(sev: string): string {
   return c.dim(sev);
 }
 
-function printScan(report: ScanReport, showAll: boolean): void {
+/**
+ * The API version each pinned vendor currently publishes, where it could be
+ * established. Keyed by the subject `pins.ts` names — `stripe`, `anthropic`.
+ */
+type CurrentVersions = Map<string, string>;
+
+function printScan(report: ScanReport, showAll: boolean, current: CurrentVersions = new Map()): void {
   const { counts } = report;
   console.log('');
   console.log(c.bold(`  Emend scan — ${report.repo}`));
@@ -369,9 +416,28 @@ function printScan(report: ScanReport, showAll: boolean): void {
       console.log(`    ${c.cyan(pin.subject)} ${pin.version}`);
       console.log(c.dim(`      → ${pin.file}:${pin.line}  ${pin.text}`));
     }
-    console.log(
-      c.dim('    Reported, not checked: the current version is the vendor’s to publish.'),
-    );
+    let judged = 0;
+    for (const pin of report.apiVersionPins) {
+      const published = current.get(pin.subject);
+      if (published === undefined) continue;
+      const behind = behindCurrent(pin.version, published);
+      if (behind === null) continue;
+      judged++;
+      console.log(
+        behind
+          ? c.yellow(`    ${pin.subject} publishes ${published}; this pin is behind it`)
+          : c.dim(`    ${pin.subject} publishes ${published}; this pin is current`),
+      );
+    }
+    if (judged < report.apiVersionPins.length) {
+      // Unchanged for the ones that could not be judged, and it is the honest
+      // line: a description's `info.version` is the *API's* version only where
+      // the vendor versions its API that way. OpenAI publishes `2.3.0`, which
+      // versions the document.
+      console.log(
+        c.dim('    The rest are reported, not checked: the current version is the vendor’s to publish.'),
+      );
+    }
   }
 
   console.log('');
@@ -454,7 +520,7 @@ async function cmdScan(args: Args): Promise<number> {
   if (args.flags.get('json') === true) {
     console.log(JSON.stringify(report, null, 2));
   } else {
-    printScan(report, args.flags.get('all') === true);
+    printScan(report, args.flags.get('all') === true, await publishedVersions(report, contracts));
   }
 
   const store = new Store();

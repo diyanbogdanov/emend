@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  behindCurrent,
   extractPins,
   findPinConflicts,
   planPinRepair,
@@ -300,4 +301,33 @@ test('a pin for a package the repository does not install is left alone', () => 
   );
   assert.equal(pins.length, 1);
   assert.deepEqual(findPinConflicts(pins, new Map()), []);
+});
+
+// ---------------------------------------------------------------------------
+// Judging a pin against the version the vendor publishes
+// ---------------------------------------------------------------------------
+
+test('a dated pin is behind a later dated version', () => {
+  // Stripe's own description carries `info.version: 2026-07-29.dahlia`, in the
+  // same shape as the pin it is compared against — which is what makes the
+  // comparison possible at all. Stripe is also the worked example in the brief
+  // this serves, and "you are pinned to an API version eighteen months old"
+  // needs no code analysis to act on.
+  assert.equal(behindCurrent('2024-10-21', '2026-07-29.dahlia'), true);
+  assert.equal(behindCurrent('2025-05-28.basil', '2026-07-29.dahlia'), true);
+});
+
+test('a pin at or past the published version is not behind', () => {
+  assert.equal(behindCurrent('2026-07-29.dahlia', '2026-07-29.dahlia'), false);
+  assert.equal(behindCurrent('2026-08-01', '2026-07-29.dahlia'), false);
+});
+
+test('a version of a different shape is not compared at all', () => {
+  // OpenAI's description says `info.version: 2.3.0`, which versions the
+  // *document* rather than the API. Comparing a semver against a date would
+  // report every OpenAI pin as behind, on a number that does not mean what the
+  // pin means. Not comparable is its own answer.
+  assert.equal(behindCurrent('2024-10-21', '2.3.0'), null);
+  assert.equal(behindCurrent('2024-10-21', ''), null);
+  assert.equal(behindCurrent('v1', '2026-07-29.dahlia'), null);
 });
