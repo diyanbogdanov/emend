@@ -492,3 +492,44 @@ test('reordering type parameters is a change, not a rename', () => {
   ).changes;
   assert.equal(changes[0]?.severity, 'breaking');
 });
+
+// ---------------------------------------------------------------------------
+// A signature kept only in part
+// ---------------------------------------------------------------------------
+
+const CUT = '…<truncated>';
+
+test('a comparison made on a partial signature says so', () => {
+  // `normaliseSignature` stores at most 4,000 characters, and five findings on
+  // activepieces were decided on strings cut at that point. The visible
+  // difference is real, but what lies past the cut was never compared — and
+  // `@ai-sdk/anthropic`'s visible difference is an *added* optional property,
+  // which is a widening rather than a break.
+  const diff = diffSurfaces(
+    surface('1.0.0', [sym('tools', `{ a: string; b: number${CUT}`)]),
+    surface('2.0.0', [sym('tools', `{ a: string; b: boolean${CUT}`)]),
+  );
+  assert.equal(diff.changes.length, 1, 'the visible difference is still evidence');
+  assert.match(diff.note ?? '', /tools/);
+  assert.match(diff.note ?? '', /as far as|partial|not compared/i);
+});
+
+test('two partial signatures that agree so far are not called unchanged', () => {
+  // The quieter half, and the one that was fully silent: identical up to the
+  // cut says nothing about what follows it, and no finding read as no change.
+  const diff = diffSurfaces(
+    surface('1.0.0', [sym('tools', `{ a: string${CUT}`)]),
+    surface('2.0.0', [sym('tools', `{ a: string${CUT}`)]),
+  );
+  assert.deepEqual(diff.changes, []);
+  assert.match(diff.note ?? '', /tools/);
+});
+
+test('a signature kept whole is compared without comment', () => {
+  const diff = diffSurfaces(
+    surface('1.0.0', [sym('small', '(a: string) => void')]),
+    surface('2.0.0', [sym('small', '(a: number) => void')]),
+  );
+  assert.equal(diff.changes.length, 1);
+  assert.equal(/as far as/i.test(diff.note ?? ''), false);
+});

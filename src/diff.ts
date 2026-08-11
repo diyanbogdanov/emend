@@ -183,6 +183,9 @@ function withPositionalTypeParams(symbol: ApiSymbol): string {
   return out.replaceAll('\u0000', '');
 }
 
+/** What `normaliseSignature` appends when it keeps only part of a signature. */
+const CUT = '\u2026<truncated>';
+
 export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
   const changes: SurfaceChange[] = [];
   const notes: string[] = [];
@@ -239,6 +242,12 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
     if (!/^typeof [A-Za-z_$][\w$]*$/.test(sym.signature.trim())) continue;
     appeared.set(sym.signature, appeared.has(sym.signature) ? null : path);
   }
+
+  // Signatures long enough that only part of them was stored. What lies past
+  // the cut was never compared, so neither a difference nor an agreement within
+  // the visible part settles the whole signature — and an agreement reading as
+  // "unchanged" was the silent half of that.
+  const partial: string[] = [];
 
   if (!unanalyzable) {
     for (const [path, before] of Object.entries(from.symbols)) {
@@ -298,6 +307,10 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
         // so the signature change is also recorded.
       }
 
+      if (before.signature.endsWith(CUT) || after.signature.endsWith(CUT)) {
+        partial.push(path);
+      }
+
       // Compared with type parameters at their positions, so a rename alone is
       // not a change. Their names are not something a caller can refer to.
       if (
@@ -342,6 +355,12 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
         });
       }
     }
+  }
+
+  if (partial.length > 0) {
+    notes.push(
+      `${to.pkg}@${to.version}: ${partial.length} signature(s) were kept only in part and compared only as far as they were kept — ${partial.slice(0, 5).join(', ')}${partial.length > 5 ? ', …' : ''}`,
+    );
   }
 
   return {
