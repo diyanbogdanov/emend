@@ -146,7 +146,7 @@ function agentAllowed(args: Args): boolean {
 }
 
 /**
- * The read-only repo-wide review, when one was asked for.
+ * The read-only repo-wide review, which runs unless it is turned off.
  *
  * A model with read access to the checkout, not a coding harness. opencode was
  * the obvious choice and was wrong twice: it resolves its model from the host's
@@ -155,12 +155,18 @@ function agentAllowed(args: Args): boolean {
  * to be verified afterwards rather than a capability it lacked. Here there is no
  * write tool to deny.
  *
- * `--review=<model>` pins one; bare `--review` uses the same model as the agent,
- * which is the open-weight default the provider preset carries.
+ * On by default because it is the only pass that reads the *consequence* of a
+ * change rather than its text. Proven on a redirected call whose response shape
+ * was unchanged and whose rows were not: it followed the call into its consumer
+ * and reported that a broadcast would now reach people outside the audience it
+ * named. A verified build says nothing about that, and neither does a diff.
+ *
+ * `--review=<model>` pins one; `--no-review` skips it.
  */
 function reviewHarnessFrom(args: Args): Harness | undefined {
   const flag = args.flags.get('review');
-  if (flag === undefined || flag === false) return undefined;
+  if (args.flags.get('no-review') === true) return undefined;
+  if (flag === false) return undefined;
   // A separate session from any repair harness, deliberately. A model reviewing
   // its own work argues for it; one that never saw the reasoning has only the
   // code. `--review=<provider/model>` pins the reviewer independently.
@@ -1538,11 +1544,14 @@ ${c.bold('COMMANDS')}
                     build red, pinning provider/model if given. Every hunk it
                     writes is held to the same evidence rule; anything the
                     failure did not ask for is reverted. Slower and costlier.
-    --review[=m]    After a migration verifies, let a READ-ONLY model read the
-                    repository and report what the diff alone cannot show:
-                    duplication against code it never loaded, a shared module a
-                    caller leaked into, a file this change made unreadable. It
-                    changes nothing; the notes go in the pull request body.
+    --review[=m]    Pin the reviewer's model. After a migration verifies, a
+                    READ-ONLY model reads the repository and reports what the
+                    diff cannot show: duplication against code it never loaded,
+                    a shared module a caller leaked into, a call that now
+                    returns different rows. It changes nothing; the notes go in
+                    the pull request body.
+    --no-review     Skip that pass. It is the only one that reads what a change
+                    means rather than what it says, so skipping it is a choice.
     --keep          Leave the workspace on disk for inspection
 
   models          List models your configured LLM provider serves.
