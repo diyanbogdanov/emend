@@ -418,3 +418,77 @@ test('a symbol whose type names itself is still recognised where it moved', () =
   );
   assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// A type parameter's name is not observable
+// ---------------------------------------------------------------------------
+
+test('renaming a type parameter is not a change a caller can see', () => {
+  // @tanstack/react-query 5.51 -> 5.101, verbatim. `TContext` became
+  // `TOnMutateResult`, used in the same position throughout. Type parameters are
+  // positional at a call site — `useMutation<A, B, C, D>` is unchanged and
+  // nobody can name one — so nothing observable happened.
+  const changes = diffSurfaces(
+    surface('5.51.1', [
+      sym(
+        'useMutation',
+        '<TData = unknown, TError = Error, TVariables = void, TContext = unknown>(options: UseMutationOptions<TData, TError, TVariables, TContext>) => void',
+        {
+          typeParams: [
+            { name: 'TData', defaulted: true },
+            { name: 'TError', defaulted: true },
+            { name: 'TVariables', defaulted: true },
+            { name: 'TContext', defaulted: true },
+          ],
+        },
+      ),
+    ]),
+    surface('5.101.4', [
+      sym(
+        'useMutation',
+        '<TData = unknown, TError = Error, TVariables = void, TOnMutateResult = unknown>(options: UseMutationOptions<TData, TError, TVariables, TOnMutateResult>) => void',
+        {
+          typeParams: [
+            { name: 'TData', defaulted: true },
+            { name: 'TError', defaulted: true },
+            { name: 'TVariables', defaulted: true },
+            { name: 'TOnMutateResult', defaulted: true },
+          ],
+        },
+      ),
+    ]),
+  ).changes;
+  assert.deepEqual(changes, [], 'positional shape is identical');
+});
+
+test('a rename alongside a real change is still reported', () => {
+  // The limit. Renaming the parameter does not excuse the value parameter that
+  // changed with it — `string` became `number`.
+  const changes = diffSurfaces(
+    surface('1.0.0', [
+      sym('read', '<TIn>(path: string) => TIn', { typeParams: [{ name: 'TIn', defaulted: false }] }),
+    ]),
+    surface('2.0.0', [
+      sym('read', '<TSource>(path: number) => TSource', { typeParams: [{ name: 'TSource', defaulted: false }] }),
+    ]),
+  ).changes;
+  assert.equal(changes[0]?.severity, 'breaking');
+});
+
+test('reordering type parameters is a change, not a rename', () => {
+  // Positions are what a caller supplies, so swapping them is observable even
+  // though the same names appear on both sides.
+  const changes = diffSurfaces(
+    surface('1.0.0', [
+      sym('box', '<A, B>(a: A, b: B) => void', {
+        typeParams: [{ name: 'A', defaulted: false }, { name: 'B', defaulted: false }],
+      }),
+    ]),
+    surface('2.0.0', [
+      sym('box', '<A, B>(a: B, b: A) => void', {
+        typeParams: [{ name: 'A', defaulted: false }, { name: 'B', defaulted: false }],
+      }),
+    ]),
+  ).changes;
+  assert.equal(changes[0]?.severity, 'breaking');
+});

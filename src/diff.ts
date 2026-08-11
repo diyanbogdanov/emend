@@ -155,6 +155,34 @@ function namesADeclaration(signature: string, path: string): boolean {
   return named[1] === (path.split('.').pop() ?? path);
 }
 
+/**
+ * A signature with its type parameters renamed to their positions.
+ *
+ * A type parameter's name is not observable to a caller: they are supplied
+ * positionally, `useMutation<A, B, C, D>`, and nobody can reference one by
+ * name. So @tanstack/react-query renaming `TContext` to `TOnMutateResult` —
+ * used in the same slot throughout — changed the signature string and nothing
+ * a consumer can see, and was reported as breaking.
+ *
+ * Comparing positionally is the same move that fixed the cache path and the
+ * defaulted type parameter: normalise the representation, then compare meaning.
+ * A rename that comes *with* a real change still differs after normalising,
+ * and so does a reordering, because position is exactly what is preserved.
+ */
+function withPositionalTypeParams(symbol: ApiSymbol): string {
+  const params = symbol.typeParams ?? [];
+  if (params.length === 0) return symbol.signature;
+
+  // A sentinel keeps a substitution from being substituted again, which a
+  // parameter already named `T0` would otherwise trigger.
+  let out = symbol.signature;
+  params.forEach((param, i) => {
+    const escaped = param.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`\\b${escaped}\\b`, 'g'), `\u0000T${i}`);
+  });
+  return out.replaceAll('\u0000', '');
+}
+
 export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
   const changes: SurfaceChange[] = [];
   const notes: string[] = [];
@@ -270,7 +298,12 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
         // so the signature change is also recorded.
       }
 
-      if (before.signature !== after.signature) {
+      // Compared with type parameters at their positions, so a rename alone is
+      // not a change. Their names are not something a caller can refer to.
+      if (
+        before.signature !== after.signature &&
+        withPositionalTypeParams(before) !== withPositionalTypeParams(after)
+      ) {
         const beforeRequired = requiredArity(before.signature);
         const afterRequired = requiredArity(after.signature);
         const gainedRequiredParam =
