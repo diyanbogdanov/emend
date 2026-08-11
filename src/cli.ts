@@ -23,6 +23,7 @@ import {
   contractReviewPrompt,
   parseContractFindings,
   renderContractFindings,
+  type ContractFinding,
   renderReviewFindings,
   reviewSession,
 } from './reviewharness.ts';
@@ -597,6 +598,152 @@ async function cmdScan(args: Args): Promise<number> {
   return report.counts.breaking > 0 ? 1 : 0;
 }
 
+/**
+ * Report wire-contract findings, and hand them to a session if asked.
+ *
+ * Its own function because it shares nothing with the package path but the
+ * repository. A wire API has no version to bump, so there is no deterministic
+ * repair to offer at all: the replacement route is the vendor's to publish, and
+ * picking one would be the guess `plan.ts` refuses to make everywhere else. What
+ * Emend contributes is the located call sites and, afterwards, the judgement of
+ * whether the edit changed anything it should not have.
+ */
+async function fixWireContracts(repoDir: string, findings: Finding[], args: Args): Promise<void> {
+  if (findings.length === 0) return;
+
+  console.log(c.bold('  wire contracts') + c.dim(`  (${findings.length} finding(s))`));
+  for (const f of findings) {
+    console.log(`    ${c.cyan(f.pkg)}  ${f.change.path}`);
+    for (const site of f.sites.slice(0, 3)) {
+      console.log(c.dim(`      → ${site.file}:${site.line}  ${site.text.trim().slice(0, 80)}`));
+    }
+    if (f.change.guidance) console.log(c.dim(`      ${f.change.guidance}`));
+  }
+
+  const model = args.flags.get('drive');
+  if (!model) {
+    console.log(
+      c.dim('    No mechanical repair: a wire API has no version to bump and the replacement route'),
+    );
+    console.log(c.dim('    is the vendor’s to publish. Use --drive to hand these to an agent.'));
+    console.log('');
+    return;
+  }
+
+  const permitted = harnessPermitted({ untrusted: args.flags.get('untrusted') === true });
+  if (!permitted.ok) {
+    console.log(c.yellow(`    declining to drive: ${permitted.reason}`));
+    console.log('');
+    return;
+  }
+
+  const harness = drivingHarness({
+    ...(typeof model === 'string' ? { model } : {}),
+    emendCommand: [
+      process.execPath,
+      '--experimental-strip-types',
+      fileURLToPath(import.meta.url),
+      'mcp',
+    ],
+  });
+  const availability = await harness.available();
+  if (!availability.ok) {
+    console.log(c.yellow(`    cannot drive: ${availability.reason}`));
+    console.log('');
+    return;
+  }
+
+  for (const f of findings) {
+    console.log(c.dim(`    driving ${harness.id} for ${f.change.path}`));
+    const run = await harness.run(repoDir, {
+      // The wire-contract instruction, not the vulnerability one. The difference
+      // is not cosmetic: told it was fixing a vulnerability, a session went
+      // looking for a GitHub advisory until it timed out.
+      instruction: driveContractPrompt({
+        repo: repoDir,
+        findingId: f.id,
+        host: f.pkg,
+        route: f.change.path,
+        sites: f.sites.map((site) => ({ file: site.file, line: site.line })),
+        description: f.change.guidance ?? f.toVersion,
+      }),
+      failureOutput: '',
+    });
+
+    const said = assistantText(run.log).trim();
+    const summary = (run.summary ?? '').trim();
+    if (summary) console.log(c.dim(`    ${summary.slice(0, 2000)}`));
+    if (said) console.log(said.slice(0, 4000).split('\n').map((l) => `    ${l}`).join('\n'));
+    if (!run.ok) console.log(c.red(`    ${run.error ?? 'the session failed'}`));
+    if (run.ok && !said && !summary) console.log(c.yellow('    the session produced no output'));
+
+    const changed = (
+      await execFileAsync('git', ['diff'], { cwd: repoDir, maxBuffer: 32 * 1024 * 1024 })
+    ).stdout;
+    if (changed.trim() === '') continue;
+
+    await reviewBehaviour(repoDir, f, changed, typeof model === 'string' ? model : undefined);
+  }
+  console.log('');
+}
+
+/**
+ * A second session, which never saw the first one's reasoning.
+ *
+ * Measured twice: a driven fix picked a plausible route, justified it, compiled,
+ * and changed what came back — a different page size on one repository, a lost
+ * audience filter on another. Neither is visible to a build, because a URL is a
+ * string that compiles whatever it says, and neither was caught by the session
+ * that argued itself into it.
+ */
+async function reviewBehaviour(
+  repoDir: string,
+  finding: Finding,
+  diff: string,
+  model: string | undefined,
+): Promise<void> {
+  const review = await reviewSession<ContractFinding>({
+    harness: openCodeHarness({
+      readOnly: true,
+      allowBash: true,
+      // Its own budget, not the ten minutes the repair already spent. Measured:
+      // the review started after a drive that had used most of the default and
+      // produced nothing but a step_start, so the run could only report that
+      // behaviour went unreviewed. The question it answers — does this still
+      // return the same rows — is not a cheaper job than the edit was.
+      timeoutMs: 20 * 60 * 1000,
+      ...(model ? { model } : {}),
+    }),
+    dir: repoDir,
+    pkg: finding.pkg,
+    fromVersion: finding.fromVersion,
+    toVersion: finding.toVersion,
+    diff,
+    // The parser travels with the prompt. Asking for `kind`/`path`/`detail` and
+    // reading for `severity`/`file`/`what`/`why` meant a review that named the
+    // exact regression it exists to catch was reported as having found nothing.
+    parse: parseContractFindings,
+    prompt: contractReviewPrompt({
+      host: finding.pkg,
+      route: finding.change.path,
+      description: finding.change.guidance ?? finding.toVersion,
+      diff,
+    }),
+    progress: (m) => console.log(c.dim(`    ${m}`)),
+  });
+
+  if (!review.ok) {
+    // Could not review is not reviewed and clean, and this is the one place that
+    // distinction decides whether an edit ships.
+    console.log(c.yellow(`    behaviour unreviewed: ${review.reason ?? 'unknown'}`));
+  } else if (review.findings.length === 0) {
+    console.log(c.green('    behaviour review found no change beyond the route'));
+  } else {
+    console.log(c.red(`    behaviour review: ${review.findings.length} concern(s)`));
+    console.log(renderContractFindings(review.findings));
+  }
+}
+
 async function cmdFix(args: Args): Promise<number> {
   const repoDir = path.resolve(args.positional[0] ?? '.');
   const store = new Store();
@@ -829,131 +976,7 @@ async function cmdFix(args: Args): Promise<number> {
     if (freshResult.workspaceDir) console.log(c.dim(`    workspace kept at ${freshResult.workspaceDir}`));
   }
 
-  if (contractTargets.length > 0) {
-    console.log(c.bold('  wire contracts') + c.dim(`  (${contractTargets.length} finding(s))`));
-    for (const f of contractTargets) {
-      console.log(`    ${c.cyan(f.pkg)}  ${f.change.path}`);
-      for (const site of f.sites.slice(0, 3)) {
-        console.log(c.dim(`      → ${site.file}:${site.line}  ${site.text.trim().slice(0, 80)}`));
-      }
-      if (f.change.guidance) console.log(c.dim(`      ${f.change.guidance}`));
-    }
-    // A wire API has no version to bump, so there is no deterministic repair to
-    // offer: the replacement route is the vendor's to publish and picking one
-    // would be the guess `plan.ts` refuses to make. The call sites above are
-    // what an edit needs, and a driven session can make it.
-    if (args.flags.get('drive')) {
-      const permitted = harnessPermitted({ untrusted: args.flags.get('untrusted') === true });
-      const model = args.flags.get('drive');
-      if (!permitted.ok) {
-        console.log(c.yellow(`    declining to drive: ${permitted.reason}`));
-      } else {
-        const harness = drivingHarness({
-          ...(typeof model === 'string' ? { model } : {}),
-          emendCommand: [
-            process.execPath,
-            '--experimental-strip-types',
-            fileURLToPath(import.meta.url),
-            'mcp',
-          ],
-        });
-        const availability = await harness.available();
-        if (!availability.ok) {
-          console.log(c.yellow(`    cannot drive: ${availability.reason}`));
-        } else {
-          for (const f of contractTargets) {
-            console.log(c.dim(`    driving ${harness.id} for ${f.change.path}`));
-            const run = await harness.run(repoDir, {
-              // The wire-contract instruction, not the vulnerability one. The
-              // difference is not cosmetic: told it was fixing a vulnerability,
-              // a session went looking for a GitHub advisory until it timed out.
-              instruction: driveContractPrompt({
-                repo: repoDir,
-                findingId: f.id,
-                host: f.pkg,
-                route: f.change.path,
-                sites: f.sites.map((site) => ({ file: site.file, line: site.line })),
-                description: f.change.guidance ?? f.toVersion,
-              }),
-              failureOutput: '',
-            });
-            const said = assistantText(run.log).trim();
-            const summary = (run.summary ?? '').trim();
-            if (summary) console.log(c.dim(`    ${summary.slice(0, 2000)}`));
-            if (said) console.log(said.slice(0, 4000).split('\n').map((l) => `    ${l}`).join('\n'));
-            if (!run.ok) console.log(c.red(`    ${run.error ?? 'the session failed'}`));
-            if (run.ok && !said && !summary) {
-              console.log(c.yellow('    the session produced no output'));
-            }
-
-            // A second session, which never saw the first one's reasoning.
-            // Measured twice: a driven fix picked a plausible route, justified
-            // it, compiled, and changed what came back — a different page size
-            // on one repository, a lost audience filter on another. Neither is
-            // visible to a build, because a URL is a string that compiles
-            // whatever it says, and neither was caught by the session that
-            // argued itself into it.
-            const changed = (
-              await execFileAsync('git', ['diff'], { cwd: repoDir, maxBuffer: 32 * 1024 * 1024 })
-            ).stdout;
-            if (changed.trim() === '') continue;
-
-            const review = await reviewSession({
-              harness: openCodeHarness({
-                readOnly: true,
-                allowBash: true,
-                // Its own budget, not the ten minutes the repair already spent.
-                // Measured: the review started after a drive that had used most
-                // of the default and produced nothing but a step_start, so the
-                // run could only report that behaviour went unreviewed. The
-                // question it answers — does this still return the same rows —
-                // needs the description read and the consuming code followed,
-                // which is not a cheaper job than the edit was.
-                timeoutMs: 20 * 60 * 1000,
-                ...(typeof model === 'string' ? { model } : {}),
-              }),
-              dir: repoDir,
-              pkg: f.pkg,
-              fromVersion: f.fromVersion,
-              toVersion: f.toVersion,
-              diff: changed,
-              // The parser travels with the prompt. Asking for `kind`/`path`/
-              // `detail` and reading for `severity`/`file`/`what`/`why` meant a
-              // review that named the exact regression it exists to catch was
-              // reported as having found nothing.
-              parse: parseContractFindings,
-              prompt: contractReviewPrompt({
-                host: f.pkg,
-                route: f.change.path,
-                description: f.change.guidance ?? f.toVersion,
-                diff: changed,
-              }),
-              progress: (m) => console.log(c.dim(`    ${m}`)),
-            });
-
-            if (!review.ok) {
-              // Could not review is not reviewed and clean, and this is the one
-              // place that distinction decides whether an edit ships.
-              console.log(c.yellow(`    behaviour unreviewed: ${review.reason ?? 'unknown'}`));
-            } else if (review.findings.length === 0) {
-              console.log(c.green('    behaviour review found no change beyond the route'));
-            } else {
-              console.log(c.red(`    behaviour review: ${review.findings.length} concern(s)`));
-              console.log(renderContractFindings(review.findings));
-            }
-          }
-        }
-      }
-    } else {
-      console.log(
-        c.dim(
-          '    No mechanical repair: a wire API has no version to bump and the replacement route',
-        ),
-      );
-      console.log(c.dim('    is the vendor’s to publish. Use --drive to hand these to an agent.'));
-    }
-    console.log('');
-  }
+  await fixWireContracts(repoDir, contractTargets, args);
 
   if (pinTargets.length > 0) {
     console.log(c.bold(`  version pins`) + c.dim(`  (${pinTargets.length} drifted)`));
