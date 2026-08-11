@@ -36,11 +36,23 @@ const execFileAsync = promisify(execFile);
  */
 
 /**
- * Ordered by the priority the criteria themselves set: a structural regression
- * outranks every simplification below it, and naming a nit while one stands is a
- * wasted review.
+ * Ordered by the priority `reviewPrompt` sets, because that is the order the
+ * model was asked to weigh them in: duplication first — the finding a diff-only
+ * reviewer can never make — down to size, which is a measurement more than a
+ * judgement.
+ *
+ * This list and the prompt's are one thing in two places, and drifted apart
+ * once: the prompt asked for `complexity` and `atomicity` while this knew four
+ * severities, so the two categories it rated most interesting were the two it
+ * could not report. A test now reads the accepted set out of the prompt.
  */
-export type ReviewSeverity = 'structural' | 'duplication' | 'boundary' | 'size';
+export type ReviewSeverity =
+  | 'duplication'
+  | 'structural'
+  | 'complexity'
+  | 'boundary'
+  | 'atomicity'
+  | 'size';
 
 export interface ReviewFinding {
   severity: ReviewSeverity;
@@ -53,9 +65,11 @@ export interface ReviewFinding {
 }
 
 const SEVERITIES: ReadonlySet<string> = new Set([
-  'structural',
   'duplication',
+  'structural',
+  'complexity',
   'boundary',
+  'atomicity',
   'size',
 ]);
 
@@ -109,15 +123,27 @@ export function reviewPrompt(input: {
 }
 
 /**
- * Read findings out of whatever the harness printed.
+ * The last `{"findings": [...]}` object in the log, validated entry by entry.
  *
  * Tolerant on the way in and strict on the way out. A harness log is a
  * transcript, not a response — the JSON arrives surrounded by tool calls and
- * commentary, and the last object is the one that concluded. Anything that does
- * not carry all four fields with a known severity is dropped, because a partial
- * finding rendered into a PR body reads as authoritative regardless.
+ * commentary, and the last object is the one that concluded. An entry missing a
+ * field is dropped, because a partial finding rendered into a PR body reads as
+ * authoritative regardless.
+ *
+ * `null` when the model did not answer the question, which is not the same as
+ * answering that there is nothing to report — the distinction this whole file
+ * turns on. Two things count as not answering: no findings object at all, and a
+ * findings object none of whose entries survived validation.
+ *
+ * The second is the one that had to be learned. Dropping entries that fail
+ * validation reads as tidying, but a filter that empties a non-empty list has
+ * silently converted "I did not understand this answer" into "there was nothing
+ * to report" — and those are opposite claims. It happened: the contract review
+ * asked for one shape and was parsed for another, so a review naming the exact
+ * regression it existed to catch came back as a clean bill of health.
  */
-export function parseReviewFindings(log: string): ReviewFinding[] | null {
+function parseFindings<T>(log: string, valid: (entry: Record<string, unknown>) => boolean): T[] | null {
   const candidates = [...log.matchAll(/\{[\s\S]*?"findings"[\s\S]*?\]\s*\}/g)].map((m) => m[0]);
   for (const raw of candidates.reverse()) {
     let parsed: unknown;
@@ -128,29 +154,75 @@ export function parseReviewFindings(log: string): ReviewFinding[] | null {
     }
     const list = (parsed as { findings?: unknown }).findings;
     if (!Array.isArray(list)) continue;
-    return list.filter((f): f is ReviewFinding => {
-      const r = f as Record<string, unknown>;
-      return (
-        typeof r['severity'] === 'string' &&
-        SEVERITIES.has(r['severity']) &&
-        typeof r['file'] === 'string' &&
-        r['file'] !== '' &&
-        typeof r['what'] === 'string' &&
-        r['what'] !== '' &&
-        typeof r['why'] === 'string'
-      );
-    });
+    const kept = list.filter((f) => valid(f as Record<string, unknown>));
+    if (kept.length === 0 && list.length > 0) return null;
+    return kept as T[];
   }
-  // No findings object at all — the harness did not answer the question. That is
-  // NOT an empty result. Measured live: opencode failed to resolve a model,
-  // printed an APIError, exited zero, and this reported "no structural findings"
-  // — a clean bill of health from a review that never ran.
+  // No findings object at all — the harness did not answer the question.
+  // Measured live: opencode failed to resolve a model, printed an APIError,
+  // exited zero, and this reported "no structural findings".
   return null;
 }
 
-export interface HarnessReview {
+/** The repo-wide migration review: structural regressions, in four severities. */
+export function parseReviewFindings(log: string): ReviewFinding[] | null {
+  return parseFindings<ReviewFinding>(log, (r) => {
+    return (
+      typeof r['severity'] === 'string' &&
+      SEVERITIES.has(r['severity']) &&
+      typeof r['file'] === 'string' &&
+      r['file'] !== '' &&
+      typeof r['what'] === 'string' &&
+      r['what'] !== '' &&
+      typeof r['why'] === 'string'
+    );
+  });
+}
+
+/**
+ * The categories a redirected HTTP call can change behaviour in.
+ *
+ * Kept distinct from the migration review's severities rather than flattened
+ * into them, because the category *is* the finding here. "scope" tells a reader
+ * the replacement returns different rows — the failure that a matching response
+ * shape hides, and the one that made a Resend fix wrong. Calling that
+ * "structural" would discard the only part worth acting on.
+ */
+export type ContractConcern = 'scope' | 'pagination' | 'ordering' | 'errors' | 'collateral';
+
+export interface ContractFinding {
+  kind: ContractConcern;
+  /** Repo-relative, so a reader can open it. */
+  path: string;
+  /** What changed about the behaviour, and what it protected. */
+  detail: string;
+}
+
+const CONCERNS: ReadonlySet<string> = new Set([
+  'scope',
+  'pagination',
+  'ordering',
+  'errors',
+  'collateral',
+]);
+
+/** The behaviour review of a redirected call: does it still return the same rows? */
+export function parseContractFindings(log: string): ContractFinding[] | null {
+  return parseFindings<ContractFinding>(log, (r) => {
+    return (
+      typeof r['kind'] === 'string' &&
+      CONCERNS.has(r['kind']) &&
+      typeof r['path'] === 'string' &&
+      r['path'] !== '' &&
+      typeof r['detail'] === 'string' &&
+      r['detail'] !== ''
+    );
+  });
+}
+
+export interface HarnessReview<T = ReviewFinding> {
   ok: boolean;
-  findings: ReviewFinding[];
+  findings: T[];
   log: string;
   /** Why there are no findings, when that is not the same as "found nothing". */
   reason?: string;
@@ -174,7 +246,7 @@ export interface HarnessReview {
  * opencode, the same GLM 5.2 ran `ls`, read every source file, found both
  * planted problems and two nobody planted, including a latent correctness bug.
  */
-export async function reviewSession(input: {
+export async function reviewSession<T = ReviewFinding>(input: {
   harness: Harness;
   dir: string;
   pkg: string;
@@ -183,8 +255,16 @@ export async function reviewSession(input: {
   diff: string;
   /** An instruction for a review that is not about a dependency upgrade. */
   prompt?: string;
+  /**
+   * How to read the answer, which has to travel with the question.
+   *
+   * A custom `prompt` asks for a different shape, and the default parser
+   * silently discarded every finding of it — so the two are one decision, not
+   * two independent knobs.
+   */
+  parse?: (log: string) => T[] | null;
   progress?: (message: string) => void;
-}): Promise<HarnessReview> {
+}): Promise<HarnessReview<T>> {
   const progress = input.progress ?? (() => {});
   const available = await input.harness.available();
   if (!available.ok) {
@@ -206,7 +286,8 @@ export async function reviewSession(input: {
     return { ok: false, findings: [], log: run.log, reason };
   }
 
-  const findings = parseReviewFindings(assistantText(run.log));
+  const parse = input.parse ?? (parseReviewFindings as (log: string) => T[] | null);
+  const findings = parse(assistantText(run.log));
   if (findings === null) {
     // Exiting zero is not the same as answering. Measured: opencode failed to
     // resolve a model, printed an APIError and exited zero, and an earlier
@@ -282,7 +363,14 @@ async function changedFiles(dir: string): Promise<string[]> {
  */
 export function renderReviewFindings(findings: ReviewFinding[]): string {
   if (findings.length === 0) return '';
-  const order: ReviewSeverity[] = ['structural', 'duplication', 'boundary', 'size'];
+  const order: ReviewSeverity[] = [
+    'duplication',
+    'structural',
+    'complexity',
+    'boundary',
+    'atomicity',
+    'size',
+  ];
   const sorted = [...findings].sort(
     (a, b) => order.indexOf(a.severity) - order.indexOf(b.severity),
   );
@@ -351,4 +439,19 @@ export function contractReviewPrompt(input: {
     '',
     'Answer with a JSON object on its own line: {"findings": [{"kind": "...", "path": "...", "detail": "..."}]}. An empty array means the behaviour is unchanged, and say so only if you read the consuming code.',
   ].join('\n');
+}
+
+/**
+ * Render behaviour concerns for a terminal or a pull request body.
+ *
+ * Separate from `renderReviewFindings` because the reader's next action is
+ * different. A structural note is advice to weigh; a `scope` concern says the
+ * change returns different rows than it used to, which is a reason not to ship
+ * it — so the concern leads the line rather than trailing it.
+ */
+export function renderContractFindings(findings: ContractFinding[]): string {
+  if (findings.length === 0) return '';
+  const order: ContractConcern[] = ['scope', 'collateral', 'pagination', 'ordering', 'errors'];
+  const sorted = [...findings].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
+  return sorted.map((f) => `      ${f.kind} · ${f.path} — ${f.detail}`).join('\n');
 }

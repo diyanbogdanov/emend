@@ -21,6 +21,8 @@ import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr
 import {
   assistantText,
   contractReviewPrompt,
+  parseContractFindings,
+  renderContractFindings,
   renderReviewFindings,
   reviewSession,
 } from './reviewharness.ts';
@@ -909,6 +911,11 @@ async function cmdFix(args: Args): Promise<number> {
               fromVersion: f.fromVersion,
               toVersion: f.toVersion,
               diff: changed,
+              // The parser travels with the prompt. Asking for `kind`/`path`/
+              // `detail` and reading for `severity`/`file`/`what`/`why` meant a
+              // review that named the exact regression it exists to catch was
+              // reported as having found nothing.
+              parse: parseContractFindings,
               prompt: contractReviewPrompt({
                 host: f.pkg,
                 route: f.change.path,
@@ -926,7 +933,7 @@ async function cmdFix(args: Args): Promise<number> {
               console.log(c.green('    behaviour review found no change beyond the route'));
             } else {
               console.log(c.red(`    behaviour review: ${review.findings.length} concern(s)`));
-              console.log(renderReviewFindings(review.findings));
+              console.log(renderContractFindings(review.findings));
             }
           }
         }

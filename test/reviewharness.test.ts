@@ -11,6 +11,7 @@ import {
   renderReviewFindings,
   reviewSession,
   assistantText,
+  parseContractFindings,
 } from '../src/reviewharness.ts';
 import type { Harness } from '../src/harness.ts';
 
@@ -150,10 +151,15 @@ test('a half-written finding is dropped rather than rendered', () => {
   assert.deepEqual(found.map((f) => f.file), ['b.ts']);
 });
 
-test('an invented severity is not passed through', () => {
-  assert.deepEqual(
+test('an invented severity is not passed through, and not read as silence either', () => {
+  // This asserted `[]` and that was the wrong answer to a real question. A model
+  // that rated one finding "critical" did find something; reporting no findings
+  // claims the opposite of what it said. Nothing is passed through either way —
+  // the difference is whether the caller hears "clean" or "I could not read the
+  // answer", and only the second is true.
+  assert.equal(
     parseReviewFindings('{"findings": [{"severity":"critical","file":"a.ts","what":"w","why":"y"}]}'),
-    [],
+    null,
   );
 });
 
@@ -251,4 +257,57 @@ test('a log that is not an event stream is passed through untouched', () => {
   const err = 'error: {"name":"APIError","data":{"message":"model not available"}}';
   assert.equal(assistantText(err), err);
   assert.equal(parseReviewFindings(assistantText(err)), null);
+});
+
+// ---------------------------------------------------------------------------
+// The contract review answers a different question, in a different shape
+// ---------------------------------------------------------------------------
+
+test('a contract review finding survives being parsed', () => {
+  // `contractReviewPrompt` asks for `kind`/`path`/`detail`, and the migration
+  // parser accepts only `severity`/`file`/`what`/`why` — so a review that named
+  // the exact failure it was built to catch came back as an empty array, and the
+  // caller printed "no structural findings". A review that cannot report is
+  // worse than no review, because it reports the opposite.
+  const said =
+    'I read the consuming code.\n' +
+    '{"findings": [{"kind": "scope", "path": "src/contacts.ts", ' +
+    '"detail": "the audience filter is gone, so this returns every contact"}]}';
+  const findings = parseContractFindings(said);
+  assert.equal(findings?.length, 1);
+  assert.equal(findings?.[0]?.kind, 'scope');
+  assert.equal(findings?.[0]?.path, 'src/contacts.ts');
+});
+
+test('an answer whose every finding was discarded is not a clean answer', () => {
+  // The general form of the bug above. Filtering entries that fail validation
+  // turns "I did not understand the answer" into "there was nothing to report",
+  // and the two are opposite claims. If the model said something and none of it
+  // survived, the honest result is that no answer was obtained.
+  const said = '{"findings": [{"severity": "invented", "file": "a.ts", "what": "x", "why": "y"}]}';
+  assert.equal(parseReviewFindings(said), null);
+  // An array that was genuinely empty still means what it says.
+  assert.deepEqual(parseReviewFindings('{"findings": []}'), []);
+});
+
+test('every severity the prompt asks for is one the parser accepts', () => {
+  // The bug this file kept producing, caught once instead of twice. The prompt
+  // named `complexity` and `atomicity`; the parser knew four severities and
+  // dropped both — so the two findings the review rated most interesting were
+  // the two it could not report. Reading the accepted set out of the prompt
+  // itself means the next person to add a category cannot half-add it.
+  const prompt = reviewPrompt({ pkg: 'x', fromVersion: '1', toVersion: '2', diff: '' });
+  const asked = [...prompt.matchAll(/"severity": ([^,\n]+)/g)]
+    .flatMap((m) => [...(m[1] ?? '').matchAll(/"([a-z]+)"/g)].map((s) => s[1]))
+    .filter((s): s is string => s !== undefined);
+  assert.ok(asked.length >= 4, `expected the prompt to name its severities, saw ${asked.length}`);
+
+  for (const severity of asked) {
+    const said = `{"findings": [{"severity": "${severity}", "file": "a.ts", "what": "x", "why": "y"}]}`;
+    assert.equal(
+      parseReviewFindings(said)?.length,
+      1,
+      `the prompt asks for "${severity}" and the parser discards it`,
+    );
+  }
 });
