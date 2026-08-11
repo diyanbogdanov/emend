@@ -14,7 +14,6 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fetchPackageDir } from './registry.ts';
 import { extractSurface } from './surface.ts';
-import { diffSurfaces } from './diff.ts';
 import { planFinding } from './plan.ts';
 import { findWorkspaces } from './workspaces.ts';
 import { readRepo } from './inventory.ts';
@@ -35,16 +34,6 @@ import {
 import { runPhase, compare, verificationPassed } from './verify.ts';
 import { resolveAgent, type LlmConfig } from './llm/providers.ts';
 
-/**
- * Said when the model was wanted and could not be reached.
- *
- * Named rather than inlined at three call sites, because the wording is the
- * point: a run that fixes less than it could must say why, and "unavailable" on
- * its own leaves a reader to conclude the model tried.
- */
-function unconfiguredAgent(reason: string): string {
-  return `the model is on by default but unavailable: ${reason} — pass --no-agent to stop asking`;
-}
 import {
   proposeTightening,
   proposeReview,
@@ -66,16 +55,25 @@ import {
 } from './quality.ts';
 import type {
   ApiSymbol,
-  CallSite,
   CommandResult,
   Finding,
   MigrationPlan,
   PinConflict,
-  SurfaceChange,
   VerificationReport,
 } from './types.ts';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Said when the model was wanted and could not be reached.
+ *
+ * Named rather than inlined at three call sites, because the wording is the
+ * point: a run that fixes less than it could must say why, and "unavailable" on
+ * its own leaves a reader to conclude the model tried.
+ */
+function unconfiguredAgent(reason: string): string {
+  return `the model is on by default but unavailable: ${reason} — pass --no-agent to stop asking`;
+}
 
 export interface FixOptions {
   /** Leave the workspace on disk for inspection. */
@@ -190,14 +188,6 @@ export interface FixResult {
   reviewNotes?: ReviewFinding[];
 }
 
-/**
- * Recompute the target version's symbol table.
- *
- * The scan stores only consumer-impacting changes, but the planner needs the full
- * set of symbols in the new version to find a replacement. Tarballs are cached,
- * so recomputing is cheaper and less error-prone than persisting a large
- * denormalised blob alongside every finding.
- */
 /**
  * Strip parameter `any` across the workspace and keep it if everything still
  * verifies. One extra verification buys back the checking wholesale; if it
@@ -459,61 +449,20 @@ async function reviewMigration(
   return null;
 }
 
+/**
+ * Recompute the target version's symbol table.
+ *
+ * The scan stores only consumer-impacting changes, but the planner needs the full
+ * set of symbols in the new version to find a replacement. Tarballs are cached,
+ * so recomputing is cheaper and less error-prone than persisting a large
+ * denormalised blob alongside every finding.
+ */
 async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol>> {
   const toDir = await fetchPackageDir(finding.pkg, finding.toVersion);
   const toSurface = await extractSurface(toDir, finding.pkg, finding.toVersion);
   return toSurface.symbols;
 }
 
-/**
- * API changes the compiler is complaining about, whether or not they became
- * findings.
- *
- * Reporting is deliberately conservative: on a major upgrade, a signature change
- * is only surfaced when a required parameter appeared, because anything looser
- * buried real findings under an internal rewrite — removing that gate turned one
- * repository's 153 call sites into 4,052.
- *
- * But a filter that is right for a dashboard is wrong for the model. recharts 2
- * to 3 changed `Tooltip` from `typeof Tooltip` to
- * `(outsideProps: TooltipProps<ValueType, NameType>) => any`; that was in the
- * diff, filtered from findings, and every compiler error was about it. The model
- * was handed "Cell is deprecated", saw fourteen errors about Tooltip, and
- * declined — correctly, because it had been given the wrong contract.
- *
- * Selecting by what the compiler actually named keeps the reporting filter
- * intact while giving the model the part of the diff that explains its errors.
- */
-async function changesNamedInErrors(
-  finding: Finding,
-  errors: string,
-): Promise<Array<{ change: SurfaceChange; sites: CallSite[] }>> {
-  if (!errors.trim()) return [];
-  try {
-    const [fromDir, toDir] = await Promise.all([
-      fetchPackageDir(finding.pkg, finding.fromVersion),
-      fetchPackageDir(finding.pkg, finding.toVersion),
-    ]);
-    const [fromSurface, toSurface] = await Promise.all([
-      extractSurface(fromDir, finding.pkg, finding.fromVersion),
-      extractSurface(toDir, finding.pkg, finding.toVersion),
-    ]);
-
-    const out: Array<{ change: SurfaceChange; sites: CallSite[] }> = [];
-    for (const change of diffSurfaces(fromSurface, toSurface).changes) {
-      if (change.kind === 'added') continue;
-      const leaf = change.path.split('.').at(-1) ?? '';
-      // Word-boundary match: `Cell` must not be found inside `CellProps`.
-      if (leaf.length < 3) continue;
-      if (!new RegExp(`\\b${leaf.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(errors)) continue;
-      out.push({ change, sites: [] });
-      if (out.length >= 25) break;
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
 
 /**
  * Symbols from the new version that the compiler's own error text mentions.
@@ -558,29 +507,6 @@ export function missingSymbols(errors: string): string[] {
   return [...found];
 }
 
-function symbolsNamedInErrors(
-  errors: string,
-  toSymbols: Record<string, ApiSymbol>,
-): string[] {
-  if (!errors.trim()) return [];
-  const mentioned = new Set(errors.match(/\b[A-Z][A-Za-z0-9_]{3,}\b/g) ?? []);
-  if (mentioned.size === 0) return [];
-
-  const hits: string[] = [];
-  for (const symbol of Object.values(toSymbols)) {
-    if (symbol.deprecated) continue;
-    const leaf = symbol.path.split('.').at(-1) ?? '';
-    if (leaf.length < 4) continue;
-    for (const token of mentioned) {
-      if (leaf === token || leaf.includes(token)) {
-        hits.push(symbol.path);
-        break;
-      }
-    }
-    if (hits.length >= 40) break;
-  }
-  return hits;
-}
 
 /**
  * Remove `any` annotations that were never needed.
@@ -687,18 +613,6 @@ async function filesNamedInOutput(output: string, repoDir: string): Promise<stri
 }
 
 
-/**
- * How badly the post-change run failed, as a count of reported errors.
- *
- * Crude on purpose: it only has to order two attempts, not describe them.
- */
-function failureSize(report: VerificationReport): number {
-  const text = verificationErrors(report);
-  const compiler = text.match(/error TS\d+/g)?.length ?? 0;
-  if (compiler > 0) return compiler;
-  const failing = text.match(/^\s*(FAIL|✕|✗|×)/gm)?.length ?? 0;
-  return failing > 0 ? failing : 1;
-}
 
 function verificationErrors(report: VerificationReport): string {
   const parts: string[] = [];
