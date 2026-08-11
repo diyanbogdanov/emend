@@ -103,12 +103,15 @@ test('an SDK option pinning the wire API version is a pin', () => {
   // `apiVersion: '2024-06-20'` move independently, and upgrading the SDK does
   // not touch the pin — so a `.d.ts` diff, which is all Emend had, cannot see
   // this drift at all.
-  const source = "const stripe = new Stripe(key, { apiVersion: '2024-06-20' });";
+  const source = [
+    "import Stripe from 'stripe';", // 1
+    "const stripe = new Stripe(key, { apiVersion: '2024-06-20' });", // 2
+  ].join('\n');
   const pins = extractPins(files({ 'src/billing.ts': source }));
   const pin = pins.find((p) => p.kind === 'api-version');
   assert.equal(pin?.version, '2024-06-20');
   assert.equal(pin?.subject, 'stripe');
-  assert.equal(pin?.line, 1);
+  assert.equal(pin?.line, 2);
   assert.ok(pin?.text.includes('2024-06-20'));
 });
 
@@ -125,6 +128,85 @@ test('a version header pins the wire API just as an option does', () => {
   assert.equal(pin?.version, '2023-06-01');
   assert.equal(pin?.subject, 'anthropic');
   assert.equal(pin?.line, 2);
+});
+
+test('a version header names its own vendor, whoever the vendor is', () => {
+  // The header convention carries the vendor in the key, so it needs no list to
+  // read. Notion is not a vendor Emend was written against, and that is the
+  // point: `<name>-version` identifies itself, and a rule that reads the name
+  // works for the vendors nobody thought of.
+  const source = [
+    "await fetch('https://api.notion.com/v1/pages', {", // 1
+    "  headers: { 'Notion-Version': '2022-06-28' },", // 2
+    '});', // 3
+  ].join('\n');
+  const pin = extractPins(files({ 'src/notion.ts': source })).find((p) => p.kind === 'api-version');
+  assert.equal(pin?.version, '2022-06-28');
+  assert.equal(pin?.subject, 'notion');
+});
+
+test('a header carrying a build number is not a wire API pin', () => {
+  // `<name>-version` is also how an app announces itself: `xt-app-version` and
+  // `em-client-version` say which build is calling, not which contract to speak.
+  // Sampled repositories, these outnumbered the real pins — so the convention
+  // alone is not enough, and what separates them is what the value is a version
+  // *of*. A wire API is a dated revision of a contract; a client is semver.
+  const source = [
+    "  headers: { 'xt-app-version': '1.4.50' },", // 1
+    "  headers: { 'em-client-version': '1.3.2' },", // 2
+    "  headers: { 'android-version': '10' },", // 3
+    "  headers: { 'xt-platform-version': 'Version 18.4 (Build 22E240)' },", // 4
+  ].join('\n');
+  assert.deepEqual(
+    extractPins(files({ 'src/app.ts': source })).filter((p) => p.kind === 'api-version'),
+    [],
+  );
+});
+
+test('a channel label is a wire version even though it is not a date', () => {
+  // Most vendors date their revisions, but not all: OpenAI names a beta channel
+  // and Shopify uses a year and month. Requiring a full date would read those as
+  // build numbers and drop them.
+  const source = [
+    "  headers: { 'openai-beta': 'assistants=v2' },", // 1
+    "  headers: { 'x-shopify-api-version': '2024-01' },", // 2
+  ].join('\n');
+  const pins = extractPins(files({ 'src/vendors.ts': source })).filter(
+    (p) => p.kind === 'api-version',
+  );
+  assert.deepEqual(
+    pins.map((p) => [p.subject, p.version]),
+    [
+      ['openai', 'assistants=v2'],
+      ['shopify', '2024-01'],
+    ],
+  );
+});
+
+test('a dated apiVersion option is attributed to the SDK the file imports', () => {
+  // A dated `apiVersion` is a *shape*, and eight vendors share it: AWS, Sanity,
+  // Alibaba and Stripe all write one. Reading the shape as Stripe's is how a pin
+  // gets compared against the wrong vendor's published version — sampling real
+  // repositories, 8 of 9 dated pins belonged to someone else. The constructor's
+  // import says whose it is.
+  const source = [
+    "import AWS from 'aws-sdk';", // 1
+    "export const ses = new AWS.SES({ apiVersion: '2010-12-01' });", // 2
+  ].join('\n');
+  const pin = extractPins(files({ 'src/aws.ts': source })).find((p) => p.kind === 'api-version');
+  assert.equal(pin?.version, '2010-12-01');
+  assert.equal(pin?.subject, 'aws-sdk');
+});
+
+test('an apiVersion nobody claims is reported unattributed, not guessed', () => {
+  // The pin is real and its owner is not readable — a bare config constant with
+  // no client anywhere near it. Naming a vendor here would be the guess that put
+  // an AWS pin under Stripe's name; `null` is the true answer, and it keeps the
+  // pin visible without letting anything compare it.
+  const source = "export const config = { apiVersion: '2025-01-27.acacia' };";
+  const pin = extractPins(files({ 'src/config.ts': source })).find((p) => p.kind === 'api-version');
+  assert.equal(pin?.version, '2025-01-27.acacia');
+  assert.equal(pin?.subject, null);
 });
 
 test('a version-shaped string that is not an API pin is left alone', () => {

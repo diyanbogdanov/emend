@@ -25,8 +25,16 @@ export interface VersionPin {
   file: string;
   /** 1-indexed. */
   line: number;
-  /** What is pinned: `node`, or an image/package name. */
-  subject: string;
+  /**
+   * What is pinned: `node`, an image name, or the vendor whose wire API it is.
+   *
+   * Null when a wire-API pin is real but unowned — a bare `apiVersion` in a
+   * config object with no client near it. Naming a vendor there would be a
+   * guess, and the guess is not free: `subject` is the key everything downstream
+   * looks the vendor up by, so a wrong one gets the pin compared against a
+   * different company's published version.
+   */
+  subject: string | null;
   version: string;
   /** The exact source text, so a repair is a locatable find/replace. */
   text: string;
@@ -96,39 +104,120 @@ function fromDockerfile(file: string, source: string): VersionPin[] {
  * thing Emend had, cannot see this drift at all. It is the same shape as a
  * Dockerfile tag: a version written as a literal, in a file nothing keeps honest.
  *
- * Matched by the vendor's own convention rather than by looking for
- * version-shaped strings. `version` appears everywhere and a bare date is just a
- * date; without the surrounding convention, reporting one would be the suspicion
- * this detector exists to avoid.
+ * Read by convention rather than by vendor. Three conventions carry a wire
+ * version, and the difference between them is not cosmetic — it is how much each
+ * one tells you about whose version it is:
+ *
+ *   `'Notion-Version': '2022-06-28'`   the key names the vendor
+ *   `new AWS.SES({ apiVersion: … })`   the constructor's import names it
+ *   `…?api-version=2023-05-15`         the URL's host names it
+ *
+ * Which matters because the shape alone names nobody. Sampling repositories that
+ * carry a dated `apiVersion`, eight in nine belonged to AWS, Sanity or Alibaba
+ * rather than to Stripe, so a rule that reads the shape as one vendor's is wrong
+ * far more often than it is right.
  */
-const API_VERSION_PATTERNS: Array<{ vendor: string; pattern: RegExp }> = [
-  // `new Stripe(key, { apiVersion: '2024-06-20' })`
-  { vendor: 'stripe', pattern: /\bapiVersion:\s*['"]([\d]{4}-[\d]{2}-[\d]{2}[\w.]*)['"]/ },
-  // `'anthropic-version': '2023-06-01'`
-  { vendor: 'anthropic', pattern: /['"]anthropic-version['"]\s*:\s*['"]([\d-]+)['"]/ },
-  // `'openai-version': '...'` and the beta channel header
-  { vendor: 'openai', pattern: /['"]openai-(?:version|beta)['"]\s*:\s*['"]([\w.-]+)['"]/ },
-  // Azure and several others use a query parameter: `?api-version=2024-10-21`
-  { vendor: 'azure', pattern: /[?&]api-version=([\d]{4}-[\d]{2}-[\d]{2}[\w-]*)/ },
-];
+
+/**
+ * `'anthropic-version'`, `'Notion-Version'`, `'x-shopify-api-version'`.
+ *
+ * The whole point of this one: it needs no vendor list, because a header that
+ * says `<name>-version` has already told you the name. It reads the vendors
+ * nobody thought to write down.
+ */
+const LABELLED_VERSION = /['"](?:x-)?([a-z][a-z\d]*(?:-[a-z\d]+)*?)-(?:api-)?(?:version|beta)['"]\s*:\s*['"]([^'"]{1,40})['"]/i;
+
+/** `apiVersion: '2024-06-20'` — dated, because an undated one is `apps/v1`. */
+const DATED_OPTION = /\bapi[_-]?version\s*:\s*['"](\d{4}-\d{2}-\d{2}[\w.]*)['"]/i;
+
+/**
+ * Whether a version names a wire contract rather than a build.
+ *
+ * `<name>-version` is also how a client announces itself — `xt-app-version:
+ * 1.4.50`, `em-client-version: 1.3.2` — and in sampled repositories those
+ * outnumbered the real pins. The convention cannot tell them apart, but what the
+ * value is a version *of* can: a wire API is a dated revision of a contract that
+ * both sides agree to speak, so vendors name it by release date (Stripe,
+ * Anthropic, Notion, Square) or by a channel (`assistants=v2`). Software
+ * artifacts are versioned by semver. A header carrying `1.4.50` is saying which
+ * build is calling, which is a fact about the caller and not about the contract.
+ *
+ * A vendor that versioned its wire API in semver would be missed. That is the
+ * safe direction and the one this module takes everywhere: unreported beats
+ * wrongly reported.
+ */
+const WIRE_VERSION = /^(?:\d{4}-\d{2}(?:-\d{2})?[\w.-]*|v\d+(?:\.\d+)?|[a-z][\w-]*=v?\d+)$/i;
+
+/** `?api-version=2023-05-15`, whose vendor is the host in the same URL. */
+const VERSION_QUERY = /[?&]api-version=(\d{4}-\d{2}-\d{2}[\w.-]*)/i;
+
+/** `https://x.openai.azure.com/…` -> `azure`: the label the vendor is known by. */
+function vendorOfUrl(text: string): string | null {
+  const host = text.match(/https?:\/\/([^/'"\s]+)/)?.[1];
+  const labels = host?.split('.') ?? [];
+  // Second-to-last, so `management.azure.com` and `x.openai.azure.com` agree.
+  return labels.length >= 2 ? (labels[labels.length - 2] ?? null) : null;
+}
+
+/**
+ * The package whose client is being constructed at or just above `line`.
+ *
+ * Resolved by binding name *and* an actual import of it, never by the name
+ * alone — `Stripe` in a file that imports nothing is an identifier, not a
+ * vendor. This is the rule `httpsites.ts` already applies to base URLs, and it
+ * exists because the name is the part a reader assumes and the import is the
+ * part that proves it.
+ */
+function constructedFrom(lines: string[], line: number): string | null {
+  // Upwards, because the option sits inside an argument that often opens on an
+  // earlier line. Bounded, so a pin far below an unrelated `new` is not adopted.
+  for (let i = line; i >= 0 && i > line - 8; i--) {
+    const binding = lines[i]?.match(/\bnew\s+([A-Za-z_$][\w$]*)|([A-Za-z_$][\w$]*)\s*\(\s*\{/);
+    const name = binding?.[1] ?? binding?.[2];
+    if (!name) continue;
+    for (const raw of lines) {
+      const imported = raw.match(
+        new RegExp(`\\b${name}\\b[^'"\`]*?(?:from|require\\(|import\\()\\s*['"]([^'"]+)['"]`),
+      );
+      const module = imported?.[1];
+      if (module && !module.startsWith('.') && !module.startsWith('node:')) {
+        // The scope where there is one: `@sanity/client` is Sanity's, and the
+        // sub-package `client` names a module rather than a vendor.
+        return module.startsWith('@') ? (module.split('/')[0]?.slice(1) ?? module) : module;
+      }
+    }
+  }
+  return null;
+}
 
 function fromSource(file: string, source: string): VersionPin[] {
   const pins: VersionPin[] = [];
-  source.split('\n').forEach((raw, index) => {
-    for (const { vendor, pattern } of API_VERSION_PATTERNS) {
-      const match = raw.match(pattern);
-      const version = match?.[1];
-      if (!version) continue;
-      pins.push({
-        file,
-        line: index + 1,
-        subject: vendor,
-        version,
-        text: match[0],
-        kind: 'api-version',
-      });
+  const lines = source.split('\n');
+
+  lines.forEach((raw, index) => {
+    const add = (subject: string | null, version: string, text: string) => {
+      if (!WIRE_VERSION.test(version)) return;
+      pins.push({ file, line: index + 1, subject, version, text, kind: 'api-version' });
+    };
+
+    const labelled = raw.match(LABELLED_VERSION);
+    // `api` labels nothing — `'x-api-version'` is the convention with the vendor
+    // left out, so it identifies no more than the bare option does.
+    if (labelled?.[1] && labelled[2] && labelled[1].toLowerCase() !== 'api') {
+      add(labelled[1].toLowerCase(), labelled[2], labelled[0]);
+      return;
     }
+
+    const query = raw.match(VERSION_QUERY);
+    if (query?.[1]) {
+      add(vendorOfUrl(raw), query[1], query[0]);
+      return;
+    }
+
+    const option = raw.match(DATED_OPTION);
+    if (option?.[1]) add(constructedFrom(lines, index), option[1], option[0]);
   });
+
   return pins;
 }
 
@@ -211,6 +300,10 @@ export function findPinConflicts(
   const images = pins.filter((p) => p.kind === 'docker-image');
   const bySubject = new Map<string, VersionPin[]>();
   for (const pin of images) {
+    // An image reference always names its image, so this is never null in
+    // practice; grouping unattributed pins together would invent a shared
+    // subject for images that have nothing to do with each other.
+    if (pin.subject === null) continue;
     bySubject.set(pin.subject, [...(bySubject.get(pin.subject) ?? []), pin]);
   }
   for (const [subject, group] of bySubject) {

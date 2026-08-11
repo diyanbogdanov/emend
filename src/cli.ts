@@ -187,7 +187,12 @@ async function publishedVersions(
   const found = new Map<string, string>();
   if (!contracts || report.apiVersionPins.length === 0) return found;
 
-  for (const subject of new Set(report.apiVersionPins.map((p) => p.subject))) {
+  // Unattributed pins are skipped rather than guessed at. A pin whose owner the
+  // source never named has no vendor to look up, and picking one would compare
+  // it against a different company's published version — which is the failure
+  // the vendor list used to cause, not a smaller version of it.
+  const subjects = report.apiVersionPins.map((p) => p.subject).filter((s) => s !== null);
+  for (const subject of new Set(subjects)) {
     // Where the vendor lives is derived, not listed. A table of
     // subject-to-domain would need an entry before Emend could say anything
     // about a vendor, which makes every new one a code change — and the
@@ -428,12 +433,16 @@ function printScan(report: ScanReport, showAll: boolean, current: CurrentVersion
     console.log('');
     console.log(`  ${c.bold('Wire API versions pinned in source')}`);
     for (const pin of report.apiVersionPins) {
-      console.log(`    ${c.cyan(pin.subject)} ${pin.version}`);
+      // Named as unowned rather than left blank. A reader who sees a version
+      // with no vendor beside it fills the gap in themselves, and the gap is
+      // the finding: the source never said whose API this is.
+      const who = pin.subject ?? 'unattributed';
+      console.log(`    ${c.cyan(who)} ${pin.version}`);
       console.log(c.dim(`      → ${pin.file}:${pin.line}  ${pin.text}`));
     }
     let judged = 0;
     for (const pin of report.apiVersionPins) {
-      const published = current.get(pin.subject);
+      const published = pin.subject === null ? undefined : current.get(pin.subject);
       if (published === undefined) continue;
       const behind = behindCurrent(pin.version, published);
       if (behind === null) continue;
