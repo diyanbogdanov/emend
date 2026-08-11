@@ -283,7 +283,14 @@ function printScan(report: ScanReport, showAll: boolean): void {
   const withFindings = analyzed.filter((p) => p.findings.length > 0);
 
   for (const p of report.packages) {
-    if (p.status === 'analyzed' && p.findings.length === 0 && !showAll) continue;
+    // A package with nothing to say stays hidden — there are hundreds of them
+    // and they are the reason this filter exists. A package that *declined to
+    // say something* is different: its note is the only record that a surface
+    // was truncated, or that a symbol was treated as moved rather than removed.
+    // Hiding that is how a finding disappears between two runs with no
+    // explanation, which is what this filter was doing to the one case where it
+    // mattered most — a package whose only finding had just been suppressed.
+    if (p.status === 'analyzed' && p.findings.length === 0 && !p.note && !showAll) continue;
     if (p.status === 'up-to-date' && !showAll) continue;
 
     // A detector's findings are not an upgrade and have no version pair, so the
