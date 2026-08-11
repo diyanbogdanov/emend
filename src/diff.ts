@@ -129,6 +129,24 @@ export function widenedByDefaultedTypeParams(before: ApiSymbol, after: ApiSymbol
   return reduced === before.signature;
 }
 
+/**
+ * Whether a signature identifies a declaration rather than describing a shape.
+ *
+ * The distinction the first attempt at rename detection lacked, and the reason
+ * it was reverted. `typeof slugify` names a declaration — nothing else in a
+ * package has that type by accident — while `boolean` names a shape half the
+ * surface shares. Matching on the second let one newly added boolean property
+ * stand in as the destination for every removed boolean property in
+ * @vue/runtime-core 3.5, hiding real removals behind a coincidence of type.
+ *
+ * Only `typeof X`, deliberately. It is the narrowest form that is provably
+ * nominal, and a narrow rule that suppresses two false removals is worth more
+ * than a broad one that hides an unknown number of real ones.
+ */
+function namesADeclaration(signature: string): boolean {
+  return /^typeof [A-Za-z_$][\w$]*$/.test(signature.trim());
+}
+
 export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
   const changes: SurfaceChange[] = [];
   const notes: string[] = [];
@@ -176,6 +194,16 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
     );
   }
 
+  // Where a symbol whose type names a declaration might have moved to: an
+  // identically typed symbol that is newly present, and the only candidate.
+  // Ambiguity is a guess, and a guess here hides a removal.
+  const appeared = new Map<string, string | null>();
+  for (const [path, sym] of Object.entries(to.symbols)) {
+    if (path in from.symbols) continue;
+    if (!namesADeclaration(sym.signature)) continue;
+    appeared.set(sym.signature, appeared.has(sym.signature) ? null : path);
+  }
+
   if (!unanalyzable) {
     for (const [path, before] of Object.entries(from.symbols)) {
       // A path absent from `symbols` may still be reachable through an alias.
@@ -192,6 +220,20 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
 
       if (!after) {
         if (suppressRemovals) continue;
+
+        // A symbol may have moved rather than gone. Adding a default export
+        // changes which root the extractor walks and renames every path at
+        // once — slugify 1.6.6 -> 1.6.9 is a patch whose function is still
+        // exported, read as `_default` instead of `slugify`.
+        const movedTo = namesADeclaration(before.signature)
+          ? appeared.get(before.signature)
+          : undefined;
+        if (movedTo) {
+          notes.push(
+            `${to.pkg}@${to.version}: ${path} is no longer at that path, but ${movedTo} is the same declaration — reported as moved rather than removed`,
+          );
+          continue;
+        }
         changes.push({
           path,
           kind: 'removed',

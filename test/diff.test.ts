@@ -336,3 +336,59 @@ test('a genuine removal alongside symbols that survived is still reported', () =
   );
   assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Moved, or gone
+// ---------------------------------------------------------------------------
+
+// A first attempt at this matched on the signature alone and was reverted. On
+// @vue/runtime-core 3.5 one newly added `boolean` property stood in as the
+// destination for every removed `boolean` property, hiding real removals like
+// `AppConfig.unwrapInjectedRef` behind a coincidence of type.
+//
+// What separates the two cases is nominal versus structural. `typeof slugify`
+// names a declaration — nothing else in the package can have that type by
+// accident. `boolean` names a shape that half the surface shares. Only the
+// first is an identity.
+
+test('a symbol whose type names it is recognised where it moved to', () => {
+  // slugify 1.6.6 -> 1.6.9, from the extractor. Adding a default export changed
+  // which root is walked, so `slugify` became `_default` — same declaration.
+  const diff = diffSurfaces(
+    surface('1.6.6', [sym('slugify', 'typeof slugify')]),
+    surface('1.6.9', [sym('_default', 'typeof slugify')]),
+  );
+  assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 0);
+  assert.match(diff.note ?? '', /_default/);
+});
+
+test('a shared structural type is not an identity', () => {
+  // The Vue case that reverted the first attempt. `unwrapInjectedRef` really was
+  // removed in 3.5, and a new unrelated boolean must not absorb it.
+  const diff = diffSurfaces(
+    surface('3.4.0', [
+      sym('AppConfig.unwrapInjectedRef', 'boolean'),
+      sym('kept', 'string'),
+    ]),
+    surface('3.5.0', [sym('EffectScope.active', 'boolean'), sym('kept', 'string')]),
+  );
+  assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 1);
+});
+
+test('a nominal type with two candidates is too ambiguous to call a move', () => {
+  // Two newly present symbols of the same declared type: which one it went to
+  // is a guess, and a guess here hides a removal.
+  const diff = diffSurfaces(
+    surface('1.0.0', [sym('thing', 'typeof thing')]),
+    surface('2.0.0', [sym('a', 'typeof thing'), sym('b', 'typeof thing')]),
+  );
+  assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 1);
+});
+
+test('a destination that existed before is not where anything moved', () => {
+  const diff = diffSurfaces(
+    surface('1.0.0', [sym('gone', 'typeof gone'), sym('other', 'typeof gone')]),
+    surface('2.0.0', [sym('other', 'typeof gone')]),
+  );
+  assert.equal(diff.changes.filter((c) => c.kind === 'removed').length, 1);
+});
