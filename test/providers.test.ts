@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PROVIDERS, resolveLlmConfig } from '../src/llm/providers.ts';
+import { PROVIDERS, resolveAgent, resolveLlmConfig } from '../src/llm/providers.ts';
 
 const TOUCHED = [
   'EMEND_LLM_PROVIDER',
@@ -123,4 +123,37 @@ test('every declared default belongs to a provider that can be resolved', () => 
       assert.equal(res.ok, true, `${p.id} should resolve using its own default`);
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Whether the model participates at all
+// ---------------------------------------------------------------------------
+
+test('the model participates unless the operator turns it off', () => {
+  // Opt-in was the wrong default. A repair Emend declines to attempt is a repair
+  // somebody does by hand, and a tool that stops at the deterministic cases is a
+  // linter — so the model runs, and the flag exists to switch it off.
+  withEnv({ OPENROUTER_API_KEY: 'test-key' }, () => {
+    const on = resolveAgent({}, { provider: 'openrouter' });
+    assert.equal(on.on, true);
+  });
+});
+
+test('turning the model off is distinguishable from having no key', () => {
+  // These used to look identical from the outside — both simply produced fewer
+  // fixes, and a run that never called a model read as a model that tried and
+  // found nothing. One is a choice and the other is a broken setup, and only the
+  // second is worth telling somebody how to correct.
+  withEnv({ OPENROUTER_API_KEY: 'test-key' }, () => {
+    const off = resolveAgent({ disabled: true }, { provider: 'openrouter' });
+    assert.equal(off.on, false);
+    assert.equal(off.on === false && off.why, 'disabled');
+  });
+
+  withEnv({}, () => {
+    const missing = resolveAgent({}, { provider: 'openrouter' });
+    assert.equal(missing.on, false);
+    assert.equal(missing.on === false && missing.why, 'unconfigured');
+    assert.match(missing.on === false ? (missing.reason ?? '') : '', /API key/);
+  });
 });

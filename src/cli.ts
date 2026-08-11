@@ -128,6 +128,22 @@ function harnessFrom(args: Args): Harness | undefined {
 }
 
 /**
+ * Whether the model may take part, which it may unless told otherwise.
+ *
+ * `--agent` was opt-in, and the default it implied was the wrong one: a finding
+ * the deterministic planner declines is a finding a person fixes by hand, so
+ * every run without the flag quietly delivered the linter rather than the tool.
+ * `--no-agent` keeps the deterministic run available for anyone who needs the
+ * build offline or reproducible.
+ *
+ * `--agent` still parses, and now says nothing, so no existing invocation
+ * breaks on the change.
+ */
+function agentAllowed(args: Args): boolean {
+  return args.flags.get('no-agent') !== true;
+}
+
+/**
  * The read-only repo-wide review, when one was asked for.
  *
  * A model with read access to the checkout, not a coding harness. opencode was
@@ -681,7 +697,7 @@ async function cmdFix(args: Args): Promise<number> {
       // Without this the repair loop is unreachable and a security bump that
       // breaks the build is reported as unfixable by the one tool here that
       // knows how to fix it.
-      useAgent: args.flags.get('agent') === true,
+      useAgent: agentAllowed(args),
       ...(reviewHarness ? { reviewHarness } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
@@ -757,7 +773,7 @@ async function cmdFix(args: Args): Promise<number> {
     console.log(c.bold('  lint') + c.dim(`  (${lintTargets.length} finding(s))`));
     const lintResult = await fixLint(repoDir, lintTargets, {
       keepWorkspace: args.flags.get('keep') === true,
-      useAgent: args.flags.get('agent') === true,
+      useAgent: agentAllowed(args),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
     const ok =
@@ -776,7 +792,7 @@ async function cmdFix(args: Args): Promise<number> {
     if (lintResult.unrepairable.length > 0) {
       console.log(
         c.yellow(
-          `    ${lintResult.unrepairable.length} finding(s) still unrepaired${args.flags.get('agent') === true ? '' : ' — re-run with --agent to let the model try'}:`,
+          `    ${lintResult.unrepairable.length} finding(s) still unrepaired${agentAllowed(args) ? '' : ' — this run was --no-agent, so the model never tried'}:`,
         ),
       );
       for (const u of lintResult.unrepairable.slice(0, 5)) {
@@ -994,7 +1010,7 @@ async function cmdFix(args: Args): Promise<number> {
     const reviewHarness = reviewHarnessFrom(args);
     const result = await fixPackage(repoDir, findings, {
       keepWorkspace: args.flags.get('keep') === true,
-      useAgent: args.flags.get('agent') === true,
+      useAgent: agentAllowed(args),
       ...(harness ? { harness } : {}),
       ...(reviewHarness ? { reviewHarness } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
@@ -1021,7 +1037,7 @@ async function cmdFix(args: Args): Promise<number> {
     if (result.unplanned.length > 0 && !result.agent) {
       console.log(
         c.yellow(
-          `    ${result.unplanned.length} finding(s) had no deterministic fix — re-run with --agent, or fix by hand:`,
+          `    ${result.unplanned.length} finding(s) had no deterministic fix${agentAllowed(args) ? ' and the model did not land one' : ' — this run was --no-agent'}:`,
         ),
       );
       for (const f of result.unplanned) console.log(c.dim(`      · ${f.change.path}`));
@@ -1105,7 +1121,7 @@ async function cmdPr(args: Args): Promise<number> {
     // Without this, `emend pr --agent` silently re-ran deterministic-only and
     // rendered "unverified / needs a human" for a migration that had just
     // verified under `emend fix --agent`.
-    useAgent: args.flags.get('agent') === true,
+    useAgent: agentAllowed(args),
     // Same reason: a PR re-run without the harness renders "needs a human" for a
     // migration that had just verified under `emend fix --harness`.
     ...(prHarness ? { harness: prHarness } : {}),
@@ -1502,7 +1518,9 @@ ${c.bold('COMMANDS')}
                   finding to the linter's own autofix, a stale package to a
                   plain bump. Everything is verified against a real baseline.
     --finding <id>  Fix one finding (default: all open findings)
-    --agent         Let an LLM attempt findings the deterministic planner declines
+    --no-agent      Deterministic only. By default a model attempts the findings
+                    the planner declines, because a finding Emend will not try is
+                    one somebody fixes by hand.
     --drive[=m]     Hand the whole fix to an opencode session pointed at Emend's
                     own MCP tools. Emend keeps the deterministic half — which
                     version clears the advisory, did the build survive, did the
@@ -1526,7 +1544,7 @@ ${c.bold('COMMANDS')}
 
   pr <repo>       Render the pull request for a finding. Dry run by default.
     --finding <id>  Required
-    --agent         Let the model attempt what the planner declined
+    --no-agent      Deterministic only, as for 'fix'
     --harness[=m]   As for 'fix' — pass it here too, or the re-run reports a
                     migration that verified under 'fix --harness' as unverified
     --create        Actually push a branch and open a DRAFT PR
@@ -1558,10 +1576,13 @@ ${c.bold('EXAMPLE')}
   emend scan ./emend-demo --only zod
   emend fix ./emend-demo
 
-${c.bold('OPTIONAL LLM AGENT')} ${c.dim('(any OpenAI-compatible endpoint)')}
+${c.bold('LLM AGENT')} ${c.dim('(any OpenAI-compatible endpoint; on by default)')}
   export EMEND_LLM_PROVIDER=openrouter    # or deepinfra, nebius, fireworks, groq, ollama...
   export OPENROUTER_API_KEY=...
-  emend fix ./emend-demo --agent          # defaults to z-ai/glm-5.2
+  emend fix ./emend-demo                  # defaults to z-ai/glm-5.2
+
+  ${c.dim('Without a key the run still works and says so, rather than quietly')}
+  ${c.dim('delivering the deterministic half as though that were everything.')}
 
   ${c.dim('To use a different open-weight model:')}
   emend models                            # see what your provider serves

@@ -33,7 +33,18 @@ import {
   type Workspace,
 } from './apply.ts';
 import { runPhase, compare, verificationPassed } from './verify.ts';
-import { resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
+import { resolveAgent, type LlmConfig } from './llm/providers.ts';
+
+/**
+ * Said when the model was wanted and could not be reached.
+ *
+ * Named rather than inlined at three call sites, because the wording is the
+ * point: a run that fixes less than it could must say why, and "unavailable" on
+ * its own leaves a reader to conclude the model tried.
+ */
+function unconfiguredAgent(reason: string): string {
+  return `the model is on by default but unavailable: ${reason} — pass --no-agent to stop asking`;
+}
 import {
   proposeTightening,
   proposeReview,
@@ -744,12 +755,10 @@ export async function fixPackage(
   }
   progress(`  ${planned.length} deterministic, ${unplanned.length} needing an agent or a human`);
 
-  const llm = options.useAgent ? resolveLlmConfig() : null;
-  // Asking for the agent and silently not getting one is the worst of both:
-  // the run looks like the model tried and failed, when it never ran at all.
-  if (llm && !llm.ok) {
-    progress(`agent requested but unavailable: ${llm.reason}`);
-  }
+  const llm = resolveAgent({ disabled: options.useAgent !== true });
+  // Wanting the agent and silently not getting one is the worst of both: the
+  // run looks like the model tried and failed, when it never ran at all.
+  if (!llm.on && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
 
   let ws: Workspace | null = null;
   try {
@@ -806,7 +815,7 @@ export async function fixPackage(
     // needed here, so both now come from the workspace diff rather than being
     // threaded out of a repair.
     const agentRecord: FixResult['agent'] = undefined;
-    if (llm?.ok && verificationPassed(verification.outcome)) {
+    if (llm.on && verificationPassed(verification.outcome)) {
       const config = llm.config;
       const dir = ws.dir;
       const diffSoFar = await workspaceDiff(ws);
@@ -1313,10 +1322,10 @@ export async function fixVulnerability(
     // the gated review. Both discover their own files from the diff now, which
     // is what the deleted repair loop was doing for them.
     let agentRecord: FixResult['agent'];
-    const llm = options.useAgent ? resolveLlmConfig() : null;
-    if (llm && !llm.ok) progress(`agent requested but unavailable: ${llm.reason}`);
+    const llm = resolveAgent({ disabled: options.useAgent !== true });
+    if (!llm.on && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
 
-    if (llm?.ok && verificationPassed(verification.outcome)) {
+    if (llm.on && verificationPassed(verification.outcome)) {
       const dir = ws.dir;
       const extraFiles = await filesNamedInOutput(await workspaceDiff(ws), dir);
       const polishFinding: Finding = { ...finding, toVersion: worst ?? finding.toVersion };
@@ -1466,10 +1475,10 @@ export async function fixLint(
     // list of what is wrong rather than a symptom of something hidden.
     let agentEdits = 0;
     const stillUnrepairable: typeof unrepairable = [];
-    const llm = options.useAgent ? resolveLlmConfig() : null;
-    if (llm && !llm.ok) progress(`agent requested but unavailable: ${llm.reason}`);
+    const llm = resolveAgent({ disabled: options.useAgent !== true });
+    if (!llm.on && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
 
-    if (unrepairable.length > 0 && llm?.ok) {
+    if (unrepairable.length > 0 && llm.on) {
       const targets = unrepairable.map((u) => ({
         file: u.finding.sites[0]?.file ?? '',
         line: u.finding.sites[0]?.line ?? 1,

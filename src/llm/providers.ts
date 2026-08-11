@@ -253,3 +253,39 @@ export function resolveLlmConfig(overrides: Partial<{
     },
   };
 }
+
+/**
+ * Whether the model takes part in a run, and if not, whose decision that was.
+ *
+ * Three states rather than two, because the two that used to exist could not
+ * express the interesting one. `--agent` was opt-in, so a run without it and a
+ * run whose key was missing produced the same output: fewer fixes, no
+ * explanation. A reader cannot tell a tool that chose not to try from a tool
+ * that could not.
+ */
+export type AgentAvailability =
+  | { on: true; config: LlmConfig }
+  /** The operator asked for a deterministic run. Nothing to report. */
+  | { on: false; why: 'disabled'; reason?: undefined }
+  /** The model was wanted and could not be reached. Say how to fix it. */
+  | { on: false; why: 'unconfigured'; reason: string };
+
+/**
+ * Resolve the model for a run, defaulting to using one.
+ *
+ * On by default because the alternative undersells what Emend is for: a finding
+ * the deterministic planner declines is a finding somebody repairs by hand, and
+ * a self-maintaining tool that stops at the mechanical cases is a linter that
+ * files issues. `disabled` exists for runs that must stay offline or byte-for-byte
+ * reproducible, which is a real need and a deliberate one.
+ */
+export function resolveAgent(
+  options: { disabled?: boolean },
+  overrides: Partial<{ provider: string; model: string; baseUrl: string }> = {},
+): AgentAvailability {
+  if (options.disabled === true) return { on: false, why: 'disabled' };
+  const resolved = resolveLlmConfig(overrides);
+  return resolved.ok
+    ? { on: true, config: resolved.config }
+    : { on: false, why: 'unconfigured', reason: resolved.reason };
+}
