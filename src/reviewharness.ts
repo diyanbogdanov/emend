@@ -181,6 +181,8 @@ export async function reviewSession(input: {
   fromVersion: string;
   toVersion: string;
   diff: string;
+  /** An instruction for a review that is not about a dependency upgrade. */
+  prompt?: string;
   progress?: (message: string) => void;
 }): Promise<HarnessReview> {
   const progress = input.progress ?? (() => {});
@@ -193,7 +195,7 @@ export async function reviewSession(input: {
 
   const before = await changedFiles(input.dir);
   const run = await input.harness.run(input.dir, {
-    instruction: reviewPrompt(input),
+    instruction: input.prompt ?? reviewPrompt(input),
     failureOutput: '',
   });
   const after = await changedFiles(input.dir);
@@ -295,4 +297,58 @@ export function renderReviewFindings(findings: ReviewFinding[]): string {
     if (f.why) lines.push(`  ${f.why}`);
   }
   return lines.join('\n');
+}
+
+/**
+ * A review of a redirected call, asking the one question its author cannot.
+ *
+ * Measured twice, and the same shape both times: a driven session picked a
+ * plausible replacement route, justified it well, compiled, and quietly changed
+ * what came back. On kubespec.dev it swapped a git-refs route for the Repos
+ * Tags API, which paginates at thirty where the original did not. On
+ * activepieces it replaced `/audiences/{id}/contacts` with `/contacts` — the
+ * same response *shape*, so the code parsed it unchanged — and deleted the
+ * audience gating around it, turning a picker scoped to one audience into one
+ * listing every contact in the account.
+ *
+ * Neither is visible to a build: a URL is a string and compiles whatever it
+ * says. Neither was caught by the session that made it, because it had already
+ * argued itself into the change. So this asks a session that never saw that
+ * reasoning, and asks it about behaviour rather than about quality — the
+ * existing review is about duplication and structure, which is a different job.
+ *
+ * The question is deliberately narrow. Not "is this good" but "does the code do
+ * the same thing", because the failures were all the same kind: the call still
+ * works, and it returns a different set of things.
+ */
+export function contractReviewPrompt(input: {
+  host: string;
+  route: string;
+  description: string;
+  diff: string;
+}): string {
+  return [
+    `A call in this repository reached \`${input.route}\` on ${input.host}, which that vendor's own description no longer contains, and the change below redirects it.`,
+    '',
+    'Judge one thing: does the code still do what it did, apart from reaching a route that exists?',
+    '',
+    'Read the changed files and the code around them before answering. The diff is where to start, not what to judge — what a call returns is decided by the code that consumes it, which the diff may not show.',
+    '',
+    `The description is at ${input.description}. It is the authority on what each route returns.`,
+    '',
+    'Report a finding for any of these, and nothing else:',
+    '- `scope` — the replacement returns a different SET of records. A filter, a parent resource or a query parameter that scoped the old call and is absent from the new one. This is the failure most easily missed, because the response *shape* can be identical while the rows are not.',
+    '- `pagination` — the routes differ in default page size, page limit, or whether they page at all, and the caller does not page.',
+    '- `ordering` — results arrive in a different order and the caller depends on the order.',
+    '- `errors` — the new route signals absence or failure differently, and the caller branches on it.',
+    '- `collateral` — a guard, an early return or a piece of state was removed alongside the URL. Say what it protected.',
+    '',
+    'Do not report style, naming, types, or whether the route choice is elegant. Do not report that the change is correct — silence means that.',
+    '',
+    '```diff',
+    input.diff.slice(0, 12_000),
+    '```',
+    '',
+    'Answer with a JSON object on its own line: {"findings": [{"kind": "...", "path": "...", "detail": "..."}]}. An empty array means the behaviour is unchanged, and say so only if you read the consuming code.',
+  ].join('\n');
 }

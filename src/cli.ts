@@ -18,7 +18,12 @@ import { reintroduced } from './remediate.ts';
 import { fixFinding, needsSourceRepair, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
 import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
-import { assistantText } from './reviewharness.ts';
+import {
+  assistantText,
+  contractReviewPrompt,
+  renderReviewFindings,
+  reviewSession,
+} from './reviewharness.ts';
 import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
 import { PROVIDERS, resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
@@ -843,6 +848,49 @@ async function cmdFix(args: Args): Promise<number> {
             if (!run.ok) console.log(c.red(`    ${run.error ?? 'the session failed'}`));
             if (run.ok && !said && !summary) {
               console.log(c.yellow('    the session produced no output'));
+            }
+
+            // A second session, which never saw the first one's reasoning.
+            // Measured twice: a driven fix picked a plausible route, justified
+            // it, compiled, and changed what came back — a different page size
+            // on one repository, a lost audience filter on another. Neither is
+            // visible to a build, because a URL is a string that compiles
+            // whatever it says, and neither was caught by the session that
+            // argued itself into it.
+            const changed = (
+              await execFileAsync('git', ['diff'], { cwd: repoDir, maxBuffer: 32 * 1024 * 1024 })
+            ).stdout;
+            if (changed.trim() === '') continue;
+
+            const review = await reviewSession({
+              harness: openCodeHarness({
+                readOnly: true,
+                allowBash: true,
+                ...(typeof model === 'string' ? { model } : {}),
+              }),
+              dir: repoDir,
+              pkg: f.pkg,
+              fromVersion: f.fromVersion,
+              toVersion: f.toVersion,
+              diff: changed,
+              prompt: contractReviewPrompt({
+                host: f.pkg,
+                route: f.change.path,
+                description: f.change.guidance ?? f.toVersion,
+                diff: changed,
+              }),
+              progress: (m) => console.log(c.dim(`    ${m}`)),
+            });
+
+            if (!review.ok) {
+              // Could not review is not reviewed and clean, and this is the one
+              // place that distinction decides whether an edit ships.
+              console.log(c.yellow(`    behaviour unreviewed: ${review.reason ?? 'unknown'}`));
+            } else if (review.findings.length === 0) {
+              console.log(c.green('    behaviour review found no change beyond the route'));
+            } else {
+              console.log(c.red(`    behaviour review: ${review.findings.length} concern(s)`));
+              console.log(renderReviewFindings(review.findings));
             }
           }
         }
