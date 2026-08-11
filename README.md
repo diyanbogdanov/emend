@@ -25,6 +25,10 @@ $ emend scan ./my-service --only zod
 That last line is the product. zod 4 ships ~1,215 breaking changes; five touch
 this repository. Everything downstream operates on those five.
 
+The same question, asked of the HTTP calls no package describes, is
+[`--contracts`](#calls-to-apis-you-dont-have-a-package-for). How it all fits
+together is in [docs/architecture.md](docs/architecture.md).
+
 ---
 
 ## Quick start
@@ -73,14 +77,21 @@ node bin/emend.mjs serve
                                   │
              ┌────────────────────┼────────────────────┐
              ▼                    ▼                    ▼
-     deterministic plan     LLM agent (opt-in)     dashboard / PR
+     deterministic plan     LLM agent (default)    dashboard / PR
              └──────────► isolated git worktree ◄──────┘
                                   │
                     baseline → apply → verify → compare
                                   │
                                   ▼
-                    verified · regression · unverified
+                    behaviour review (read-only model)
+                                  │
+                                  ▼
+             verified · regression · unverified · unreviewed
 ```
+
+That is the typed-package path. A second one runs beside it for HTTP calls,
+which no `.d.ts` describes — see [Calls to APIs you don't have a package
+for](#calls-to-apis-you-dont-have-a-package-for).
 
 ### Why `.d.ts` diffing
 
@@ -110,6 +121,58 @@ pre-existing failures blamed on the migration. Emend distinguishes
 
 ---
 
+## Calls to APIs you don't have a package for
+
+Half the contracts a service depends on are not packages at all:
+
+```ts
+const res = await fetch(`https://api.vendor.com/v1/audiences/${id}/contacts`);
+```
+
+There is no `.d.ts` here, no lockfile entry, and no type — a URL is a string
+that compiles whatever it says. When the vendor retires that route, nothing in
+your toolchain notices until production does.
+
+`emend scan <repo> --contracts` reads outbound HTTP calls out of your source,
+resolves each vendor's **own** published OpenAPI description, and reports calls
+that reach a route the description no longer contains.
+
+```
+  api.github.com
+    drift      GET /repos/{owner}/{repo}/git/refs/{ref}
+      → packages/pieces/github/src/lib/common/index.ts:88
+      not described by github/rest-api-description (fetched today)
+
+  3 host(s) resolved · 1,173 calls read · 412 unreadable (URL built at runtime)
+```
+
+Three guards keep that from becoming a rumour mill, and they are the reason this
+is worth trusting rather than a grep for stale URLs:
+
+- **Provenance.** A description found under some random GitHub account is not
+  the vendor speaking. Emend walks the provider's own origin, their `apis.json`,
+  and their GitHub organisation, and refuses anything it cannot trace back to
+  them.
+- **Currency.** First-party is not the same as current. `slackapi/slack-api-specs`
+  is unimpeachably Slack's and last changed in 2020. A stored copy that has not
+  moved in a year asserts nothing; one served live from the vendor's domain
+  needs no date, because being served *is* the evidence.
+- **Coverage.** One host commonly serves several APIs. Xero's accounting
+  description says nothing about `/projects.xro`. Where the description names
+  nothing under the same top-level path, the path is reported **unchecked**
+  rather than broken.
+
+A finding here is a **lead to verify, not a proof** — providers do serve
+endpoints they never wrote down, and the finding says *not described by* rather
+than *removed* for exactly that reason. See [Known
+limitations](#known-limitations).
+
+`--since` compares a description against itself as it stood a year ago, which is
+the only way to see a **deprecation** or a **newly available capability** —
+both are still in today's copy, so reading it alone can never surface either.
+
+---
+
 ## Commands
 
 | Command | What it does |
@@ -123,9 +186,9 @@ pre-existing failures blamed on the migration. Emend distinguishes
 | `emend serve` | Local dashboard |
 | `emend models` | List models your LLM provider serves |
 
-Useful flags: `--only pkg,pkg`, `--all`, `--json`, `--no-dev` (scan);
-`--finding <id>`, `--agent`, `--keep` (fix); `--create` (pr);
-`--model a,b`, `--repeat n`, `--cases <file>` (eval).
+Useful flags: `--only pkg,pkg`, `--all`, `--json`, `--no-dev`, `--contracts` (scan);
+`--finding <id>`, `--no-agent`, `--no-review`, `--drive`, `--keep` (fix);
+`--create` (pr); `--model a,b`, `--repeat n`, `--cases <file>` (eval).
 
 ---
 
@@ -150,6 +213,25 @@ the fact and the tag is the stale copy. For node, `engines` is your own statemen
 of intent. Three files declaring three versions with nothing to arbitrate are
 reported as disagreeing and **not** repaired — picking a winner would be guessing,
 and that decision is yours.
+
+**Wire-protocol versions** are the same shape and a different problem. A vendor
+versions its HTTP API separately from the SDK that calls it: `stripe@18` and
+`apiVersion: '2024-06-20'` move independently, and upgrading the package does not
+touch the pin. Emend reads these by convention rather than by vendor —
+
+```ts
+headers: { 'Notion-Version': '2022-06-28' }   // the key names the vendor
+new AWS.SES({ apiVersion: '2010-12-01' })     // the import names it
+fetch(`${url}?api-version=2023-05-15`)        // the host names it
+```
+
+— so vendors nobody wrote down work the same as the ones that did. Where the
+source names nobody, the pin is reported **unattributed** rather than guessed at.
+That matters more than it sounds: a dated `apiVersion` is a shape eight vendors
+share, and an earlier version read every one of them as Stripe's. Sampled across
+160 real files, that mislabelled 8 pins in 9 — and since the label is the key the
+vendor's published version is looked up by, an AWS pin from 2010 was being
+compared against Stripe's current API version and reported as behind.
 
 ---
 
@@ -231,11 +313,20 @@ better verifier anyway: it runs them in the environment they were written for.
 
 ---
 
-## The optional LLM agent
+## The LLM agent
 
 The deterministic core handles detection, localisation, rename-class migrations,
-and verification with **no model involved**. The agent only runs where the
-deterministic planner declines — and only if you ask.
+and verification with **no model involved** — those are the parts whose answers
+have to be reproducible and auditable.
+
+The model runs where the answer is a judgement: findings the planner declines,
+and the read-only review that asks whether a verified change still *means* the
+same thing. **Both are on by default.** A finding Emend will not attempt is a
+finding somebody repairs by hand; `--no-agent` and `--no-review` are there for
+runs that must stay offline or byte-for-byte reproducible.
+
+Without a key configured, the run still works and says so, rather than quietly
+delivering the deterministic half as though that were everything.
 
 It works with **any OpenAI-compatible endpoint**:
 
@@ -246,7 +337,7 @@ export NEBIUS_API_KEY=...
 emend models                         # see what your provider serves today
 export EMEND_LLM_MODEL=<id from above>
 
-emend fix ./my-service --agent
+emend fix ./my-service
 ```
 
 Or point it anywhere directly:
@@ -319,29 +410,37 @@ coin flip.
 
 ```
 src/
-  registry.ts    npm metadata, tarball download + cache
-  lockfile.ts    package-lock.json -> resolved versions + install tree
-  vendor.ts      reconstruct node_modules from the lockfile, no install
-  surface.ts     .d.ts → public API surface (breadth-first, canonical paths)
-  diff.ts        surface × surface → classified changes
-  inventory.ts   repo → installed dependency versions
-  callsites.ts   repo → where package symbols are used (import + type resolution)
-  analyze.ts     the scan pipeline
-  plan.ts        deterministic rename planning
-  apply.ts       isolated workspace, edit application, rollback
-  verify.ts      baseline/post command running and comparison
-  fix.ts         the fix pipeline (per-package)
-  pr.ts          evidence-rich PR rendering + gh integration
-  store.ts       node:sqlite persistence
-  server.ts      dashboard + webhook endpoint
-  cli.ts         command surface
-  github/        App auth, webhook intake, job runner, API pull requests
-  llm/           optional agent: providers, client, repair loop
+  surface.ts      .d.ts → public API surface (breadth-first, canonical paths)
+  diff.ts         surface × surface → classified changes
+  specs.ts        resolve a vendor's OpenAPI description, with provenance
+  specdiff.ts     description × description → route changes
+  callsites.ts    repo → where package symbols are used (type resolution)
+  httpsites.ts    repo → outbound HTTP calls, and which are unreadable
+  detectors.ts    every tier → one finding shape
+  analyze.ts      the scan pipeline
+  plan.ts         deterministic rename planning
+  apply.ts        isolated workspace, edit application, rollback
+  verify.ts       baseline/post command running and comparison
+  fix.ts          the fix pipeline (per-package)
+  harness.ts      opencode escalation, with the evidence gate
+  reviewharness.ts read-only repo-wide and behaviour reviews
+  pr.ts           evidence-rich PR rendering + gh integration
+  mcp.ts          MCP server, so a coding agent can drive Emend
+  cli.ts          command surface
+  github/         App auth, webhook intake, job runner, API pull requests
+  llm/            providers, client, structured repair loop
 docs/
+  architecture.md             how it fits together, and why
+  deployment.md               running it as a service
+  github-app-setup.md         the App, step by step
   specs/emend-mvp.md          design spec
-  research/llm-harness.md     provider + harness research
 fixtures/demo-repo/           demo template with real drift
 ```
+
+**[docs/architecture.md](docs/architecture.md) is the full map** — the three
+tiers of evidence, the provenance and currency gates, where the model
+participates and where it deliberately does not, and the rules that were each
+learned by shipping the opposite.
 
 Run `npm run typecheck` and `npm test` to verify.
 
