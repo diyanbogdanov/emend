@@ -619,3 +619,24 @@ test('hosts beyond the budget are named as unchecked, not dropped', async () => 
     (notes ?? []).join(' | '),
   );
 });
+
+test('a finding says the description lacks the route, not that the API dropped it', async () => {
+  // The open gap this wording exists for. A vendor's published description can
+  // omit an endpoint that works: openrouter.ai documents `GET /api/v1/auth/key`
+  // while its openapi.json lists only `/auth/keys`, and GitHub has never put
+  // `/repositories/{id}` in its OpenAPI though it has served it for years.
+  //
+  // Emend cannot tell that apart from a removal, and it does not have to — what
+  // it checked is "this route is not in the description I resolved", and saying
+  // exactly that is both true and enough for a reader to judge. Claiming the
+  // endpoint is gone is a stronger statement than the evidence supports.
+  const source = `${GOOD}
+    await fetch('https://api.acme.com/v1/invoices/upcoming');
+  `;
+  const { findings } = await httpContractDetector({ resolve: async () => [candidate()] }).detect(
+    context({ 'src/a.ts': source }),
+  );
+  assert.equal(findings.length, 1);
+  assert.match(findings[0]?.change.guidance ?? '', /not described|no such route|does not describe/i);
+  assert.doesNotMatch(findings[0]?.change.guidance ?? '', /\bremoved\b|\bdeleted\b/i);
+});

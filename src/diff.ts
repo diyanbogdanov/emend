@@ -169,9 +169,25 @@ function namesADeclaration(signature: string, path: string): boolean {
  * A rename that comes *with* a real change still differs after normalising,
  * and so does a reordering, because position is exactly what is preserved.
  */
+/**
+ * A signature with the printer's disambiguating suffixes removed.
+ *
+ * `typeToString` appends `_2`, `_3` and so on when two types share a name in
+ * scope, so which one gets a suffix depends on what else the file happens to
+ * import. @tanstack/react-query 5.51 -> 5.101 produced a breaking finding whose
+ * entire difference was `_2`. Same family as the version inside a cache path:
+ * the rendering moved and the API did not.
+ *
+ * Used only for the comparison, never for what is stored, so a reader still
+ * sees what the compiler actually printed.
+ */
+function withoutPrinterSuffixes(signature: string): string {
+  return signature.replace(/\b([A-Za-z_$][\w$]*?)_\d+\b/g, '$1');
+}
+
 function withPositionalTypeParams(symbol: ApiSymbol): string {
   const params = symbol.typeParams ?? [];
-  if (params.length === 0) return symbol.signature;
+  if (params.length === 0) return withoutPrinterSuffixes(symbol.signature);
 
   // A sentinel keeps a substitution from being substituted again, which a
   // parameter already named `T0` would otherwise trigger.
@@ -180,7 +196,7 @@ function withPositionalTypeParams(symbol: ApiSymbol): string {
     const escaped = param.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     out = out.replace(new RegExp(`\\b${escaped}\\b`, 'g'), `\u0000T${i}`);
   });
-  return out.replaceAll('\u0000', '');
+  return withoutPrinterSuffixes(out.replaceAll('\u0000', ''));
 }
 
 /** What `normaliseSignature` appends when it keeps only part of a signature. */
@@ -290,7 +306,13 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
         continue;
       }
 
-      if (!before.deprecated && after.deprecated) {
+      // Deprecated in the version being moved to, whether or not it was already
+      // deprecated in the one installed. Only the first was reported, so a scan
+      // of 227 packages found zero deprecations while zod alone carried 332 —
+      // everything deprecated before the last upgrade was invisible. A
+      // deprecation somebody has been living with is still work, and it is what
+      // stops compiling at the next major.
+      if (after.deprecated) {
         changes.push({
           path,
           kind: 'deprecated',

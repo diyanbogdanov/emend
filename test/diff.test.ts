@@ -533,3 +533,63 @@ test('a signature kept whole is compared without comment', () => {
   assert.equal(diff.changes.length, 1);
   assert.equal(/as far as/i.test(diff.note ?? ''), false);
 });
+
+// ---------------------------------------------------------------------------
+// A deprecation you are already living with
+// ---------------------------------------------------------------------------
+
+test('a symbol deprecated in the version you would move to is reported', () => {
+  // Measured: zod 4.4.3 carries 332 deprecated symbols and react-query 16, and a
+  // scan of activepieces reported zero deprecations across 227 packages. The
+  // gate only fired on symbols that became deprecated *between* the two
+  // versions, so anything deprecated before you last upgraded was invisible —
+  // and that is most of them. A deprecation you have been living with for two
+  // years is still work, and still the thing that breaks at the next major.
+  const diff = diffSurfaces(
+    surface('1.0.0', [sym('nativeEnum', '(x: string) => void', { deprecated: true })]),
+    surface('2.0.0', [
+      sym('nativeEnum', '(x: string) => void', { deprecated: true, doc: 'Use enum() instead.' }),
+    ]),
+  );
+  const dep = diff.changes.filter((c) => c.kind === 'deprecated');
+  assert.equal(dep.length, 1);
+  assert.equal(dep[0]?.severity, 'deprecation');
+  assert.equal(dep[0]?.guidance, 'Use enum() instead.');
+});
+
+test('a symbol that is not deprecated produces no deprecation', () => {
+  const diff = diffSurfaces(
+    surface('1.0.0', [sym('fine', 'string')]),
+    surface('2.0.0', [sym('fine', 'string')]),
+  );
+  assert.deepEqual(diff.changes, []);
+});
+
+test('a newly deprecated symbol is still reported, and only once', () => {
+  const diff = diffSurfaces(
+    surface('1.0.0', [sym('old', 'string')]),
+    surface('2.0.0', [sym('old', 'string', { deprecated: true })]),
+  );
+  assert.equal(diff.changes.filter((c) => c.kind === 'deprecated').length, 1);
+});
+
+test('a printer’s disambiguating suffix is not an API change', () => {
+  // @tanstack/react-query 5.51 -> 5.101: the whole difference was `_2` appended
+  // to a type name. `typeToString` adds that when two types share a name in
+  // scope, so which one gets a suffix depends on what else is in the file. Same
+  // family as the version inside a cache path — the rendering moved, the API
+  // did not.
+  const changes = diffSurfaces(
+    surface('5.51.1', [sym('Provider', '(props: QueryClientProviderProps) => Element')]),
+    surface('5.101.4', [sym('Provider', '(props: QueryClientProviderProps_2) => Element_2')]),
+  ).changes;
+  assert.deepEqual(changes, []);
+});
+
+test('a type that really is named with a numeric suffix still differs', () => {
+  const changes = diffSurfaces(
+    surface('1.0.0', [sym('f', '() => Shape_2')]),
+    surface('2.0.0', [sym('f', '() => Shape_3')]),
+  ).changes;
+  assert.deepEqual(changes, [], 'both normalise to Shape — indistinguishable, so nothing is claimed');
+});

@@ -375,3 +375,42 @@ A separate commercial licence is available for anyone who wants to embed Emend
 without AGPL obligations. That is only possible because contributions are
 collected under a [CLA](./CLA.md) — see [CONTRIBUTING.md](./CONTRIBUTING.md) for
 why, and for the reason it is collected before the first merge rather than after.
+
+## Known limitations
+
+Measured, not hypothetical. Each of these is a case where Emend can be wrong or
+silent, and knowing which is which is the point.
+
+**A vendor's published description can omit an endpoint that works.** Emend
+checks a raw HTTP call against the description the provider publishes, and some
+providers do not describe everything they serve. `openrouter.ai` documents
+`GET /api/v1/auth/key` while its `openapi.json` lists only `/auth/keys`; GitHub
+has served `GET /repositories/{id}` for years without ever putting it in its
+OpenAPI. Emend cannot tell that from a removal, so it says what it actually
+checked — *not described by* the resolved description — rather than claiming the
+endpoint is gone. **Treat a Tier 3 finding as a lead to verify against the
+vendor's documentation, not as proof.** Two of two findings in a sweep of nine
+public repositories were this.
+
+**One host can serve several APIs.** Xero's accounting description says nothing
+about `/projects.xro`, and GitHub's REST description says nothing about
+`/graphql`. Emend refuses to claim a removal where the description names nothing
+under the same top-level path, and reports those paths as unchecked instead.
+
+**A description can be first-party and still dead.** `slackapi/slack-api-specs`
+last changed in 2020 and still lists endpoints Slack has retired. Provenance and
+currency are separate checks; a stored copy that has not moved in a year asserts
+nothing.
+
+**Only some calls can be read.** A URL assembled at runtime — `this.baseUrl`,
+`process.env.API_URL ?? ''` — is recorded as unreadable rather than skipped, and
+the count is shown. About a third of outbound calls in a typical repository are
+readable; the rest genuinely do not exist until the process runs.
+
+**Type-level findings are compared as text.** Package surfaces are diffed by
+comparing declaration signatures, which is exact for removals and renames and
+approximate for changes. Additions to a signature — a new optional parameter, a
+wider input union, an extra property on a returned object — are currently
+reported as breaking when they are not. Sampling one large repository, roughly
+half of `signature-changed` findings were of that shape. This is the largest
+known source of false positives and it is on by default.

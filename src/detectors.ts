@@ -312,7 +312,14 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
               confidence: 'medium',
               before: 'present',
               after: null,
-              guidance: `not in ${describeProvenance(spec)}`,
+              // What was actually checked, stated as such. A published
+              // description can omit an endpoint that works — openrouter.ai
+              // documents `GET /api/v1/auth/key` while its openapi.json lists
+              // only `/auth/keys` — and Emend cannot tell that from a removal.
+              // It does not need to: "the description does not describe this"
+              // is true either way, and is what a reader can act on. Saying the
+              // endpoint is gone claims more than the evidence carries.
+              guidance: `not described by ${describeProvenance(spec)}`,
             },
             sites: [{ file: call.file, line: call.line, column: call.column, text: call.text, via: 'import' }],
             confidence: 'medium',
