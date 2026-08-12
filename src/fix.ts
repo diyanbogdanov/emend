@@ -741,31 +741,6 @@ export async function fixPackage(
       }
     }
 
-    if (writer && verificationPassed(verification.outcome)) {
-      const dir = ws.dir;
-      const diffSoFar = await workspaceDiff(ws);
-      const extraFiles = await filesNamedInOutput(diffSoFar, dir);
-
-      const tightened = writer
-        ? await tightenAny(dir, phaseOpts, baseline, progress, (errors) =>
-            repairTightening(writer, dir, agentFinding, extraFiles, progress, errors),
-          )
-        : null;
-      if (tightened) verification = tightened;
-
-      // Green, and now: is it worth merging? Verification cannot answer that.
-      const reviewed = writer
-        ? await reviewMigration(
-            writer, ws, phaseOpts, baseline, agentFinding, findings,
-            extraFiles, candidates, progress,
-          )
-        : null;
-      if (reviewed) {
-        verification = reviewed.report;
-        appliedCount += reviewed.applied;
-      }
-    }
-
     // Last resort. Structured edits have had their retries and the build is
     // still red, so what remains is the class of change they cannot express:
     // something outside the call sites Emend found, in a file it never loaded.
@@ -861,6 +836,40 @@ export async function fixPackage(
           verification = compare(baseline, post);
           progress(`  verification: ${verification.outcome}`);
         }
+      }
+    }
+
+    // Polish, once the migration stands — **after** the escalation, not before.
+    //
+    // This ran before it, gated on the build already being green, which meant it
+    // never ran on any repository that actually needed repairing: the
+    // deterministic phase leaves a real breaking upgrade red, the escalation
+    // fixes it, and by then both passes had been skipped. Measured on the zod
+    // fixture, where the migration shipped with a doc comment still reading
+    // "Written against zod 3.x" above the code that falsifies it — the review
+    // task carves that case out in rule 6 and was never asked.
+    //
+    // Reviewing after the escalation is also the better position on its merits:
+    // the diff it judges now includes what the harness wrote, which is the part
+    // of the change nobody else has read.
+    if (writer && verificationPassed(verification.outcome)) {
+      const dir = ws.dir;
+      const diffSoFar = await workspaceDiff(ws);
+      const extraFiles = await filesNamedInOutput(diffSoFar, dir);
+
+      const tightened = await tightenAny(dir, phaseOpts, baseline, progress, (errors) =>
+        repairTightening(writer, dir, agentFinding, extraFiles, progress, errors),
+      );
+      if (tightened) verification = tightened;
+
+      // Green, and now: is it worth merging? Verification cannot answer that.
+      const reviewed = await reviewMigration(
+        writer, ws, phaseOpts, baseline, agentFinding, findings,
+        extraFiles, candidates, progress,
+      );
+      if (reviewed) {
+        verification = reviewed.report;
+        appliedCount += reviewed.applied;
       }
     }
 
