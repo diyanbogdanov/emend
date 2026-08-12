@@ -4,6 +4,13 @@ How Emend is put together, and why it is put together that way. If you are
 looking for how to *use* it, start with the [README](../README.md); this is for
 people changing the code.
 
+**This describes; it does not decide.** The specs under
+[`specs/`](./specs/) are authoritative, and the code is meant to be their image
+— design first, then conform. The current pair is
+[`2026-08-06-self-maintaining-mvp.md`](./specs/2026-08-06-self-maintaining-mvp.md)
+and [`2026-08-12-model-boundary.md`](./specs/2026-08-12-model-boundary.md). If
+this file and a spec disagree, the spec is right and this file is stale.
+
 ---
 
 ## 1. The problem, stated precisely
