@@ -679,26 +679,52 @@ function majorOf(version: string): number {
  * 3.22 -> 4.4 upgrade produced 2,100+ "breaking" signature changes, essentially
  * all of them noise (`z.ZodString.min` was flagged, and it is fine).
  *
- * So the bar moves with the version distance:
+ * That measurement stands. What was wrong was where the filter sat.
  *
- *  - same major: a signature change is unusual and probably deliberate -> report
- *  - major jump: demand the one signal we can actually trust, a newly *required*
- *    parameter (`confidence: 'high'`), and drop the rest
+ * This list gates the **call-site walk**, not the report: `analyze.ts` uses it to
+ * decide which symbols to look for, and a change with no call site never becomes
+ * a finding — it is counted as unlocated. So the intersection was already doing
+ * the filtering, and the confidence bar was a second filter applied *before* the
+ * one that works. On a major jump — exactly when breaking changes happen — it
+ * dropped every medium-confidence signature change before anything could ask
+ * whether the code touches it.
+ *
+ * That cost a real miss. `useQuery` in @tanstack/react-query 4 -> 5 loses its
+ * positional `(key, fn, options)` overload; the symbol survives, so the change is
+ * `signature-changed` at medium confidence, and it was discarded before
+ * localisation. A fixture calling it three times scanned clean — "No findings: no
+ * tracked API change intersects this codebase", which is the clean bill of health
+ * this project exists to refuse to give.
+ *
+ * So signature changes now reach the walk regardless of version distance, and the
+ * intersection decides. The 2,100 zod entries have no call sites and stay
+ * unlocated and counted; the handful a repository actually calls become findings,
+ * severity `drift`, which is precisely the word for "something moved and I cannot
+ * tell from a string comparison whether it bites".
  *
  * Removals and deprecations are unaffected — those are high-confidence in both
  * directions and are the findings that carry the product.
+ *
+ * **Measured, and the cost is real.** Across the four eval fixtures the breaking
+ * and deprecation counts did not move at all — no new claim of a hard break —
+ * but located call sites did: zod 3->4 went 7 -> 65, recharts 2->3 went 1 -> 7,
+ * openai 3->4 was unchanged, and react-query 4->5 went 0 -> 1, which is the miss
+ * this fixes. So the trade is nine times the located sites on a major zod bump
+ * against never again reporting a clean scan over a real break, and the sites
+ * gained are `drift` — labelled as "something moved and a string comparison
+ * cannot say whether it bites", which is the whole reason that word exists.
+ *
+ * That volume is not yet solved, only correctly labelled. Presenting 65 drift
+ * sites the same way as 4 breaking ones is a reporting problem, and it is open.
  */
 export function consumerImpacting(diff: SurfaceDiff): SurfaceChange[] {
-  const majorJump = majorOf(diff.toVersion) > majorOf(diff.fromVersion);
   const rank: Record<string, number> = { breaking: 0, deprecation: 1, feature: 2, safe: 3 };
 
   return diff.changes
     .filter((c) => {
       if (c.kind === 'removed') return true;
       if (c.kind === 'deprecated') return true;
-      if (c.kind === 'signature-changed') {
-        return majorJump ? c.confidence === 'high' : true;
-      }
+      if (c.kind === 'signature-changed') return true;
       return false;
     })
     .sort((a, b) => {

@@ -139,18 +139,35 @@ test('a package without type declarations is unanalyzable, not clean', () => {
   assert.match(diff.note ?? '', /no type declarations/);
 });
 
-test('a major jump drops medium-confidence signature noise but keeps removals', () => {
+test('a medium-confidence signature change survives a major jump', () => {
+  // This asserted the opposite until a real miss showed why it was wrong.
+  //
   // Across a major version, internal rewrites change nearly every signature
-  // string without changing the contract. Scanning zod 3.22 -> 4.4 this way
-  // produced 2,100+ "breaking" changes, essentially all noise.
+  // string without changing the contract — zod 3.22 -> 4.4 produced 2,100+ of
+  // them, essentially all noise — so the bar used to demand `confidence: 'high'`
+  // on a major jump and drop the rest.
+  //
+  // But this list gates the CALL-SITE WALK, not the report. `analyze.ts` uses it
+  // to decide which symbols to look for, and anything without a call site is
+  // counted as unlocated and never becomes a finding. The intersection was
+  // already doing the filtering; the confidence bar was a second filter running
+  // before the one that works, and on a major jump — exactly when things break —
+  // it discarded medium-confidence signature changes before anything could ask
+  // whether the code touched them.
+  //
+  // `useQuery` in @tanstack/react-query 4 -> 5 loses its positional overload.
+  // The symbol survives, so the change is `signature-changed` at medium
+  // confidence. A fixture calling it scanned completely clean: "no tracked API
+  // change intersects this codebase" — the clean bill of health this project
+  // exists to refuse to give.
   const from = surface('3.0.0', [sym('kept', '(a: A) => void'), sym('gone', 'string')]);
   const to = surface('4.0.0', [sym('kept', '(a: B) => void')]);
 
   const impacting = consumerImpacting(diffSurfaces(from, to));
   assert.deepEqual(
-    impacting.map((c) => c.path),
-    ['gone'],
-    'only the removal survives a major-version filter',
+    impacting.map((c) => c.path).sort(),
+    ['gone', 'kept'],
+    'the walk must be allowed to ask whether the code touches it',
   );
 });
 
