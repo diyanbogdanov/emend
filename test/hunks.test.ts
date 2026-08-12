@@ -1,4 +1,11 @@
-import { parseDiffHunks, classifyHunks } from '../src/gate.ts';
+import {
+  parseDiffHunks,
+  classifyHunks,
+  migrationGate,
+  reviewGate,
+  lintGate,
+  touchedLines,
+} from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { CallSite, SurfaceChange } from '../src/types.ts';
@@ -118,13 +125,13 @@ const CHANGES = [
 const FAILURE = 'src/schema.ts(25,15): error TS2554: Expected 2 arguments, but got 1.';
 
 test('a hunk a diagnostic points into is evidenced', () => {
-  const classified = classifyHunks(parseDiffHunks(DIFF), CHANGES, FAILURE);
+  const classified = classifyHunks(parseDiffHunks(DIFF), migrationGate(CHANGES, FAILURE));
   const recordHunk = classified.find((h) => h.hunk.start === 25);
   assert.equal(recordHunk?.evidence, 'evidenced');
 });
 
 test('a hunk over a quiet call site is unrequested', () => {
-  const classified = classifyHunks(parseDiffHunks(DIFF), CHANGES, FAILURE);
+  const classified = classifyHunks(parseDiffHunks(DIFF), migrationGate(CHANGES, FAILURE));
   const emailHunk = classified.find((h) => h.hunk.start === 2);
   assert.equal(emailHunk?.evidence, 'unrequested');
 });
@@ -133,7 +140,7 @@ test('a hunk over a deprecation still present is evidenced', () => {
   // Same carve-out the edit gate has. A deprecated call never produces a
   // diagnostic, so a diagnostic-only rule would cancel the migration the finding
   // asked for.
-  const classified = classifyHunks(parseDiffHunks(DIFF), CHANGES, FAILURE, new Set(['ZodString.email']));
+  const classified = classifyHunks(parseDiffHunks(DIFF), migrationGate(CHANGES, FAILURE, new Set(['ZodString.email'])));
   const emailHunk = classified.find((h) => h.hunk.start === 2);
   assert.equal(emailHunk?.evidence, 'evidenced');
 });
@@ -142,7 +149,7 @@ test('with no diagnostics anywhere the gate abstains', () => {
   // A failing test suite reports no locations, so there is no positive evidence
   // for anything. Judging from silence is how a gate starts withholding real
   // repairs.
-  const classified = classifyHunks(parseDiffHunks(DIFF), CHANGES, 'FAIL  test/checkout.test.ts');
+  const classified = classifyHunks(parseDiffHunks(DIFF), migrationGate(CHANGES, 'FAIL  test/checkout.test.ts'));
   assert.ok(classified.every((h) => h.evidence === 'evidenced'));
 });
 
@@ -156,6 +163,102 @@ test('a hunk in a file with no call site and no diagnostic is left alone', () =>
 -FROM node:18
 +FROM node:22
 `;
-  const classified = classifyHunks(parseDiffHunks(diff), CHANGES, FAILURE);
+  const classified = classifyHunks(parseDiffHunks(diff), migrationGate(CHANGES, FAILURE));
   assert.equal(classified[0]?.evidence, 'evidenced');
+});
+
+// ---------------------------------------------------------------------------
+// The three policies
+//
+// Under one writer the gate is the only thing between a model and the working
+// tree, and the three jobs that write disagree about what justifies a change.
+// Flattening them to one rule breaks the two strict ones silently: both review
+// and lint run without a single compiler diagnostic, so the migration policy —
+// "no diagnostics anywhere, so abstain" — would wave through everything they
+// exist to catch.
+// ---------------------------------------------------------------------------
+
+const MIGRATION_DIFF = `diff --git a/src/schema.ts b/src/schema.ts
+--- a/src/schema.ts
++++ b/src/schema.ts
+@@ -24,4 +24,4 @@
+   .extend({
+-    metadata: z.record(z.string()),
++    metadata: z.record(z.string(), z.string()),
+   })
+   .strict();
+`;
+
+test('review anchors on the migration diff, because it has no diagnostics to anchor on', () => {
+  // The pass runs on a build that already passes. Asked to judge from
+  // diagnostics it would find none, conclude it cannot judge, and pass the whole
+  // diff — including the out-of-scope churn that is the only thing it gates.
+  const gate = reviewGate(MIGRATION_DIFF);
+  assert.ok(gate.anchors.length > 0, 'the migration diff is the evidence');
+  assert.equal(gate.whenNoAnchors, 'judge');
+
+  const inScope = classifyHunks([{ file: 'src/schema.ts', start: 25, end: 27 }], gate);
+  assert.equal(inScope[0]?.evidence, 'evidenced');
+});
+
+test('a review edit outside the migration diff is churn by definition', () => {
+  // Not a judgement call about whether the edit is good. A reviewer gets one
+  // attempt; spending it on code the migration never touched spends it on
+  // nothing, and buries the change under noise for whoever reads the PR.
+  const classified = classifyHunks(
+    [{ file: 'src/unrelated.ts', start: 400, end: 402 }],
+    reviewGate(MIGRATION_DIFF),
+  );
+  assert.equal(classified[0]?.evidence, 'unrequested');
+});
+
+test('review allows itself no window, where lint needs one', () => {
+  // Measured difference, not a style choice. A linter names the head of a
+  // construct — the `RUN` — while the fix spans its continuations, so lint must
+  // reach past the flagged line. Review's anchor IS the migration's own edit, so
+  // an improvement to it already overlaps; three lines of slack there is enough
+  // to reach the next statement, which is the drift being prevented.
+  const nearby = [{ file: 'src/schema.ts', start: 28, end: 28 }];
+  assert.equal(classifyHunks(nearby, reviewGate(MIGRATION_DIFF))[0]?.evidence, 'unrequested');
+
+  const lint = lintGate([{ file: 'Dockerfile', line: 3 }]);
+  assert.equal(classifyHunks([{ file: 'Dockerfile', start: 5, end: 5 }], lint)[0]?.evidence, 'evidenced');
+});
+
+test('lint reverts a change away from every flagged line', () => {
+  // The carve-out migration gets — "no call site and no diagnostic here, so
+  // there may be a cause Emend cannot see" — is wrong for lint. The findings ARE
+  // the complete list of what is wrong with the file, so a change elsewhere is
+  // the model rewriting something nobody asked about.
+  const classified = classifyHunks(
+    [{ file: 'Dockerfile', start: 40, end: 41 }],
+    lintGate([{ file: 'Dockerfile', line: 3 }]),
+  );
+  assert.equal(classified[0]?.evidence, 'unrequested');
+});
+
+test('touchedLines counts added lines on the new side', () => {
+  // The review gate is only as good as this. Counting the old side, or counting
+  // context lines as touched, would anchor the review to lines the migration
+  // never changed and quietly restore the churn the gate exists to stop.
+  const added = touchedLines(`--- a/x.ts
++++ b/x.ts
+@@ -10,4 +10,5 @@
+ keep
+-old
++new
++extra
+ keep
+`);
+  assert.deepEqual(added, [{ file: 'x.ts', line: 11 }, { file: 'x.ts', line: 12 }]);
+});
+
+test('migration still abstains when the failure names no locations at all', () => {
+  // The policy that must NOT be flattened into the other two. A failing test
+  // suite reports no file:line anywhere, and reverting everything on that basis
+  // turns a possible repair into a guaranteed no-op.
+  const gate = migrationGate(CHANGES, 'FAIL  test/checkout.test.ts');
+  assert.equal(gate.whenNoAnchors, 'abstain');
+  const classified = classifyHunks(parseDiffHunks(DIFF), gate);
+  assert.ok(classified.every((h) => h.evidence === 'evidenced'));
 });

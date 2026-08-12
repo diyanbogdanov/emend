@@ -50,7 +50,7 @@ import {
   type Asker,
   type Harness,
 } from './harness.ts';
-import type { HunkClassification } from './gate.ts';
+import { migrationGate, type HunkClassification } from './gate.ts';
 import { reviewSession, type ReviewFinding } from './reviewharness.ts';
 import {
   remainingDeprecations,
@@ -825,11 +825,11 @@ export async function fixPackage(
               `no refactoring of code that already works.\n\n${NARROWING.text}`,
             failureOutput,
           },
-          {
-            changes: findings.map((f) => ({ change: f.change, sites: f.sites })),
+          migrationGate(
+            findings.map((f) => ({ change: f.change, sites: f.sites })),
             failureOutput,
-            unresolvedDeprecations: stillDeprecated,
-          },
+            stillDeprecated,
+          ),
         );
 
         harnessRecord = {

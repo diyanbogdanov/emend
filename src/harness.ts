@@ -23,7 +23,13 @@ import { promisify } from 'node:util';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { classifyHunks, parseDiffHunks, type DiffHunk, type HunkClassification } from './gate.ts';
+import {
+  classifyHunks,
+  parseDiffHunks,
+  type DiffHunk,
+  type HunkClassification,
+  type HunkGate,
+} from './gate.ts';
 import { chat } from './llm/client.ts';
 import { PROVIDERS, resolveAgent, resolveLlmConfig } from './llm/providers.ts';
 import { listModels } from './llm/client.ts';
@@ -139,11 +145,7 @@ export interface Harness {
   run(dir: string, task: HarnessTask): Promise<HarnessRun>;
 }
 
-export interface EscalationGate {
-  changes: Array<{ change: SurfaceChange; sites: CallSite[] }>;
-  failureOutput: string;
-  unresolvedDeprecations?: ReadonlySet<string>;
-}
+
 
 export interface EscalationResult {
   ok: boolean;
@@ -306,7 +308,7 @@ export async function escalate(
   harness: Harness,
   dir: string,
   task: HarnessTask,
-  gate: EscalationGate,
+  gate: HunkGate,
 ): Promise<EscalationResult> {
   const status = await harness.available();
   if (!status.ok) return refused(`${harness.id} is unavailable — ${status.reason}`);
@@ -348,12 +350,7 @@ export async function escalate(
       return refused(why, (run.summary ?? run.log));
     }
 
-    const classified = classifyHunks(
-      parseDiffHunks(diff),
-      gate.changes,
-      gate.failureOutput,
-      gate.unresolvedDeprecations ?? new Set(),
-    );
+    const classified = classifyHunks(parseDiffHunks(diff), gate);
     const unrequested = classified.filter((c) => c.evidence === 'unrequested');
 
     // The carve-out `selectEvidencedEdits` makes, for the same reason: if

@@ -76,6 +76,147 @@ export interface HunkClassification {
 }
 
 /**
+ * What justifies a change, and what to do about one nothing justifies.
+ *
+ * The three jobs that write code disagree about this, and flattening them to one
+ * rule breaks the strictest. Review runs on a **green build**: it has no
+ * diagnostics at all, so a diagnostics-only gate would find nothing to judge
+ * against and pass everything — including the out-of-scope churn that is the only
+ * thing it is gated for. Lint has no hidden cause: its findings are the complete
+ * list of what is wrong, so a change away from all of them is the model rewriting
+ * something nobody asked about. Migration has both a hidden cause and silence to
+ * survive.
+ *
+ * So the caller states its evidence and its policy, and the rule below is one
+ * rule. `migrationGate`, `reviewGate` and `lintGate` are the three answers.
+ */
+export interface HunkGate {
+  /** Lines that justify a change here. */
+  anchors: ReadonlyArray<Diagnostic>;
+  /**
+   * Lines Emend knows about where a change is *not* justified — a call site the
+   * compiler is content with. Distinct from "unknown": silence about a line
+   * Emend never looked at is not evidence that it is fine.
+   */
+  quiet?: ReadonlyArray<Diagnostic>;
+  /** Slack either side of an anchor, in lines. */
+  window?: number;
+  /**
+   * A hunk matching neither list.
+   *
+   * `allow` when there can be a cause Emend cannot see — a bump breaks
+   * Dockerfiles and CI config the call-site walk never visits. `revert` when the
+   * anchors are the complete statement of what is wrong.
+   */
+  unanchored: 'allow' | 'revert';
+  /**
+   * `anchors` empty.
+   *
+   * `abstain` allows everything: a failing test suite reports no locations, and
+   * judging from silence is how a gate starts withholding real repairs.
+   */
+  whenNoAnchors?: 'abstain' | 'judge';
+  /** Names the evidence in the reason line, e.g. "a diagnostic", "the migration". */
+  evidenceName?: string;
+}
+
+/**
+ * Lines a diff added, on the new side — the migration's own footprint.
+ *
+ * The review gate's anchor set. A review edit that overlaps none of these is not
+ * reviewing the migration; it is rewriting code the migration never touched, and
+ * out-of-scope churn buries the change under noise.
+ */
+export function touchedLines(diff: string): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  let file = '';
+  let next = 0;
+
+  for (const line of diff.split('\n')) {
+    const header = line.match(/^\+\+\+ (?:b\/)?(.+)$/);
+    if (header?.[1]) {
+      file = header[1].trim();
+      continue;
+    }
+    if (line.startsWith('--- ')) continue;
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk?.[1]) {
+      next = Number(hunk[1]);
+      continue;
+    }
+    if (!file) continue;
+    if (line.startsWith('+')) out.push({ file, line: next++ });
+    else if (line.startsWith(' ') || line === '') next += 1;
+  }
+  return out;
+}
+
+/**
+ * Migration and tightening: the compiler points, and a deprecation still present
+ * counts even though it never produces a diagnostic.
+ *
+ * `unanchored: 'allow'` because a version bump genuinely breaks files the
+ * call-site walk never visits. `whenNoAnchors: 'abstain'` because a failing test
+ * suite reports no locations at all.
+ */
+export function migrationGate(
+  changes: Array<{ change: SurfaceChange; sites: CallSite[] }>,
+  failureOutput: string,
+  unresolvedDeprecations: ReadonlySet<string> = new Set(),
+): HunkGate {
+  const anchors = parseDiagnostics(failureOutput);
+  const quiet: Diagnostic[] = [];
+  for (const { change, sites } of changes) {
+    // A deprecated symbol still in the source is work the finding asked for, so
+    // its call sites justify a change rather than forbidding one.
+    const target = unresolvedDeprecations.has(change.path) ? anchors : quiet;
+    for (const site of sites) target.push({ file: site.file, line: site.line });
+  }
+  return {
+    anchors,
+    quiet,
+    unanchored: 'allow',
+    whenNoAnchors: 'abstain',
+    evidenceName: 'a diagnostic',
+  };
+}
+
+/**
+ * Review: the only thing that justifies an edit is the migration's own diff.
+ *
+ * No abstain and no `allow`. The pass runs on a build that already passes, so
+ * there is nothing to be silent about — an edit outside the diff is out-of-scope
+ * churn by definition, which is the single thing this gate exists to stop. No
+ * window either: the anchor is the migration's own edit, and a review improving
+ * that edit overlaps it. Three lines of slack is enough to reach the next
+ * statement, which is exactly the drift being prevented.
+ */
+export function reviewGate(migrationDiff: string): HunkGate {
+  return {
+    anchors: touchedLines(migrationDiff),
+    unanchored: 'revert',
+    whenNoAnchors: 'judge',
+    evidenceName: 'the migration',
+  };
+}
+
+/**
+ * Lint: the flagged lines, and nothing else.
+ *
+ * A window, unlike review, because a linter reports the head of a construct —
+ * the `RUN` — while the fix often spans its continuations.
+ */
+export function lintGate(findings: ReadonlyArray<Diagnostic>): HunkGate {
+  return {
+    anchors: findings,
+    window: 3,
+    unanchored: 'revert',
+    whenNoAnchors: 'judge',
+    evidenceName: 'the linter',
+  };
+}
+
+/**
  * The changed regions of a unified diff.
  *
  * A harness with filesystem access cannot be gated by inspecting proposed
@@ -128,53 +269,42 @@ export function parseDiffHunks(diff: string): DiffHunk[] {
  * nothing outstanding says the compiler is content with that line; anything else
  * has no evidence either way and is left alone.
  */
-export function classifyHunks(
-  hunks: DiffHunk[],
-  changes: Array<{ change: SurfaceChange; sites: CallSite[] }>,
-  failureOutput: string,
-  unresolvedDeprecations: ReadonlySet<string> = new Set(),
-): HunkClassification[] {
-  const diagnostics = parseDiagnostics(failureOutput);
+export function classifyHunks(hunks: DiffHunk[], gate: HunkGate): HunkClassification[] {
+  const window = gate.window ?? 0;
+  const evidence = gate.evidenceName ?? 'the failure';
+  const covers = (points: ReadonlyArray<Diagnostic>, hunk: DiffHunk): boolean =>
+    points.some(
+      (p) =>
+        sameFile(p.file, hunk.file) &&
+        p.line >= hunk.start - window &&
+        p.line <= hunk.end + window,
+    );
 
-  // Judging from silence is how a gate starts withholding real repairs.
-  if (diagnostics.length === 0) {
+  if (gate.anchors.length === 0 && (gate.whenNoAnchors ?? 'judge') === 'abstain') {
     return hunks.map((hunk) => ({
       hunk,
       evidence: 'evidenced' as const,
-      reason: 'the failure reports no diagnostic locations to judge against',
+      reason: 'the failure reports no locations to judge against',
     }));
   }
 
   return hunks.map((hunk): HunkClassification => {
-    const pointedAt = diagnostics.some(
-      (d) => sameFile(d.file, hunk.file) && d.line >= hunk.start && d.line <= hunk.end,
-    );
-    if (pointedAt) {
-      return {
-        hunk,
-        evidence: 'evidenced',
-        reason: `a diagnostic points into ${hunk.file}:${hunk.start}`,
-      };
+    if (covers(gate.anchors, hunk)) {
+      return { hunk, evidence: 'evidenced', reason: `${evidence} points into ${hunk.file}:${hunk.start}` };
     }
-
-    const owner = changes.find((c) =>
-      c.sites.some((s) => sameFile(s.file, hunk.file) && s.line >= hunk.start && s.line <= hunk.end),
-    );
-    if (owner) {
-      if (unresolvedDeprecations.has(owner.change.path)) {
-        return {
-          hunk,
-          evidence: 'evidenced',
-          reason: `${owner.change.path} is deprecated and still present here`,
-        };
-      }
+    if (covers(gate.quiet ?? [], hunk)) {
       return {
         hunk,
         evidence: 'unrequested',
         reason: `${hunk.file}:${hunk.start} covers a call site with nothing outstanding on it`,
       };
     }
-
-    return { hunk, evidence: 'evidenced', reason: 'no call site and no diagnostic here' };
+    return gate.unanchored === 'allow'
+      ? { hunk, evidence: 'evidenced', reason: 'nothing known about this line either way' }
+      : {
+          hunk,
+          evidence: 'unrequested',
+          reason: `${hunk.file}:${hunk.start} is not anywhere ${evidence} pointed`,
+        };
   });
 }

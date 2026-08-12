@@ -1,4 +1,4 @@
-import { parseDiffHunks } from '../src/gate.ts';
+import { parseDiffHunks, migrationGate } from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -202,18 +202,19 @@ function fakeHarness(writes: Record<string, string>, over: Partial<Harness> = {}
   };
 }
 
-const GATE = {
-  changes: [{ change: change('legacyCall', 'removed'), sites: [site('a.txt', 25)] }],
-  // Only line 2 is broken. Line 25 is a known call site the compiler is content
-  // with, so a hunk over it is churn.
-  failureOutput: 'a.txt(2,1): error TS2304: Cannot find name.',
-};
+// Only line 2 is broken. Line 25 is a known call site the compiler is content
+// with, so a hunk over it is churn.
+const FAILURE = 'a.txt(2,1): error TS2304: Cannot find name.';
+const GATE = migrationGate(
+  [{ change: change('legacyCall', 'removed'), sites: [site('a.txt', 25)] }],
+  FAILURE,
+);
 
 test('a hunk the failure did not ask for is reverted before anyone sees the diff', async () => {
   const f = await gitFixture({ 'a.txt': BASE });
   try {
     const harness = fakeHarness({ 'a.txt': BASE.replace('line02', 'LINE02').replace('line25', 'LINE25') });
-    const result = await escalate(harness, f.dir, { instruction: 'fix it', failureOutput: GATE.failureOutput }, GATE);
+    const result = await escalate(harness, f.dir, { instruction: 'fix it', failureOutput: FAILURE }, GATE);
 
     assert.equal(result.ok, true);
     assert.equal(result.revertedHunks.length, 1);
@@ -246,7 +247,7 @@ test('a gitignored node_modules does not stop the baseline being taken', async (
     const result = await escalate(
       harness,
       f.dir,
-      { instruction: 'x', failureOutput: GATE.failureOutput },
+      { instruction: 'x', failureOutput: FAILURE },
       GATE,
     );
     assert.equal(result.ok, true, `expected a baseline to be established, got: ${result.reason}`);
@@ -267,7 +268,7 @@ test('escalation leaves the index alone, so the caller’s own diff still works'
     writeFileSync(path.join(f.dir, 'a.txt'), BASE.replace('line01', 'LINE01'));
 
     const harness = fakeHarness({ 'b.txt': 'new file\n' });
-    await escalate(harness, f.dir, { instruction: 'x', failureOutput: GATE.failureOutput }, GATE);
+    await escalate(harness, f.dir, { instruction: 'x', failureOutput: FAILURE }, GATE);
 
     const { stdout } = await run('git', ['-C', f.dir, 'diff']);
     assert.ok(stdout.includes('LINE01'), 'the pre-existing edit is still visible to git diff');
@@ -287,17 +288,18 @@ test('changes a few lines apart are judged separately, not as one region', async
     ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel'].join('\n') + '\n';
   const f = await gitFixture({ 'a.txt': short });
   try {
-    const gate = {
-      changes: [{ change: change('quiet', 'removed'), sites: [site('a.txt', 7)] }],
-      failureOutput: 'a.txt(3,1): error TS2304: Cannot find name.',
-    };
+    const localFailure = 'a.txt(3,1): error TS2304: Cannot find name.';
+    const gate = migrationGate(
+      [{ change: change('quiet', 'removed'), sites: [site('a.txt', 7)] }],
+      localFailure,
+    );
     const harness = fakeHarness({
       'a.txt': short.replace('charlie', 'CHARLIE').replace('golf', 'GOLF'),
     });
     const result = await escalate(
       harness,
       f.dir,
-      { instruction: 'x', failureOutput: gate.failureOutput },
+      { instruction: 'x', failureOutput: localFailure },
       gate,
     );
 
@@ -323,7 +325,7 @@ test('when nothing is evidenced the harness’s work stands, and verification ju
     const result = await escalate(
       harness,
       f.dir,
-      { instruction: 'x', failureOutput: GATE.failureOutput },
+      { instruction: 'x', failureOutput: FAILURE },
       GATE,
     );
     assert.equal(result.ok, true);
@@ -342,7 +344,7 @@ test('a harness that changed nothing says so, rather than reporting success', as
     const result = await escalate(
       fakeHarness({}),
       f.dir,
-      { instruction: 'x', failureOutput: GATE.failureOutput },
+      { instruction: 'x', failureOutput: FAILURE },
       GATE,
     );
     assert.equal(result.ok, false);
