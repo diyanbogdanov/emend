@@ -188,10 +188,12 @@ repair, and the harness is on unless `--no-agent`. There is no fallback, because
 a fallback is a second writer, so a run without it reports that it could not
 repair. *Could not fix is not the same as nothing to fix.*
 
-Measured on the built-in corpus with `openrouter/z-ai/glm-5.2`: the deterministic
-path alone verifies **0 of 2** cases, and with the harness **2 of 2**, with the
-deprecations it left behind finished, no type escapes introduced, and nothing the
-gate had to revert. The completeness columns of `emend eval` are not yet valid
+Measured on the built-in corpus with `openrouter/z-ai/glm-5.2`, three runs per
+case: the deterministic path alone verifies **0 of 2** cases, and with the harness
+**6 of 6**, with the deprecations it left behind finished and no type escapes
+introduced. The gate reverted nothing across fourteen hunks, which is not yet
+evidence that it never needs to — six runs on two cases cannot tell a model
+staying in scope from anchors too loose to fire. The completeness columns of `emend eval` are not yet valid
 for this engine — the corpus counts `find`/`replace` pairs and a harness produces
 hunks — and spec §11.6 says why that is not a thing to estimate.
 
