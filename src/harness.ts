@@ -24,11 +24,61 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { classifyHunks, parseDiffHunks, type DiffHunk, type HunkClassification } from './llm/agent.ts';
+import { chat } from './llm/client.ts';
+import { resolveAgent } from './llm/providers.ts';
 import type { CallSite, SurfaceChange } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
 export type HarnessAvailability = { ok: true } | { ok: false; reason: string };
+
+/**
+ * A model asked a question, which answers without touching the checkout.
+ *
+ * The second of the two ways anything here talks to a model, and the reason
+ * both live in this file: a provider, a key and a retry policy are one concern,
+ * and they were spread across six modules that each resolved them again. A
+ * feature module owns its prompt and what to do with the answer; it has no
+ * business knowing which provider serves it.
+ *
+ * Distinct from `Harness` rather than folded into it, because the two are not
+ * the same capability. `run` works in a directory and leaves its result on
+ * disk, to be audited afterwards; this returns text the caller interprets, so a
+ * hallucinated answer is rejected by whatever reads it rather than landing
+ * first and being reverted. One place to reach a model; two honest verbs.
+ */
+export interface Asker {
+  /** Named so a reader of the output can weight what it wrote. */
+  model: string;
+  /** The answer, or null when the model was unreachable or said nothing. */
+  ask(system: string, user: string, options?: { json?: boolean }): Promise<string | null>;
+}
+
+/**
+ * An `Asker`, or null when no model is available.
+ *
+ * Null rather than a throwing constructor: a run without a model does less and
+ * says so, which is a degradation every caller here already knows how to render.
+ */
+export function asker(options: { disabled?: boolean } = {}): Asker | null {
+  const agent = resolveAgent(options);
+  if (!agent.on) return null;
+  const config = agent.config;
+  return {
+    model: config.model,
+    async ask(system, user, opts = {}) {
+      const reply = await chat(
+        config,
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        { jsonMode: opts.json === true },
+      );
+      return reply.ok ? reply.content : null;
+    },
+  };
+}
 
 export interface HarnessTask {
   /** What the harness is being asked to do, in prose. */

@@ -15,7 +15,7 @@ import type { Store } from '../store.ts';
 import { scanRepo } from '../analyze.ts';
 import { fixPackage, type FixResult } from '../fix.ts';
 import { renderPrBody, renderPrTitle, branchSlug, summarisePr } from '../pr.ts';
-import { resolveAgent } from '../llm/providers.ts';
+import { asker } from '../harness.ts';
 import { verificationPassed } from '../verify.ts';
 import { openPullRequest, type FileChange } from './pr.ts';
 import type { Finding, ScanReport } from '../types.ts';
@@ -136,8 +136,8 @@ export async function proposeMigrations(opts: ProposeOptions): Promise<number> {
       };
 
       const branch = `emend/${branchSlug(pkgName)}-${first.toVersion}`;
-      const agent = resolveAgent({ disabled: opts.useAgent !== true });
-      const summary = agent.on ? await summarisePr(agent.config, single) : null;
+      const briefing = asker({ disabled: opts.useAgent !== true });
+      const summary = briefing ? await summarisePr(briefing, single) : null;
 
       const pr = await openPullRequest({
         token,

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderPrBody, parsePrSummary } from '../src/pr.ts';
+import { renderPrBody, parsePrSummary, summarisePr } from '../src/pr.ts';
+import type { Asker } from '../src/harness.ts';
 import type { FixResult, HarnessEscalation } from '../src/fix.ts';
 import type { Finding } from '../src/types.ts';
 
@@ -206,4 +207,24 @@ test('checks are kept when the evidence backs them', () => {
   const parsed = parsePrSummary(said, new Set(['src/schema.ts']));
   assert.equal(parsed?.checks.length, 1);
   assert.equal(parsed?.checks[0]?.path, 'src/schema.ts');
+});
+
+test('a summary is built from what the model said, and dropped when it says nothing', async () => {
+  // Testable at all only because the model arrives as a capability rather than
+  // a provider config. Before, `summarisePr` reached for `chat` itself and the
+  // only way to exercise it was to call an API.
+  const said: Asker = {
+    model: 'test/model',
+    ask: async () =>
+      '{"says": "Reads issues rather than errors.", "checks": ' +
+      '[{"path": "src/schema.ts", "why": "indexes before mapping"}]}',
+  };
+  const summary = await summarisePr(said, result());
+  assert.equal(summary?.model, 'test/model');
+  assert.equal(summary?.checks[0]?.path, 'src/schema.ts');
+
+  // Unreachable is null, not an empty summary — a heading with nothing under it
+  // is a claim about a model that never spoke.
+  const silent: Asker = { model: 'test/model', ask: async () => null };
+  assert.equal(await summarisePr(silent, result()), null);
 });

@@ -13,8 +13,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { renderReviewFindings } from './reviewharness.ts';
-import { chat } from './llm/client.ts';
-import type { LlmConfig } from './llm/providers.ts';
+import type { Asker } from './harness.ts';
 import type { FixResult } from './fix.ts';
 import type { CallSite, CommandResult, SurfaceChange } from './types.ts';
 
@@ -628,35 +627,22 @@ function filesInEvidence(result: FixResult): Set<string> {
  * heading with an apology under it is still a claim about a model that did not
  * speak.
  */
-export async function summarisePr(
-  config: LlmConfig,
-  result: FixResult,
-): Promise<PrSummary | null> {
-  const reply = await chat(
-    config,
-    [
-      {
-        role: 'system',
-        content:
-          'You brief a reviewer on someone else\'s dependency migration. You are read-only and report to a human. Be specific and short; a sentence that would be true of any migration is worth nothing here.',
-      },
-      {
-        role: 'user',
-        content: prSummaryPrompt({
-          pkg: result.finding.pkg,
-          fromVersion: result.finding.fromVersion,
-          toVersion: result.finding.toVersion,
-          change: result.finding.change,
-          sites: result.finding.sites,
-          diff: result.diff,
-          outcome: result.verification?.outcome ?? 'unverified',
-        }),
-      },
-    ],
-    { jsonMode: true },
+export async function summarisePr(asker: Asker, result: FixResult): Promise<PrSummary | null> {
+  const answer = await asker.ask(
+    'You brief a reviewer on someone else\'s dependency migration. You are read-only and report to a human. Be specific and short; a sentence that would be true of any migration is worth nothing here.',
+    prSummaryPrompt({
+      pkg: result.finding.pkg,
+      fromVersion: result.finding.fromVersion,
+      toVersion: result.finding.toVersion,
+      change: result.finding.change,
+      sites: result.finding.sites,
+      diff: result.diff,
+      outcome: result.verification?.outcome ?? 'unverified',
+    }),
+    { json: true },
   );
-  if (!reply.ok) return null;
+  if (answer === null) return null;
 
-  const parsed = parsePrSummary(reply.content, filesInEvidence(result));
-  return parsed ? { model: config.model, ...parsed } : null;
+  const parsed = parsePrSummary(answer, filesInEvidence(result));
+  return parsed ? { model: asker.model, ...parsed } : null;
 }

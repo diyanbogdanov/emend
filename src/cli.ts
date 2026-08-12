@@ -38,6 +38,7 @@ import {
   drivePrompt,
   driveContractPrompt,
   harnessPermitted,
+  asker,
   type Harness,
 } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
@@ -1304,8 +1305,8 @@ async function cmdPr(args: Args): Promise<number> {
   // The reading guide, when a model is reachable. Rendered from the same
   // evidence the body already carries, and skipped in silence when it is not —
   // `renderPrBody` stays pure and simply has one section fewer.
-  const briefing = agentAllowed(args) ? resolveAgent({}) : null;
-  const summary = briefing?.on ? await summarisePr(briefing.config, result) : null;
+  const briefing = asker({ disabled: !agentAllowed(args) });
+  const summary = briefing ? await summarisePr(briefing, result) : null;
   const body = renderPrBody(result, { ...(summary ? { summary } : {}) });
 
   if (!creating) {
