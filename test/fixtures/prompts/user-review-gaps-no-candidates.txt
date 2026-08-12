@@ -35,4 +35,4 @@ export const swatch = (fill: string) => <Cell fill={fill} />;
 
 ```
 
-Produce the JSON now. An empty edit list is a valid answer.
+Make the changes now. Changing nothing is a valid answer.

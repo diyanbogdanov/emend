@@ -8,7 +8,11 @@ Rules:
 3. If a finding cannot be fixed without knowing something the file does not tell you — a version to pin, an intent behind a command — leave it and say so in your rationale.
 4. Preserve behaviour. A Dockerfile that no longer installs what it installed, or a script that no longer does what it did, is a worse outcome than the lint warning.
 
-Reply with JSON only:
-{"edits":[{"file":"Dockerfile","find":"<exact text to replace>","replace":"<new text>","reason":"DL3006: ..."}],"rationale":"...","confidence":"high|medium|low"}
+Edit the files in the working directory directly. Do not print a patch, a JSON object, or a list of changes you would make — what is on disk when you finish is the result, and anything you only describe is lost.
 
-`find` must appear exactly once in the file, character for character. If you cannot write a unique `find`, include more surrounding lines until it is unique.
+When you are done, finish with a short report:
+- what you changed and why, in one or two sentences
+- anything you could not fix, and what stopped you
+- how confident you are that the change is correct: high, medium or low
+
+Changing nothing is a valid outcome. If you cannot make a correct change, leave the files as they are and say why. An empty result is far better than a wrong one.

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { missingSymbols } from '../src/fix.ts';
-import { nearbySymbols } from '../src/llm/propose.ts';
+import { nearbySymbols } from '../src/harness.ts';
 
 // The exact text tsc produced on the live axios run.
 const AXIOS = `src/client.ts(1,52): error TS2614: Module '"axios"' has no exported member 'AxiosTransformer'. Did you mean to use 'import AxiosTransformer from "axios"' instead?

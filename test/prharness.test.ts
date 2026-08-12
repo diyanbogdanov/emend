@@ -23,15 +23,6 @@ const FINDING: Finding = {
   confidence: 'high',
 };
 
-const AGENT: NonNullable<FixResult['agent']> = {
-  model: 'z-ai/glm-5.2',
-  provider: 'OpenRouter',
-  attempts: [{ attempt: 1, edits: [], rationale: 'replaced the removed method', modelConfidence: 'high', outcome: 'verified' }],
-  rationale: 'replaced the removed method',
-  initialErrors: 2,
-  finalErrors: 0,
-};
-
 function harness(over: Partial<HarnessEscalation> = {}): HarnessEscalation {
   return {
     id: 'opencode',
@@ -71,23 +62,19 @@ test('a harness escalation is named, so a reviewer knows what wrote the branch',
   // It was collected and never shown. A reviewer looking at a diff produced by an
   // agent with write access could not tell that from one produced by pattern
   // substitution, which is the difference that decides how closely they read it.
-  const body = renderPrBody(result({ agent: AGENT, harness: harness() }));
+  const body = renderPrBody(result({ harness: harness() }));
   assert.match(body, /opencode/);
   assert.match(body, /harness/i);
 });
 
-test('the claim that the model had no filesystem access is dropped when it did', () => {
-  // The agent block states it outright, and it was true for every PR until a
-  // harness could produce one. Leaving it in place would be a false statement
-  // about how the change was made, in the section explaining how it was made.
-  const withHarness = renderPrBody(result({ agent: AGENT, harness: harness() }));
-  assert.ok(
-    !/never had filesystem or shell access/i.test(withHarness),
-    'the sentence must not survive an escalation',
-  );
-
-  const withoutHarness = renderPrBody(result({ agent: AGENT }));
-  assert.match(withoutHarness, /never had filesystem or shell access/i);
+test('the PR says the change was written in a worktree and gated, not proposed', () => {
+  // Until §11 this section claimed the model "never had filesystem or shell
+  // access", which was true of the proposer and is now false of everything.
+  // Leaving it would be a false statement about how the change was made, in the
+  // section that exists to explain how it was made.
+  const body = renderPrBody(result({ harness: harness() }));
+  assert.ok(!/never had filesystem or shell access/i.test(body));
+  assert.match(body, /isolated worktree/i);
 });
 
 test('hunks the gate reverted are listed, not merely counted', () => {
@@ -121,7 +108,7 @@ test('an escalation that achieved nothing says so rather than going unmentioned'
 });
 
 test('a PR with no harness says nothing about one', () => {
-  const body = renderPrBody(result({ agent: AGENT }));
+  const body = renderPrBody(result({}));
   assert.ok(!/opencode/i.test(body));
 });
 

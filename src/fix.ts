@@ -36,21 +36,24 @@ import { runPhase, compare, verificationPassed } from './verify.ts';
 import {
   asker,
   escalate,
+  revertHunks,
   harnessPermitted,
   runTask,
+  MIGRATION_TASK,
   TIGHTENING_TASK,
   REVIEW_TASK,
   LINT_TASK,
-  selectLintEdits,
   nearbySymbols,
-  selectReviewEdits,
   NARROWING,
-  type TextEdit,
-  type EditClassification,
-  type Asker,
   type Harness,
 } from './harness.ts';
-import { migrationGate, type HunkClassification } from './gate.ts';
+import {
+  migrationGate,
+  reviewGate,
+  lintGate,
+  parseDiffHunks,
+  type HunkClassification,
+} from './gate.ts';
 import { reviewSession, type ReviewFinding } from './reviewharness.ts';
 import {
   remainingDeprecations,
@@ -140,22 +143,6 @@ export interface HarnessEscalation {
   revertedHunks: HunkClassification[];
 }
 
-export interface AgentAttempt {
-  attempt: number;
-  edits: TextEdit[];
-  rationale: string;
-  modelConfidence: string;
-  outcome: string;
-  error?: string;
-  /**
-   * Edits the current failure did not ask for, withheld before applying.
-   *
-   * Recorded rather than discarded: a reviewer is entitled to see what the model
-   * wanted to change beyond what the upgrade required.
-   */
-  droppedEdits?: EditClassification[];
-}
-
 export interface FixResult {
   finding: Finding;
   plan: MigrationPlan | null;
@@ -168,17 +155,6 @@ export interface FixResult {
   bump: CommandResult | null;
   workspaceDir: string | null;
   workspaceMode: string | null;
-  /** Populated when the LLM agent was used. Kept distinct from deterministic work. */
-  agent?: {
-    model: string;
-    provider: string;
-    attempts: AgentAttempt[];
-    rationale: string;
-    /** Outstanding errors when the agent was handed the migration. */
-    initialErrors: number;
-    /** Outstanding errors when it stopped. Zero once the build passes. */
-    finalErrors: number;
-  };
   /** Populated when the run escalated to a harness. */
   harness?: HarnessEscalation;
   /**
@@ -313,39 +289,41 @@ async function tightenAny(
  * whose edits all failed to apply, and the run reported neither.
  */
 async function repairTightening(
-  asker: Asker,
+  harness: Harness,
   dir: string,
   finding: Finding,
   extraFiles: string[],
   progress: (message: string) => void,
   errors: string,
 ): Promise<number | null> {
-  const proposal = await runTask(asker, TIGHTENING_TASK, {
-    finding,
-    // Re-read: the files on disk are the stripped ones, not what the migration
-    // was shown, and the prompt promises the model exactly what it is holding.
-    sources: await loadSources(dir, finding, extraFiles),
-    errors,
-  });
-  if (!proposal.ok) {
-    progress(`    tightening repair unavailable: ${proposal.error ?? 'unknown error'}`);
-    return null;
-  }
-  if (proposal.edits.length === 0) {
-    progress(
-      `    tightening repair proposed no edits: ${proposal.rationale || 'no rationale given'}`,
-    );
-    return null;
-  }
-  const applied = await applyTextEdits(dir, proposal.edits);
-  if (applied.applied.length === 0) {
-    progress(`    tightening repair: none of ${proposal.edits.length} edit(s) matched the source`);
-    return null;
-  }
-  progress(
-    `    tightening repair: applied ${applied.applied.length} of ${proposal.edits.length} edit(s)`,
+  // The compiler is the whole of the evidence here. Every error came from an
+  // annotation this step removed, so a change anywhere else is not tightening.
+  const run = await runTask(
+    harness,
+    dir,
+    TIGHTENING_TASK,
+    {
+      finding,
+      // Re-read: the files on disk are the stripped ones, not what the migration
+      // was shown, and the task promises the model exactly what it is holding.
+      sources: await loadSources(dir, finding, extraFiles),
+      errors,
+    },
+    migrationGate([], errors),
   );
-  return applied.applied.length;
+  if (!run.ok) {
+    progress(`    tightening repair unavailable: ${run.reason ?? 'unknown error'}`);
+    return null;
+  }
+  if (run.revertedHunks.length > 0) {
+    progress(`    tightening repair: reverted ${run.revertedHunks.length} unrequested hunk(s)`);
+  }
+  if (run.keptHunks === 0) {
+    progress('    tightening repair changed nothing the compiler had asked for');
+    return null;
+  }
+  progress(`    tightening repair: kept ${run.keptHunks} hunk(s)`);
+  return run.keptHunks;
 }
 
 /**
@@ -359,7 +337,7 @@ async function repairTightening(
  * spending three verifications chasing a nicer diff is the wrong trade.
  */
 async function reviewMigration(
-  asker: Asker,
+  harness: Harness,
   ws: Workspace,
   phaseOpts: { skipTests: boolean },
   baseline: Awaited<ReturnType<typeof runPhase>>,
@@ -385,22 +363,7 @@ async function reviewMigration(
   // and — below — the boundary of what it may change.
   const migrationDiff = await workspaceDiff(ws);
   const sources = await loadSources(ws.dir, finding, extraFiles);
-  const proposal = await runTask(asker, REVIEW_TASK, {
-    finding,
-    sources,
-    diff: migrationDiff,
-    deprecationGaps: describeDeprecationGaps(gaps),
-    candidateSymbols,
-  });
 
-  if (!proposal.ok) {
-    progress(`    review unavailable: ${proposal.error ?? 'unknown error'}`);
-    return null;
-  }
-  if (proposal.edits.length === 0) {
-    progress(`    review found nothing to change: ${proposal.rationale.slice(0, 160)}`);
-    return null;
-  }
   // The review's evidence gate. Every other stage has one; this was the gap, and
   // it showed on a live run — an unanchored review rewrote a working
   // `cancelToken` into an `AbortSignal`, changing an exported signature to
@@ -420,36 +383,51 @@ async function reviewMigration(
     )
     .flatMap((f) => f.sites.map((s) => ({ file: s.file, line: s.line })));
 
-  const { keep, dropped } = selectReviewEdits(
-    proposal.edits,
-    migrationDiff,
-    deprecatedSites,
-    sources,
+  const run = await runTask(
+    harness,
+    ws.dir,
+    REVIEW_TASK,
+    {
+      finding,
+      sources,
+      diff: migrationDiff,
+      deprecationGaps: describeDeprecationGaps(gaps),
+      candidateSymbols,
+    },
+    reviewGate(migrationDiff, deprecatedSites),
   );
-  if (dropped.length > 0) {
-    progress(`    review: withheld ${dropped.length} edit(s) outside the migration's diff`);
-  }
-  if (keep.length === 0) {
-    progress(`    review: nothing in scope of ${proposal.edits.length} proposed edit(s)`);
+
+  if (!run.ok) {
+    progress(`    review unavailable: ${run.reason ?? 'unknown error'}`);
     return null;
   }
-
-  const applied = await applyTextEdits(ws.dir, keep);
-  if (applied.applied.length === 0) {
-    progress(`    review: none of ${keep.length} edit(s) matched the source`);
+  if (run.revertedHunks.length > 0) {
+    progress(`    review: reverted ${run.revertedHunks.length} hunk(s) outside the migration's diff`);
+  }
+  if (run.keptHunks === 0) {
+    progress('    review found nothing in scope to change');
     return null;
   }
-  progress(`    review: applied ${applied.applied.length} of ${keep.length} edit(s)`);
-
+  progress(`    review: kept ${run.keptHunks} hunk(s)`);
   const report = compare(baseline, await runPhase(ws.dir, phaseOpts));
   if (verificationPassed(report.outcome)) {
-    progress(`  review kept: ${applied.applied.length} edit(s), still ${report.outcome}`);
-    return { report, applied: applied.applied.length };
+    progress(`  review kept: ${run.keptHunks} hunk(s), still ${report.outcome}`);
+    return { report, applied: run.keptHunks };
   }
 
   // The review broke it. The migration was already good; discard the opinion.
+  //
+  // Reverse-applying the review's own diff, rather than restoring snapshots.
+  // There are no snapshots: the harness wrote the files itself, and its diff is
+  // the only record of what it touched. Reverting by that record undoes exactly
+  // the review and leaves the migration underneath it intact.
   progress(`  review reverted: did not verify (${report.outcome})`);
-  await restoreSnapshots(ws.dir, applied.snapshots);
+  const undone = await revertHunks(ws.dir, run.diff, parseDiffHunks(run.diff));
+  if (undone.error) {
+    // Loud, because the workspace now holds a migration plus an opinion that
+    // broke it, and reporting the migration's earlier verdict would be a lie.
+    progress(`  review could NOT be reverted: ${undone.error}`);
+  }
   return null;
 }
 
@@ -732,39 +710,55 @@ export async function fixPackage(
     // replacement in symbols the target version really exports. Both are still
     // needed here, so both now come from the workspace diff rather than being
     // threaded out of a repair.
-    const agentRecord: FixResult['agent'] = undefined;
+
+    // Hoisted out of the polish block: the escalation needs it too, and it is the
+    // cheapest defence against an invented API — the model can still hallucinate,
+    // but it has no excuse to.
+    //
+    // Interleaved per finding rather than concatenated: concatenating means the
+    // prompt's cutoff falls inside the first finding's list, so with nine broken
+    // symbols the model never sees a replacement for eight of them.
+    const ranked = findings.map((f) => nearbySymbols(f.change.path, toSymbols));
+    const candidates: string[] = [];
+    const seenCandidates = new Set<string>();
+    for (let k = 0; k < Math.max(0, ...ranked.map((r) => r.length)); k++) {
+      for (const list of ranked) {
+        const symbol = list[k];
+        if (symbol !== undefined && !seenCandidates.has(symbol)) {
+          seenCandidates.add(symbol);
+          candidates.push(symbol);
+        }
+      }
+    }
+
     if (llm.ok && verificationPassed(verification.outcome)) {
       const config = llm.asker;
       const dir = ws.dir;
       const diffSoFar = await workspaceDiff(ws);
       const extraFiles = await filesNamedInOutput(diffSoFar, dir);
 
-      // Interleaved per finding, as before: concatenating means the prompt's
-      // cutoff falls inside the first finding's list, so with nine broken
-      // symbols the model never sees a replacement for eight of them.
-      const ranked = findings.map((f) => nearbySymbols(f.change.path, toSymbols));
-      const candidates: string[] = [];
-      const seen = new Set<string>();
-      for (let k = 0; k < Math.max(0, ...ranked.map((r) => r.length)); k++) {
-        for (const list of ranked) {
-          const symbol = list[k];
-          if (symbol !== undefined && !seen.has(symbol)) {
-            seen.add(symbol);
-            candidates.push(symbol);
-          }
-        }
+      // §11: the harness is the only thing that changes code, so a run without
+      // one repairs nothing here and has to say so. Silence would read as "there
+      // was nothing to tighten", which is the opposite claim.
+      const writer = options.harness;
+      if (!writer) {
+        progress('  no harness configured: skipping tightening and review');
       }
 
-      const tightened = await tightenAny(dir, phaseOpts, baseline, progress, (errors) =>
-        repairTightening(config, dir, agentFinding, extraFiles, progress, errors),
-      );
+      const tightened = writer
+        ? await tightenAny(dir, phaseOpts, baseline, progress, (errors) =>
+            repairTightening(writer, dir, agentFinding, extraFiles, progress, errors),
+          )
+        : null;
       if (tightened) verification = tightened;
 
       // Green, and now: is it worth merging? Verification cannot answer that.
-      const reviewed = await reviewMigration(
-        config, ws, phaseOpts, baseline, agentFinding, findings,
-        extraFiles, candidates, progress,
-      );
+      const reviewed = writer
+        ? await reviewMigration(
+            writer, ws, phaseOpts, baseline, agentFinding, findings,
+            extraFiles, candidates, progress,
+          )
+        : null;
       if (reviewed) {
         verification = reviewed.report;
         appliedCount += reviewed.applied;
@@ -813,16 +807,21 @@ export async function fixPackage(
             .map((f) => f.change.path),
         );
 
-        const escalation = await escalate(
+        // MIGRATION_TASK, not an instruction written here. This was five
+        // sentences that re-derived, badly, what the migration task already
+        // says at length: the API diff, the call sites, the symbols the new
+        // version actually exports, the blast radius of the model's own edit,
+        // and the narrowing rule. Byam's finding is that those are exactly what
+        // moves the number, and this path had the harness guessing without them.
+        const escalation = await runTask(
           harness,
           ws.dir,
+          MIGRATION_TASK,
           {
-            instruction:
-              `The dependency ${pkg} was upgraded from ${fromVersion} to ${toVersion} in this ` +
-              `repository, and the build no longer succeeds. Make the smallest set of changes ` +
-              `that gets it building and passing its own tests again.\n\n` +
-              `Change nothing the upgrade does not require. No new features, no reformatting, ` +
-              `no refactoring of code that already works.\n\n${NARROWING.text}`,
+            finding: agentFinding,
+            changes: findings.map((f) => ({ change: f.change, sites: f.sites })),
+            sources,
+            candidateSymbols: candidates,
             failureOutput,
           },
           migrationGate(
@@ -887,7 +886,6 @@ export async function fixPackage(
       bump,
       workspaceDir: ws.dir,
       workspaceMode: ws.mode,
-      ...(agentRecord ? { agent: agentRecord } : {}),
       ...(harnessRecord ? { harness: harnessRecord } : {}),
       ...(reviewNotes ? { reviewNotes } : {}),
     };
@@ -1001,7 +999,6 @@ export interface PackageFixResult {
   bump: CommandResult | null;
   workspaceDir: string | null;
   workspaceMode: string | null;
-  agent?: FixResult['agent'];
   /** Present only when a harness was configured and the build was still red. */
   harness?: HarnessEscalation;
 }
@@ -1061,7 +1058,6 @@ export async function fixFinding(
     bump: pkgResult.bump,
     workspaceDir: pkgResult.workspaceDir,
     workspaceMode: pkgResult.workspaceMode,
-    ...(pkgResult.agent ? { agent: pkgResult.agent } : {}),
     ...(pkgResult.harness ? { harness: pkgResult.harness } : {}),
   };
 }
@@ -1092,7 +1088,6 @@ export interface VulnFixResult {
    * agent was asked to repair it. Absent means no repair was attempted — which
    * is the answer whenever the advisory did *not* clear.
    */
-  agent?: FixResult['agent'];
   note?: string;
 }
 
@@ -1239,22 +1234,23 @@ export async function fixVulnerability(
     // What still runs is polish on a bump that landed clean: tightening, then
     // the gated review. Both discover their own files from the diff now, which
     // is what the deleted repair loop was doing for them.
-    let agentRecord: FixResult['agent'];
     const llm = asker({ disabled: options.useAgent !== true });
     if (!llm.ok && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
 
-    if (llm.ok && verificationPassed(verification.outcome)) {
+    const writer = options.harness;
+    if (llm.ok && !writer) progress('  no harness configured: skipping tightening and review');
+    if (writer && verificationPassed(verification.outcome)) {
       const dir = ws.dir;
       const extraFiles = await filesNamedInOutput(await workspaceDiff(ws), dir);
       const polishFinding: Finding = { ...finding, toVersion: worst ?? finding.toVersion };
 
       const tightened = await tightenAny(dir, phaseOpts, baseline, progress, (errors) =>
-        repairTightening(llm.asker, dir, polishFinding, extraFiles, progress, errors),
+        repairTightening(writer, dir, polishFinding, extraFiles, progress, errors),
       );
       if (tightened) verification = tightened;
 
       const reviewed = await reviewMigration(
-        llm.asker, ws, phaseOpts, baseline, polishFinding, [],
+        writer, ws, phaseOpts, baseline, polishFinding, [],
         extraFiles, [], progress,
       );
       if (reviewed) verification = reviewed.report;
@@ -1283,7 +1279,6 @@ export async function fixVulnerability(
       resolved,
       overrode,
       ...(reviewNotes ? { reviewNotes } : {}),
-      ...(agentRecord ? { agent: agentRecord } : {}),
       installedAfter: worst,
       verification,
       diff: await workspaceDiff(ws),
@@ -1396,7 +1391,11 @@ export async function fixLint(
     const llm = asker({ disabled: options.useAgent !== true });
     if (!llm.ok && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
 
-    if (unrepairable.length > 0 && llm.ok) {
+    const lintWriter = options.harness;
+    if (unrepairable.length > 0 && !lintWriter) {
+      progress('  no harness configured: cannot repair what the linter\'s own autofix could not');
+    }
+    if (unrepairable.length > 0 && lintWriter) {
       const targets = unrepairable.map((u) => ({
         file: u.finding.sites[0]?.file ?? '',
         line: u.finding.sites[0]?.line ?? 1,
@@ -1409,26 +1408,30 @@ export async function fixLint(
         if (body !== null) sources.set(file, body);
       }
 
-      progress(`  asking ${llm.asker.model} to repair ${targets.length} finding(s) no tool can`);
-      const proposal = await runTask(llm.asker, LINT_TASK, { findings: targets, sources });
-      if (!proposal.ok) {
-        progress(`    provider error: ${proposal.error}`);
+      progress(`  asking ${lintWriter.id} to repair ${targets.length} finding(s) no tool can`);
+      const run = await runTask(
+        lintWriter,
+        ws.dir,
+        LINT_TASK,
+        { findings: targets, sources },
+        lintGate(targets),
+      );
+      if (!run.ok) {
+        progress(`    ${lintWriter.id} could not repair these: ${run.reason ?? 'no reason given'}`);
         stillUnrepairable.push(...unrepairable);
       } else {
-        const { keep, dropped } = selectLintEdits(proposal.edits, targets, sources);
-        if (dropped.length > 0) {
-          progress(`    withheld ${dropped.length} edit(s) on lines no linter flagged`);
+        if (run.revertedHunks.length > 0) {
+          progress(`    reverted ${run.revertedHunks.length} hunk(s) on lines no linter flagged`);
         }
-        const applied = await applyTextEdits(ws.dir, keep);
-        agentEdits = applied.applied.length;
-        progress(`    ${agentEdits} applied, ${applied.failed.length} rejected`);
+        agentEdits = run.keptHunks;
+        progress(`    ${agentEdits} hunk(s) kept`);
         // Only what the model actually changed leaves the unrepairable list.
-        const touched = new Set(applied.applied.map((e) => e.file));
+        const touched = new Set(parseDiffHunks(run.diff).map((h) => h.file));
         stillUnrepairable.push(
           ...unrepairable.filter((u) => !touched.has(u.finding.sites[0]?.file ?? '')),
         );
       }
-    } else {
+    } else if (unrepairable.length > 0) {
       stillUnrepairable.push(...unrepairable);
     }
 

@@ -20,4 +20,4 @@ export const swatch = (fill) => fill.trim();
 
 ```
 
-Produce the JSON now. Fix the bodies; leave the parameters inferred.
+Make the changes now. Fix the bodies; leave the parameters inferred.

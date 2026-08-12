@@ -337,12 +337,10 @@ export async function runCase(
       ...base,
       verdict: result.verification.outcome,
       editsApplied: result.appliedEdits,
-      editsWithheld: (result.agent?.attempts ?? []).reduce(
-        (n, a) => n + (a.droppedEdits?.length ?? 0),
-        0,
-      ),
-      errorsBefore: result.agent?.initialErrors ?? 0,
-      errorsAfter: result.agent?.finalErrors ?? 0,
+      // From the harness, which is the only thing that writes now. It reports
+      // reverted hunks rather than withheld edits — same question, and the only
+      // shape there is left to ask it in.
+      editsWithheld: result.harness?.revertedHunks.length ?? 0,
       typeEscapes: countTypeEscapes(result.diff),
       deprecationGaps: gaps.length,
       // Recorded from the run rather than from the request: a harness that was

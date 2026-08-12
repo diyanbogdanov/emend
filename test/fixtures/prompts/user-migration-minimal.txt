@@ -19,4 +19,4 @@ export const Chart = () => null;
 
 ```
 
-Produce the JSON now.
+Make the changes now.

@@ -155,11 +155,11 @@ first page as the whole answer.
                               ▼                                 │
               FINDINGS  (what, where, how strong, why)          │
                               │                                 │
-        ┌─────────────────────┬─────────────────────┐           │
-        ▼                     ▼                     ▼           │
-  deterministic plan   [structured edits]     harness session   │
-  (rename-class)        DORMANT, §4           (opencode + MCP)  │
-        └─────────────────────┴─────────────────────┘           │
+        ┌─────────────────────┴─────────────────────┐           │
+        ▼                                           ▼           │
+  deterministic plan                          harness session   │
+  (rename-class, no model)                    (opencode + MCP)  │
+        └─────────────────────┬─────────────────────┘           │
                               ▼                                 │
                     isolated git worktree                       │
                               │                                 │
@@ -176,16 +176,17 @@ first page as the whole answer.
          verified · regression · unverified · unreviewed  ──────┘
 ```
 
-Two model-driven routes, not one, and the split is deliberate: a proposed edit
-whose `find` matches nothing is rejected before anything is written, where a
-harness writes first and is judged after by `gate.ts`. Merging them would mean
-choosing which of those two safety properties to keep. What *is* unified is the
-boundary — both reach a model through `harness.ts` and nothing else does.
+**One writer.** There used to be two model-driven routes here — a proposer whose
+`find`/`replace` pairs Emend located and applied, and a harness that wrote
+directly — and the first *failed closed*: an invented `find` matched nothing, so
+a hallucination was rejected before a byte was written. That was traded
+deliberately (spec §11), and what stands in its place is the gate, the
+verification below it, and the behaviour review.
 
-The middle route is currently dormant, so the only live model-driven path from a
-finding to a repair is the harness. The structured tasks that do run — tightening,
-finishing deprecations, review — sit *after* verification rather than at that
-fork, because they repair what a migration left behind rather than producing one.
+The consequence to know about: `opencode` is now required for any model-driven
+repair. There is no fallback, because a fallback is a second writer, so a run
+without it reports that it could not repair. *Could not fix is not the same as
+nothing to fix.*
 
 ### Detect
 
@@ -259,8 +260,8 @@ wrong answer gets:
 
 | Verb | What it is | Why a wrong answer is contained |
 | --- | --- | --- |
-| `ask(system, user)` | Messages in, text out. Never touches the checkout. | The caller interprets the answer. A proposed edit whose `find` string matches nothing is rejected before anything is written — it **fails closed**. |
-| `run(dir, task)` | A subprocess with tools, working in a directory. | It writes first and is judged after, by `gate.ts`: any changed region the failure did not ask for is reverted before verification. |
+| `ask(system, user)` | Messages in, text out. **Never touches the checkout.** | The caller interprets the answer. Used for PR summaries and read-only reviews — work that is reported, not applied. |
+| `run(dir, task)` | A subprocess with tools, working in a directory. **The only thing that changes a file.** | It writes first and is judged after, by `gate.ts`: any changed region the evidence did not ask for is reverted before verification. |
 
 That split is why the structured path was not folded into the harness when the
 two were unified. Byam's 27% is the case for keeping a constrained strategy;
@@ -300,8 +301,9 @@ still agree.
 Anything said *once* stays inline in its task. A single-use fragment given a name
 is sharing that is not happening, and it costs every reader a hop to find out.
 
-`runTask(asker, task, ctx)` is the single entry point. The task supplies its
-parts; the harness composes the two prompts and calls `ask`. What that buys is
+`runTask(harness, dir, task, ctx, gate)` is the single entry point. The task
+supplies its parts, the harness composes them and runs the job in the checkout,
+and the gate decides what may stay. What that buys is
 not brevity. It is that a disagreement between two jobs becomes the presence or
 absence of a *named* skill — `REVIEW_TASK.rules.includes(NARROWING)` is a
 question with an answer, where "does the review prompt mention narrowing" is a
@@ -321,23 +323,24 @@ commit behind `eval.ts`.
 
 The model participates where the answer is a judgement:
 
-| Pass | What it does | Constraint |
+| Job | What it does | What its gate anchors on |
 | --- | --- | --- |
-| Tightening | Strips parameter `any` and repairs what that exposes | No filesystem, no shell. Reverted wholesale if verification fails. |
-| Review | Decides whether a green migration is worth merging, and edits it | Every edit checked against the migration's own diff; one that overlaps nothing it changed is discarded |
-| Lint repair | Fixes what an external linter reported in a Dockerfile or shell script | Edits away from every flagged line are dropped — lint has no hidden cause |
-| Harness escalation (`harness.ts`) | An opencode session with edit rights, when the deterministic plan leaves the build red | Every hunk held to the evidence rule; anything the failure did not ask for is reverted |
-| Behaviour review (`reviewharness.ts`) | Reads the repository and reports what the diff cannot show | Read-only, enforced by comparing the workspace |
+| Migration | Carries the code onto the new version when the deterministic plan cannot | Compiler diagnostics, plus call sites of deprecations still present. Allows a change nothing knows about — a bump breaks Dockerfiles the call-site walk never visits |
+| Tightening | Strips parameter `any` and repairs what that exposes | The compiler alone: every error came from an annotation this step removed |
+| Review | Decides whether a green migration is worth merging, and edits it | Lines the migration's own diff touched, plus unfinished deprecations. **Reverts** everything else — it runs on a green build, so there is no silence to abstain on |
+| Lint repair | Fixes what an external linter reported in a Dockerfile or shell script | The flagged lines, with three lines of slack for continuations. **Reverts** everything else — the findings are the complete list |
+| Behaviour review (`reviewharness.ts`) | Reads the repository and reports what the diff cannot show | Nothing — it writes nothing. Read-only, enforced by comparing the workspace |
 
-**The structured *migration* repair is built and not wired.** `proposeEdits`,
-its prompt, `classifyEdits` and `selectEvidencedEdits` have no caller in `src/`;
-their loop was removed in `d4a0da9`, which recorded the consequence exactly:
-`emend fix --agent` no longer repairs a breaking upgrade from the CLI, and on the
-axios bait repo it went from FIXED to NOT FIXED. The reasoning was that repair
-belongs to an agent driving the MCP tools. That is a defensible place to put it
-and it is not where a CLI user stands, so this is an open gap rather than a
-finished design — it is the one thing between Emend and the claim on its own tin.
-The machinery to close it is all still here.
+The first four are the same mechanism: `runTask` composes the job, the harness
+runs it in the worktree, `gate.ts` reverts what the evidence did not ask for, and
+verification decides whether any of it stays. They differ in what they say and
+what anchors them, which is exactly what a task is.
+
+**The migration job was dormant until §11.** `d4a0da9` deleted the loop that
+drove it and recorded the cost — `emend fix --agent` stopped repairing breaking
+upgrades from the CLI, FIXED to NOT FIXED on the axios bait repo. It has a caller
+again, and it is a harness run: the escalation used to hand opencode five
+sentences that re-derived, badly, what this task already says at length.
 
 The rest is **on by default**. `--no-agent` and `--no-review` turn it off for runs
 that must stay offline or byte-for-byte reproducible. A finding the planner
@@ -387,7 +390,7 @@ src/
   verify.ts       baseline/post command running and comparison
   remediate.ts    the vulnerability remediation ladder
   fix.ts          the fix pipeline (per-package)
-  harness.ts      THE boundary: `ask`, `run`, `runTask` — nothing else reaches a model
+  harness.ts      THE boundary: `ask` reports, `run` writes, `runTask` drives a job
   gate.ts         is this change one the failure asked for? no model involved
   reviewharness.ts read-only repo-wide and behaviour reviews
   quality.ts      deprecation gaps left behind by a migration
@@ -404,7 +407,7 @@ src/
   github/         App auth, webhook intake, job runner, API pull requests
   llm/tasks.ts    the four jobs, each as skills + instructions + a renderer
   llm/skills.ts   instruction fragments, named once and shared by reference
-  llm/propose.ts  the structured strategy: send, parse, gate what comes back
+  llm/symbols.ts  symbols the new version really exports, to ground a replacement
   llm/client.ts   the HTTP transport
   llm/providers.ts provider presets
 ```
@@ -452,7 +455,7 @@ first.
 ## 7. Testing
 
 ```bash
-npm test            # 611 tests, node:test, no framework
+npm test            # 578 tests, node:test, no framework
 npm run typecheck   # tsc --noEmit; the real gate
 npm run audit:removals
 ```

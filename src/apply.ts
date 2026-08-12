@@ -210,8 +210,18 @@ export async function applyEdits(dir: string, edits: PlannedEdit[]): Promise<Edi
   return { applied, failed };
 }
 
+/**
+ * A located replacement: find this exact text, put that in its place.
+ *
+ * Deterministic edits only, now. An identical shape called `TextEdit` lived in
+ * the model layer, where `find` matching nothing was the fail-closed property
+ * that made a proposer safe. §11 removed the proposer; what still produces these
+ * is the rename planner and the manifest rewriter, neither of which consults a
+ * model. Two names for four fields was already one too many.
+ */
 export interface TextEditRequest {
   file: string;
+  /** Exact, unique substring to replace. Emend locates it; nothing guesses. */
   find: string;
   replace: string;
   reason: string;

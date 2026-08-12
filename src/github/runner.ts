@@ -132,7 +132,6 @@ export async function proposeMigrations(opts: ProposeOptions): Promise<number> {
         bump: result.bump,
         workspaceDir: result.workspaceDir,
         workspaceMode: result.workspaceMode,
-        ...(result.agent ? { agent: result.agent } : {}),
       };
 
       const branch = `emend/${branchSlug(pkgName)}-${first.toVersion}`;

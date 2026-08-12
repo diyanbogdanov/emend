@@ -33,10 +33,8 @@ import {
 import { chat } from './llm/client.ts';
 import { PROVIDERS, resolveAgent, resolveLlmConfig } from './llm/providers.ts';
 import { listModels } from './llm/client.ts';
-import { propose, type AgentProposal } from './llm/propose.ts';
 import type { Task } from './llm/tasks.ts';
 import type { Skill } from './llm/skills.ts';
-import type { CallSite, SurfaceChange } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -804,26 +802,25 @@ export function driveContractPrompt(input: {
 const textOf = (part: string | Skill): string => (typeof part === 'string' ? part : part.text);
 
 /**
- * A task's two prompts, without sending them anywhere.
+ * A task's instruction, without running it.
  *
- * Separate from `runTask` so that what gets composed can be asserted without a
- * model, a key or a network. That is not a convenience: the prompts are the
- * least test-covered lines in the repository precisely because exercising them
- * normally means paying to run one, and composition is the half of that which
- * *can* be pinned down exactly. `test/prompts.golden.test.ts` pins it.
- *
- * Numbering is generated here rather than written into each rule, so a rule
- * inserted in the middle costs nothing and cannot silently produce two rule 7s.
+ * Separate from `runTask` so that what a job says can be asserted without a
+ * model, a binary or a network. That is not a convenience: these are the least
+ * test-covered lines in the repository precisely because exercising them
+ * normally means paying to run one, and composition is the half that *can* be
+ * pinned down exactly. `test/prompts.golden.test.ts` pins it.
  */
-export function composePrompts<Ctx>(task: Task<Ctx>, ctx: Ctx): { system: string; user: string } {
-  return { system: systemPrompt(task), user: task.render(ctx) };
+export function composeInstruction<Ctx>(task: Task<Ctx>, ctx: Ctx): string {
+  return `${systemPrompt(task)}\n\n${task.render(ctx)}`;
 }
 
 /**
- * The system half alone, which is the half that does not depend on a run.
+ * The rules half alone, which is the half that does not depend on a run.
  *
- * Its own function because that independence is worth being able to use: asking
- * what a task tells the model should not require inventing a context for it.
+ * Its own function because that independence is worth using: asking what a task
+ * tells the model should not require inventing a context for it. Numbering is
+ * generated here rather than written into each rule, so a rule inserted in the
+ * middle costs nothing and cannot silently produce two rule 7s.
  */
 export function systemPrompt<Ctx>(task: Task<Ctx>): string {
   const rules = task.rules.map((rule, i) => `${i + 1}. ${textOf(rule)}`).join('\n');
@@ -831,47 +828,46 @@ export function systemPrompt<Ctx>(task: Task<Ctx>): string {
 }
 
 /**
- * Run one job. The third verb, and the one every structured repair goes through.
+ * Run one job in a checkout. **The only way anything in Emend changes code.**
  *
- * `ask` and `run` are the two ways a model can be reached; this is the way a
- * *feature* reaches one. Before it there were four functions that each knew a
- * system prompt, a renderer and how to call `ask`, so adding a fifth job meant
- * writing all three again and re-deriving which shared rules it needed. A task
- * declares those; the composition is here, once.
+ * §11 of the model-boundary spec: one writer. Before it there were two — a
+ * proposer whose `find` strings Emend located and applied, and a harness that
+ * wrote directly — and keeping both meant two gates, two failure vocabularies
+ * and two things to improve whenever repair got better.
+ *
+ * What that traded is stated in §11.1 and is not small: the proposer failed
+ * closed, because an invented `find` matches nothing and is rejected before a
+ * byte is written. A harness writes first. Standing in its place are `gate`,
+ * which reverts every changed region the evidence did not ask for, and the
+ * verification that follows in a throwaway worktree — which is the real
+ * backstop, and does not care who wrote the bytes.
+ *
+ * `failureOutput` stays empty: every task's renderer already places the compiler
+ * output where that task wants it, with its own truncation limit and its own
+ * sentence about what to do with it. Passing it again here would print it twice
+ * and let the two copies disagree about how much was shown.
  */
 export async function runTask<Ctx>(
-  asker: Asker,
+  harness: Harness,
+  dir: string,
   task: Task<Ctx>,
   ctx: Ctx,
-): Promise<AgentProposal> {
-  const { system, user } = composePrompts(task, ctx);
-  return propose(asker, system, user);
+  gate: HunkGate,
+): Promise<EscalationResult> {
+  return escalate(harness, dir, { instruction: composeInstruction(task, ctx), failureOutput: '' }, gate);
 }
 
 /**
- * The structured strategy, re-exported so a feature imports LLM work from here
- * and nowhere else.
+ * Symbol grounding, re-exported so a feature imports model-adjacent work from
+ * here and nowhere else.
  *
- * The two ways to get a model to change code stay separate implementations —
- * one proposes edits Emend locates and applies, so a hallucinated `find`
- * matches nothing and fails closed; the other writes to the checkout and is
- * judged afterwards by `gate.ts`. That difference is load-bearing and is why
- * they are not one function. What was gratuitous was making a caller know which
- * file each lived in: `fix.ts` imported half its model work from `harness.ts`
- * and half from `llm/propose.ts`, and nothing about the split told a reader why.
- *
- * The request, the parsing and the edit gate stay in `llm/propose.ts`, and what
- * the tasks say stays in `llm/tasks.ts`, because both are long and this file is
- * the boundary, not a drawer.
+ * What used to be re-exported alongside it was the whole structured strategy —
+ * a proposer, its parser and its edit gate. §11 removed it: `run` is the only
+ * verb that changes a file, and `ask` survives for work that never touches the
+ * checkout. `nearbySymbols` is neither; it reads a surface Emend already
+ * extracted, and it is here because the tasks it grounds are.
  */
-export {
-  selectLintEdits,
-  selectReviewEdits,
-  nearbySymbols,
-  type TextEdit,
-  type EditClassification,
-  type AgentProposal,
-} from './llm/propose.ts';
+export { nearbySymbols } from './llm/symbols.ts';
 export {
   MIGRATION_TASK,
   REVIEW_TASK,
@@ -883,7 +879,7 @@ export {
   type TighteningContext,
   type LintFixContext,
 } from './llm/tasks.ts';
-export { NARROWING, RESPONSE_SHAPE, type Skill } from './llm/skills.ts';
+export { NARROWING, WRITE_AND_REPORT, type Skill } from './llm/skills.ts';
 
 /**
  * What a provider serves, for `emend models`.

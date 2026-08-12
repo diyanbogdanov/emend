@@ -184,7 +184,9 @@ test('the review prompt demands the deprecation be finished before anything else
   assert.match(REVIEW_SYSTEM_PROMPT, /repeated at three or more call sites is a missing helper/);
   assert.match(REVIEW_SYSTEM_PROMPT, /renders a real string as "0"/);
   // And the licence to decline, so the pass does not invent work to look busy.
-  assert.match(REVIEW_SYSTEM_PROMPT, /empty "edits" array/);
+  // Worded as "change nothing" since §11: there is no edit array to return
+  // empty, and the licence is what mattered, not the shape it was expressed in.
+  assert.match(REVIEW_SYSTEM_PROMPT, /change nothing and say why/);
 });
 
 test('the review prompt says what to do with a comment the migration made false', () => {

@@ -64,31 +64,4 @@ src/Legend.tsx(3,32): error TS2304: Cannot find name 'Cell'.
 ```
 Fix exactly what this output reports, plus the deprecations listed above — those never appear here, because deprecated code compiles. Do not edit anything else, however plausible the change looks.
 
-# Your previous attempts FAILED verification (2)
-## Attempt 1 — rejected, do not propose these again
-```json
-[
-  {
-    "file": "src/Chart.tsx",
-    "find": "value.toFixed(1)",
-    "replace": "Number(value ?? 0).toFixed(1)",
-    "reason": "guard the undefined"
-  }
-]
-```
-Outcome: renders NaN for string values
-## Attempt 2 — rejected, do not propose these again
-```json
-[
-  {
-    "file": "src/Legend.tsx",
-    "find": "<Cell fill={fill} />",
-    "replace": "<Rectangle fill={fill} />",
-    "reason": "Cell was removed"
-  }
-]
-```
-Outcome: src/Legend.tsx(3,32): error TS2741: Property 'width' is missing.
-Propose a DIFFERENT fix. Repeating an edit listed above will fail the same way. Note the source shown above is the ORIGINAL, unmodified file — your new edits apply to that, not to any previous attempt.
-
-Produce the JSON now.
+Make the changes now.

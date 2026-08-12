@@ -49,7 +49,7 @@ const SOURCES = new Map([
   ],
 ]);
 
-/** Everything optional present: candidates, impact, failure output, two attempts. */
+/** Everything optional present: candidates, impact, failure output. */
 export const MIGRATION_FULL: AgentContext = {
   finding: FINDING,
   changes: [
@@ -86,30 +86,6 @@ export const MIGRATION_FULL: AgentContext = {
   candidateSymbols: ['Tooltip', 'ValueType', 'NameType', 'Rectangle', 'Customized'],
   failureOutput:
     "src/Chart.tsx(4,38): error TS18048: 'value' is possibly 'undefined'.\nsrc/Legend.tsx(3,32): error TS2304: Cannot find name 'Cell'.",
-  previousAttempts: [
-    {
-      edits: [
-        {
-          file: 'src/Chart.tsx',
-          find: 'value.toFixed(1)',
-          replace: 'Number(value ?? 0).toFixed(1)',
-          reason: 'guard the undefined',
-        },
-      ],
-      errors: 'renders NaN for string values',
-    },
-    {
-      edits: [
-        {
-          file: 'src/Legend.tsx',
-          find: '<Cell fill={fill} />',
-          replace: '<Rectangle fill={fill} />',
-          reason: 'Cell was removed',
-        },
-      ],
-      errors: "src/Legend.tsx(3,32): error TS2741: Property 'width' is missing.",
-    },
-  ],
   impact: [
     {
       name: 'swatch',

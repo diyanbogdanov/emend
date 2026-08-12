@@ -960,18 +960,6 @@ async function runVulnerabilityFixes(
       console.log(`    ${c.yellow(`[${f.severity}]`)} ${f.file}  ${c.dim(f.what)}`);
       console.log(c.dim(`        ${f.why}`));
     }
-    // A repaired fix and a fix that never needed repair are not the same result,
-    // and a reviewer reading the diff is entitled to know which one this is.
-    if (result.agent) {
-      const { attempts, finalErrors, initialErrors } = result.agent;
-      console.log(
-        c.dim(
-          `    repaired the breaking upgrade in ${attempts.length} attempt(s), ` +
-            `${initialErrors} → ${finalErrors} error(s)`,
-        ),
-      );
-    }
-
     // Two conditions, and both must hold. A green build with the vulnerable
     // version still installed is the failure most easily mistaken for success.
     const passed = result.verification !== null && verificationPassed(result.verification.outcome);
@@ -1115,29 +1103,19 @@ async function runPackageFixes(
             : v.outcome === 'pre-existing-failure'
               ? c.yellow('INCONCLUSIVE (repo was already failing)')
               : c.yellow('UNVERIFIED');
-    const source = result.agent
-      ? c.magenta(`deterministic + agent(${result.agent.model})`)
+    const source = result.harness
+      ? c.magenta(`deterministic + ${result.harness.id}`)
       : c.dim('deterministic');
     console.log(`    ${badge}  ${source}  ${c.dim(`${result.appliedEdits} edit(s)`)}`);
     console.log(`    ${c.dim(v.summary)}`);
 
-    if (result.unplanned.length > 0 && !result.agent) {
+    if (result.unplanned.length > 0 && !result.harness) {
       console.log(
         c.yellow(
-          `    ${result.unplanned.length} finding(s) had no deterministic fix${agentAllowed(args) ? ' and the model did not land one' : ' — this run was --no-agent'}:`,
+          `    ${result.unplanned.length} finding(s) had no deterministic fix${agentAllowed(args) ? ' and no harness ran on them' : ' — this run was --no-agent'}:`,
         ),
       );
       for (const f of result.unplanned) console.log(c.dim(`      · ${f.change.path}`));
-    }
-    if (result.agent) {
-      for (const a of result.agent.attempts) {
-        console.log(
-          c.dim(`      attempt ${a.attempt}: ${a.outcome}${a.error ? ` — ${a.error.slice(0, 120)}` : ''}`),
-        );
-      }
-      if (result.agent.rationale) {
-        console.log(c.dim(`      rationale: ${result.agent.rationale.slice(0, 200)}`));
-      }
     }
     if (result.harness) {
       const h = result.harness;
@@ -1167,11 +1145,10 @@ async function runPackageFixes(
       }
     }
 
-    const rationale =
-      result.plans.map((p) => p.rationale).join(' ') || result.agent?.rationale || null;
-    const agent = result.agent
-      ? { model: result.agent.model, provider: result.agent.provider }
-      : null;
+    const rationale = result.plans.map((p) => p.rationale).join(' ') || null;
+    // Which harness wrote it, recorded so a stored run can be attributed. The
+    // provider is opencode's own configuration now, not Emend's to know.
+    const agent = result.harness ? { model: result.harness.id, provider: 'harness' } : null;
     for (const f of findings) {
       ctx.store.recordRun(f.id, repoDir, v, rationale, result.diff, agent);
     }

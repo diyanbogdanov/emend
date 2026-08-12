@@ -25,27 +25,34 @@ export interface Skill {
 }
 
 /**
- * The output contract the repair tasks depend on.
+ * How a job that writes files reports what it did.
  *
- * \`propose\` parses one shape and one shape only, so a task that drifted here
- * would produce edits the parser silently drops — downstream, a model that
- * answered perfectly and a model that was unreachable look the same.
+ * Replaces the JSON edit-set contract the four tasks shared until §11. That
+ * contract existed because a proposer had to hand its work to a parser; an agent
+ * working in the checkout has no parser between it and the disk, and telling it
+ * to emit JSON is telling it to describe a change instead of making one.
  *
- * \`LINT_TASK\` deliberately does not use this. It states the same contract
- * inline and more compactly, so there are two statements of one parser's
- * requirements to keep in step by hand. Unifying them would change wording a
- * model has been measured against, which is an experiment for its own commit.
+ * The three things the old contract carried are kept, because each was load
+ * bearing and none of them was about JSON: a rationale, a confidence, and the
+ * statement that changing nothing is a valid answer. The last one matters most —
+ * a pass that invents work to look busy is worse than one that declines, and
+ * without saying so the model treats an empty result as failure.
+ *
+ * Shared by all four tasks. `LINT_TASK` used to state the same contract inline
+ * in its own words, which meant two statements of one requirement kept in step
+ * by hand; there is no parser left for them to disagree about, so there is one.
  */
-export const RESPONSE_SHAPE: Skill = {
-  name: 'response-shape',
-  text: `Respond with exactly this shape:
-{
-  "edits": [{"file": "src/x.ts", "find": "<exact unique substring>", "replace": "<replacement>", "reason": "<short why>"}],
-  "rationale": "<one or two sentences on the overall change>",
-  "confidence": "high" | "medium" | "low"
-}`,
-};
+export const WRITE_AND_REPORT: Skill = {
+  name: 'write-and-report',
+  text: `Edit the files in the working directory directly. Do not print a patch, a JSON object, or a list of changes you would make — what is on disk when you finish is the result, and anything you only describe is lost.
 
+When you are done, finish with a short report:
+- what you changed and why, in one or two sentences
+- anything you could not fix, and what stopped you
+- how confident you are that the change is correct: high, medium or low
+
+Changing nothing is a valid outcome. If you cannot make a correct change, leave the files as they are and say why. An empty result is far better than a wrong one.`,
+};
 /**
  * How to handle a value whose type is a union, wherever one can turn up.
  *

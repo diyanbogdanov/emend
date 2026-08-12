@@ -1,19 +1,22 @@
 /**
- * The prompts are the same bytes after being restructured as they were before.
+ * Every word of every prompt, pinned.
  *
- * This is the whole licence for the tasks-and-skills refactor. What a prompt is
- * worth is measured by running it, so changing one is an experiment and belongs
- * in its own commit with an eval behind it. Rearranging *where the words live*
- * is only a refactor while the words are provably identical — and "provably"
- * cannot mean a careful reading, because the four system prompts run to 13KB and
- * differ from each other in ways a reader glides over.
+ * What a prompt is worth is measured by running it, so changing one is an
+ * experiment. These goldens make an accidental change impossible and a
+ * deliberate one visible: the four system prompts run to 13KB and differ from
+ * each other in ways a reader glides over, so "provably unchanged" cannot mean a
+ * careful reading.
  *
- * The goldens were generated from the hand-written builders at the commit before
- * they moved. They are not a snapshot of current behaviour that gets refreshed
- * when it changes; they are the measured wording, and a diff here means either a
- * mistake in the restructuring or a deliberate experiment that needs its own
- * commit and its own eval run. Refreshing them to make this pass is the one
- * thing that would make the whole exercise pointless.
+ * They were first taken from the hand-written builders, and held byte-identical
+ * across the tasks-and-skills restructuring — which is what made that a refactor
+ * rather than an experiment. §11 then changed the engine underneath them: an
+ * agent that writes files cannot be told to emit a JSON edit set, so the rules
+ * that said so had to go. **That regeneration is the experiment §8 governs**, and
+ * what is on trial is the engine, measured on the corpus.
+ *
+ * A diff here is therefore one of two things: a mistake, or a change that owes
+ * an eval run. Refreshing them to get to green, without knowing which, is the
+ * one action that makes the whole exercise pointless.
  */
 
 import test from 'node:test';
@@ -22,13 +25,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  composePrompts,
+  systemPrompt,
   MIGRATION_TASK,
   TIGHTENING_TASK,
   REVIEW_TASK,
   LINT_TASK,
   NARROWING,
-  RESPONSE_SHAPE,
+  WRITE_AND_REPORT,
 } from '../src/harness.ts';
 import {
   MIGRATION_FULL,
@@ -52,25 +55,25 @@ function golden(name: string): string {
 }
 
 test('the migration task composes exactly what its builders produced', () => {
-  const full = composePrompts(MIGRATION_TASK, MIGRATION_FULL);
+  const full = { system: systemPrompt(MIGRATION_TASK), user: MIGRATION_TASK.render(MIGRATION_FULL) };
   assert.equal(full.system, golden('system-migration'));
   assert.equal(full.user, golden('user-migration-full'));
 
   // The same task with every optional section absent: candidates, impact,
   // compiler output and attempt history each have to vanish completely rather
   // than leave their heading behind.
-  const minimal = composePrompts(MIGRATION_TASK, MIGRATION_MINIMAL);
+  const minimal = { system: systemPrompt(MIGRATION_TASK), user: MIGRATION_TASK.render(MIGRATION_MINIMAL) };
   assert.equal(minimal.user, golden('user-migration-minimal'));
 });
 
 test('the tightening task composes exactly what its builders produced', () => {
-  const composed = composePrompts(TIGHTENING_TASK, TIGHTENING);
+  const composed = { system: systemPrompt(TIGHTENING_TASK), user: TIGHTENING_TASK.render(TIGHTENING) };
   assert.equal(composed.system, golden('system-tightening'));
   assert.equal(composed.user, golden('user-tightening'));
 });
 
 test('the review task composes exactly what its builders produced', () => {
-  const full = composePrompts(REVIEW_TASK, REVIEW_FULL);
+  const full = { system: systemPrompt(REVIEW_TASK), user: REVIEW_TASK.render(REVIEW_FULL) };
   assert.equal(full.system, golden('system-review'));
   assert.equal(full.user, golden('user-review-full'));
 
@@ -78,14 +81,14 @@ test('the review task composes exactly what its builders produced', () => {
   // gaps gate the block, candidates gate a part of it — so it gets both halves
   // of its own branch rather than only the path the full fixture takes.
   assert.equal(
-    composePrompts(REVIEW_TASK, REVIEW_GAPS_NO_CANDIDATES).user,
+    REVIEW_TASK.render(REVIEW_GAPS_NO_CANDIDATES),
     golden('user-review-gaps-no-candidates'),
   );
-  assert.equal(composePrompts(REVIEW_TASK, REVIEW_CLEAN).user, golden('user-review-clean'));
+  assert.equal(REVIEW_TASK.render(REVIEW_CLEAN), golden('user-review-clean'));
 });
 
 test('the lint task composes exactly what its builders produced', () => {
-  const composed = composePrompts(LINT_TASK, LINT);
+  const composed = { system: systemPrompt(LINT_TASK), user: LINT_TASK.render(LINT) };
   assert.equal(composed.system, golden('system-lint'));
   assert.equal(composed.user, golden('user-lint'));
 });
@@ -119,14 +122,35 @@ test('the review task deliberately excludes the narrowing rule', () => {
   assert.ok(!LINT_TASK.rules.includes(NARROWING));
 });
 
-test('lint states the response contract in its own words, and that is visible', () => {
-  // The three repair tasks share one response-shape skill. Lint does not: its
-  // prompt spells the same contract out inline, more compactly. That divergence
-  // is real and is preserved byte-for-byte above — naming it here means the next
-  // person to touch the parser can see there are two statements of its contract
-  // to keep in step, instead of finding out from a dropped edit.
-  assert.ok(MIGRATION_TASK.closing.includes(RESPONSE_SHAPE));
-  assert.ok(TIGHTENING_TASK.closing.includes(RESPONSE_SHAPE));
-  assert.ok(REVIEW_TASK.closing.includes(RESPONSE_SHAPE));
-  assert.ok(!LINT_TASK.closing.includes(RESPONSE_SHAPE));
+test('all four tasks share one statement of how a writing job reports', () => {
+  // Lint used to spell the same contract out inline, in its own words, because
+  // the two were kept in step by hand and nobody had noticed they were the same
+  // requirement. There was a parser for them to disagree about; §11 removed it,
+  // and with it the reason to have two.
+  for (const closing of [
+    MIGRATION_TASK.closing,
+    TIGHTENING_TASK.closing,
+    REVIEW_TASK.closing,
+    LINT_TASK.closing,
+  ]) {
+    assert.ok(closing.includes(WRITE_AND_REPORT));
+  }
+});
+
+test('no task asks a writing agent for a JSON edit set', () => {
+  // The failure this prevents is quiet and total: told to emit JSON, an agent
+  // with write access describes the change instead of making it, the diff is
+  // empty, and the run reports that there was nothing to repair.
+  const composed = [
+    systemPrompt(MIGRATION_TASK),
+    systemPrompt(TIGHTENING_TASK),
+    systemPrompt(REVIEW_TASK),
+    systemPrompt(LINT_TASK),
+  ];
+  // Matching the *ask*, not the word. The skill that replaced these says "do
+  // not print ... a JSON object", so a looser pattern flags the fix as the bug.
+  const asks = /Output ONLY a JSON|Reply with JSON only|return an empty "edits"|"find" MUST be an exact substring/i;
+  for (const text of composed) {
+    assert.ok(!asks.test(text), text.slice(0, 60));
+  }
 });

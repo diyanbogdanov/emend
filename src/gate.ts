@@ -191,9 +191,20 @@ export function migrationGate(
  * that edit overlaps it. Three lines of slack is enough to reach the next
  * statement, which is exactly the drift being prevented.
  */
-export function reviewGate(migrationDiff: string): HunkGate {
+export function reviewGate(
+  migrationDiff: string,
+  /**
+   * Call sites of deprecations the migration reported and did not finish.
+   *
+   * Rule 4 of the review task outranks rule 6: finishing a deprecation is the
+   * migration completing its job, and the use it has to remove is frequently
+   * nowhere near the lines the migration touched. Without these the gate reverts
+   * exactly the repair the task ranks first.
+   */
+  unfinishedDeprecations: ReadonlyArray<Diagnostic> = [],
+): HunkGate {
   return {
-    anchors: touchedLines(migrationDiff),
+    anchors: [...touchedLines(migrationDiff), ...unfinishedDeprecations],
     unanchored: 'revert',
     whenNoAnchors: 'judge',
     evidenceName: 'the migration',

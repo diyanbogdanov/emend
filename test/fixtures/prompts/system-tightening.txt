@@ -5,25 +5,25 @@ A dependency migration has already been completed and verified. The `: any` anno
 Your job is to make that code correct at the point of use, leaving the parameters inferred.
 
 Rules you must follow:
-1. Output ONLY a JSON object. No prose, no markdown fences.
-2. Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.
-3. The source files you are shown are the CURRENT state, with the annotations ALREADY REMOVED. Copy "find" strings from what you are shown, never from what the code looked like before.
-4. NEVER re-add a parameter type annotation — not `: any`, and not a named type either. The parameter must stay inferred. Re-adding one undoes the entire point of this task.
-5. NEVER use a type assertion (`as X`), `@ts-ignore`, or `@ts-expect-error`.
-6. Editing the function BODY is exactly what this task requires. It is not a refactor and it is not out of scope. Change as much of the body as the fix needs, and nothing beyond that.
-7. Handle the real type. Choose the form by what the compiler says the type actually is:
+1. The source files you are shown are the CURRENT state, with the annotations ALREADY REMOVED. Read the files on disk rather than working from what the code looked like before — the annotations you may remember are gone.
+2. NEVER re-add a parameter type annotation — not `: any`, and not a named type either. The parameter must stay inferred. Re-adding one undoes the entire point of this task.
+3. NEVER use a type assertion (`as X`), `@ts-ignore`, or `@ts-expect-error`.
+4. Editing the function BODY is exactly what this task requires. It is not a refactor and it is not out of scope. Change as much of the body as the fix needs, and nothing beyond that.
+5. Handle the real type. Choose the form by what the compiler says the type actually is:
    a. The type is a union with more than one non-undefined member (for example `ValueType`, which is `number | string | ReadonlyArray<number | string>`) — you MUST narrow with a runtime check, and every branch must still produce a sensible result:
       `typeof value === 'number' ? value.toFixed(1) : String(value ?? '')`
       The branch that is NOT the numeric one must pass its value through, typically with `String(...)`. Do not funnel it back through `Number(...)`: `Number('n/a')` is `NaN`, so a label that was meant to read "n/a" reaches the user as "NaN". A `typeof` check whose else branch is `Number(value)` is the same silent bug wearing a disguise.
    b. Only `undefined` is the problem and the remaining type is already what you need — guard it:
       `value?.toFixed(1) ?? ''`
    Blanket coercion such as `Number(value ?? 0)` or `Number(value)` is NOT acceptable in case (a). It compiles, so nothing will object to it, but it renders a real string as "0" and a missing value as "NaN" — a silent behaviour change no test catches and no reviewer sees. Only reach for a coercion when the union has exactly one non-undefined member.
-8. The compiler output is the authoritative statement of what is broken. Fix what it reports, and do not edit code it does not complain about.
-9. If an error cannot be fixed without breaking one of these rules, leave it alone. A partial edit set is fine and expected — a file still failing simply keeps its original annotations.
+6. The compiler output is the authoritative statement of what is broken. Fix what it reports, and do not edit code it does not complain about.
+7. If an error cannot be fixed without breaking one of these rules, leave it alone. A partial repair is fine and expected — a file still failing simply keeps its original annotations.
 
-Respond with exactly this shape:
-{
-  "edits": [{"file": "src/x.ts", "find": "<exact unique substring>", "replace": "<replacement>", "reason": "<short why>"}],
-  "rationale": "<one or two sentences on the overall change>",
-  "confidence": "high" | "medium" | "low"
-}
+Edit the files in the working directory directly. Do not print a patch, a JSON object, or a list of changes you would make — what is on disk when you finish is the result, and anything you only describe is lost.
+
+When you are done, finish with a short report:
+- what you changed and why, in one or two sentences
+- anything you could not fix, and what stopped you
+- how confident you are that the change is correct: high, medium or low
+
+Changing nothing is a valid outcome. If you cannot make a correct change, leave the files as they are and say why. An empty result is far better than a wrong one.

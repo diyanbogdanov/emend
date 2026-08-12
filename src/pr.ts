@@ -237,45 +237,34 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
     lines.push(plan.rationale);
     lines.push('');
     lines.push(`Edits applied: **${result.appliedEdits}** of ${plan.edits.length}.`);
-  } else if (result.agent) {
-    // Agent-authored changes are labelled distinctly. A reviewer deserves to
-    // know which lines a model wrote versus which a deterministic rule produced.
+  } else if (result.harness) {
+    // Model-written changes are labelled distinctly. A reviewer deserves to know
+    // which lines a model wrote versus which a deterministic rule produced, and
+    // under §11 a model writing them is the only way they get written at all.
     lines.push(
-      `**Kind:** 🤖 model-generated — proposed by \`${result.agent.model}\` via ${result.agent.provider}.`,
+      `**Kind:** 🤖 model-generated — written by \`${result.harness.id}\` in an isolated worktree, then gated and verified.`,
     );
     lines.push('');
     lines.push(
       'The model was given the API contract diff, the located call sites, and the ' +
-        'set of symbols that exist in the new version. It proposed text edits; Emend ' +
-        'located and applied them, rejecting anything ambiguous, then verified the result.' +
-        // True of every PR the structured path produces, and false the moment a
-        // harness runs. Leaving it in place would be a false statement about how
-        // the change was made, in the section explaining how it was made.
-        (result.harness ? '' : ' The model never had filesystem or shell access.'),
+        'set of symbols that exist in the new version. It worked in an isolated ' +
+        'worktree with tools, and every region it changed was checked against that ' +
+        'evidence before anything was verified.',
     );
     lines.push('');
-    if (result.agent.rationale) lines.push(`> ${result.agent.rationale}`);
-    lines.push('');
-    lines.push('| Attempt | Outcome | Model confidence |');
-    lines.push('| --- | --- | --- |');
-    for (const a of result.agent.attempts) {
-      lines.push(`| ${a.attempt} | ${a.outcome}${a.error ? ` — ${a.error.slice(0, 100)}` : ''} | ${a.modelConfidence} |`);
-    }
-    lines.push('');
 
-    // Edits the model wanted that no diagnostic asked for. Withheld rather than
-    // applied, and named rather than hidden: they are usually valid code, which
-    // is exactly why verification cannot be what catches them, and why a
-    // reviewer should know they were proposed.
-    const withheld = result.agent.attempts.flatMap((a) => a.droppedEdits ?? []);
-    if (withheld.length > 0) {
+    // Regions the model changed that the evidence did not ask for. Reverted
+    // rather than kept, and named rather than hidden: they are usually valid
+    // code, which is exactly why verification cannot be what catches them, and
+    // why a reviewer should know they were attempted.
+    const reverted = result.harness.revertedHunks;
+    if (reverted.length > 0) {
       lines.push(
-        `<details><summary>${withheld.length} edit(s) withheld as not required by this upgrade</summary>`,
+        `<details><summary>${reverted.length} change(s) reverted as not required by this upgrade</summary>`,
       );
       lines.push('');
-      for (const w of withheld) {
-        lines.push(`- \`${w.edit.file}\` — ${w.reason}`);
-        lines.push(`  - proposed: \`${w.edit.find.replace(/\n/g, ' ').slice(0, 120)}\``);
+      for (const r of reverted) {
+        lines.push(`- \`${r.hunk.file}:${r.hunk.start}\` — ${r.reason}`);
       }
       lines.push('');
       lines.push('</details>');
