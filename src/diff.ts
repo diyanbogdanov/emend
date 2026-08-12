@@ -230,16 +230,20 @@ function comparableSignature(symbol: ApiSymbol, aliases?: ReadonlyMap<string, st
  * means the alias is left alone on both sides and nothing changes.
  */
 function agreedAliases(from: ApiSurface, to: ApiSurface): Map<string, string> {
+  const reduced = (text: string) => withoutPrinterSuffixes(canonicalType(text));
   const agreed = new Map<string, string>();
   const theirs = to.typeAliases ?? {};
   for (const [name, expansion] of Object.entries(from.typeAliases ?? {})) {
     const other = theirs[name];
     if (other === undefined) continue;
-    // Compared canonically, because an expansion whose union the printer
-    // reordered is the same expansion. Measured on query-core, three of the six
-    // aliases that appeared to move — `NetworkMode`, `QueryStatus`,
-    // `MutationStatus` — had moved only that way.
-    if (other === expansion || canonicalType(other) === canonicalType(expansion)) {
+    // Compared through the same reduction a signature gets, because every
+    // artifact that makes two renderings of one type differ applies here too.
+    // Measured on query-core and react-query, five of the six aliases that
+    // appeared to have moved between 5.51 and 5.101 had not: three were unions
+    // the printer reordered (`NetworkMode`, `QueryStatus`, `MutationStatus`) and
+    // one was its own disambiguating suffix (`React.ReactNode` against
+    // `React_2.ReactNode`).
+    if (other === expansion || reduced(other) === reduced(expansion)) {
       agreed.set(name, expansion);
     }
   }

@@ -764,3 +764,17 @@ test('a real change is still a change when an alias sits beside it', () => {
   });
   assert.equal(diffSurfaces(before, after).changes.length, 1);
 });
+
+test('an alias differing only by the printer’s own suffix still agrees', () => {
+  // react-query's `QueryClientProviderProps` renders `React.ReactNode` in one
+  // version and `React_2.ReactNode` in the other, which is the printer
+  // disambiguating two imports of the same name. Treating that as a
+  // disagreement suppressed a substitution that should have happened.
+  const before = surface('1.0.0', [sym('P', 'Props')], {
+    typeAliases: { Props: '{ children?: React.ReactNode; }' },
+  });
+  const after = surface('2.0.0', [sym('P', '{ children?: React.ReactNode; }')], {
+    typeAliases: { Props: '{ children?: React_2.ReactNode; }' },
+  });
+  assert.deepEqual(diffSurfaces(before, after).changes, []);
+});
