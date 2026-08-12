@@ -155,15 +155,19 @@ first page as the whole answer.
                               ▼                                 │
               FINDINGS  (what, where, how strong, why)          │
                               │                                 │
-        ┌─────────────────────┼─────────────────────┐           │
+        ┌─────────────────────┬─────────────────────┐           │
         ▼                     ▼                     ▼           │
-  deterministic plan     LLM agent            drive session     │
-  (rename-class)         (structured edits)   (opencode + MCP)  │
-        └─────────────────────┼─────────────────────┘           │
+  deterministic plan   [structured edits]     harness session   │
+  (rename-class)        DORMANT, §4           (opencode + MCP)  │
+        └─────────────────────┴─────────────────────┘           │
                               ▼                                 │
                     isolated git worktree                       │
                               │                                 │
               baseline → apply → verify → compare               │
+                              │                                 │
+                              ▼                                 │
+              tighten · finish deprecations · review            │
+              (structured edits, re-verified)                   │
                               │                                 │
                               ▼                                 │
                     behaviour review (read-only)                │
@@ -171,6 +175,17 @@ first page as the whole answer.
                               ▼                                 │
          verified · regression · unverified · unreviewed  ──────┘
 ```
+
+Two model-driven routes, not one, and the split is deliberate: a proposed edit
+whose `find` matches nothing is rejected before anything is written, where a
+harness writes first and is judged after by `gate.ts`. Merging them would mean
+choosing which of those two safety properties to keep. What *is* unified is the
+boundary — both reach a model through `harness.ts` and nothing else does.
+
+The middle route is currently dormant, so the only live model-driven path from a
+finding to a repair is the harness. The structured tasks that do run — tightening,
+finishing deprecations, review — sit *after* verification rather than at that
+fork, because they repair what a migration left behind rather than producing one.
 
 ### Detect
 
