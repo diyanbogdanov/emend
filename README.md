@@ -535,9 +535,26 @@ a new required parameter — value or type — because every existing call is th
 short an argument.
 
 Every other signature edit is reported as **drift**: something moved under you,
-with its call sites, and Emend cannot tell whether it bites. Measured on one
-large repository, of 44 such findings none had a shape a string comparison could
-prove either way — most were not function signatures at all, and roughly half
-were additions (a wider input union, an extra property on a returned object)
-that break nobody. Spending the word "breaking" on those is what makes it
-ignorable on the ones that deserve it.
+with its call sites, and Emend cannot tell whether it bites. Spending the word
+"breaking" on those is what makes it ignorable on the ones that deserve it.
+
+All 41 drift findings from one large repository, read individually:
+
+| what actually changed | n | is it a break? |
+| --- | --- | --- |
+| a parameter's name, or its destructuring pattern | 4 | **no — now suppressed** |
+| a type alias inlined or renamed (`QueryKey` → `readonly unknown[]`) | ~9 | no, but not yet provable |
+| an optional parameter or member added | 5 | no — a widening |
+| the return type narrowed (`ReactNode` → `ReactElement`) | 3 | no — returns are covariant |
+| `any` → a specific type on a parameter | 7 | technically yes, in practice rarely |
+| the result set narrowed (`(A \| B)[]` → `A[]`) | 3 | **type-safe, behaviour-changing** |
+| generics too large to adjudicate by text | ~10 | unknown, honestly |
+
+Two things that table is worth saying out loud. The largest remaining class is a
+**rendering** difference — `QueryKey` and `readonly unknown[]` are the same type,
+written differently by the library's authors between versions — and resolving it
+needs the type checker rather than string comparison. And the row that matters
+most is the smallest: a return type narrowing from `(A | B)[]` to `A[]` is
+*safe* to the compiler and means the call now returns fewer kinds of thing. No
+type-level analysis will ever catch that one; it is why the behaviour review
+exists.
