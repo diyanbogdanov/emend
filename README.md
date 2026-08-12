@@ -458,7 +458,9 @@ src/
   mcp.ts          MCP server, so a coding agent can drive Emend
   cli.ts          command surface
   github/         App auth, webhook intake, job runner, API pull requests
-  llm/            provider presets, the HTTP client, the prompts behind `ask`
+  llm/propose.ts  the structured strategy: one mechanism, four jobs
+  llm/prompts.ts  what the model is told, the four prompts side by side
+  llm/client.ts   the HTTP transport · llm/providers.ts  provider presets
 docs/
   architecture.md             how it fits together, and why
   deployment.md               running it as a service

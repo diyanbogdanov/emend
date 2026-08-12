@@ -1,3 +1,4 @@
+import { buildUserPrompt, MIGRATION_SYSTEM_PROMPT, TIGHTENING_SYSTEM_PROMPT, NARROWING_RULE } from '../src/llm/prompts.ts';
 import { parseDiagnostics } from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -5,10 +6,6 @@ import {
   nearbySymbols,
   classifyEdits,
   selectEvidencedEdits,
-  buildUserPrompt,
-  MIGRATION_SYSTEM_PROMPT,
-  TIGHTENING_SYSTEM_PROMPT,
-  NARROWING_RULE,
   type TextEdit,
 } from '../src/llm/propose.ts';
 import type { CallSite, Finding, SurfaceChange } from '../src/types.ts';

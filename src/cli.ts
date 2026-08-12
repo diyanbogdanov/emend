@@ -30,10 +30,6 @@ import {
 } from './reviewharness.ts';
 import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
-// `emend models` lists what a provider serves, which is the one place the CLI
-// legitimately knows a provider exists. Everything that asks a model to *work*
-// goes through the harness.
-import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { serve as serveMcp } from './mcp.ts';
 import {
   openCodeHarness,
@@ -42,6 +38,8 @@ import {
   driveContractPrompt,
   harnessPermitted,
   asker,
+  catalogue,
+  PROVIDERS,
   type Harness,
 } from './harness.ts';
 import { resolveSpec, httpFetcher } from './specfetch.ts';
@@ -54,7 +52,6 @@ import { LINT_ADAPTERS } from './lint.ts';
 import { enrichAdvisories } from './advisory.ts';
 import type { VulnerabilityOptions } from './detectors.ts';
 import { canAssertBreakage, githubOrgs, orgFor, type SpecCandidate } from './specs.ts';
-import { listModels } from './llm/client.ts';
 import {
   loadCases,
   materialiseCase,
@@ -1375,15 +1372,11 @@ async function cmdModels(args: Args): Promise<number> {
   // different provider's catalogue.
   const providerId =
     typeof providerFlag === 'string' ? providerFlag : (process.env.EMEND_LLM_PROVIDER ?? '');
-  const resolved = resolveLlmConfig({
-    ...(providerId ? { provider: providerId } : {}),
-    // `models` only needs an endpoint, not a model choice.
-    model: 'placeholder',
-  });
+  const listing = await catalogue(providerId);
 
-  if (!resolved.ok) {
+  if (!listing.ok) {
     console.error('');
-    console.error(c.red(`  ${resolved.reason}`));
+    console.error(c.red(`  ${listing.reason}`));
     console.error('');
     console.error(c.bold('  Available provider presets:'));
     for (const p of Object.values(PROVIDERS)) {
@@ -1400,17 +1393,13 @@ async function cmdModels(args: Args): Promise<number> {
     return 1;
   }
 
-  console.log(c.dim(`  querying ${resolved.config.providerLabel} (${resolved.config.baseUrl})`));
-  const res = await listModels(resolved.config);
-  if (!res.ok) {
-    console.error(c.red(`  could not list models: ${res.error}`));
-    return 1;
-  }
+  console.log(c.dim(`  querying ${listing.label} (${listing.baseUrl})`));
+  const models = listing.models ?? [];
 
-  const fallback = PROVIDERS[providerId]?.defaultModel;
+  const fallback = listing.defaultModel;
 
   console.log('');
-  for (const m of res.models) {
+  for (const m of models) {
     // Mark the default in the listing itself. A catalogue of several hundred
     // models with no recommendation is how the previous stale pick happened.
     console.log(m === fallback ? `  ${c.cyan(m)} ${c.dim('← default')}` : `  ${m}`);
@@ -1418,7 +1407,7 @@ async function cmdModels(args: Args): Promise<number> {
   console.log('');
   console.log(
     c.dim(
-      `  ${res.models.length} model(s). ` +
+      `  ${models.length} model(s). ` +
         (fallback
           ? `Defaults to ${fallback}; override with EMEND_LLM_MODEL.`
           : 'Set one with EMEND_LLM_MODEL.') +

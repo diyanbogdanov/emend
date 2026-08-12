@@ -1,3 +1,4 @@
+import { REVIEW_SYSTEM_PROMPT } from '../src/llm/prompts.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -9,7 +10,6 @@ import {
   remainingDeprecations,
   describeDeprecationGaps,
 } from '../src/quality.ts';
-import { REVIEW_SYSTEM_PROMPT } from '../src/llm/propose.ts';
 import type { Finding } from '../src/types.ts';
 
 function deprecationFinding(files: string[]): Finding {

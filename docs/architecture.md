@@ -230,8 +230,9 @@ Detection, localisation and verification are **deterministic and always will
 be**. They are the parts whose answers must be reproducible and auditable, and a
 model cannot be either.
 
-**Everything that talks to a model goes through `harness.ts`.** One module, two
-verbs, because they are two capabilities and the difference decides how far a
+**Everything that talks to a model goes through `harness.ts`** — including
+`emend models`, which only *lists* what a provider serves and still has no
+business knowing one exists. One module, two verbs, because they are two capabilities and the difference decides how far a
 wrong answer gets:
 
 | Verb | What it is | Why a wrong answer is contained |
@@ -326,7 +327,10 @@ src/
   eval.ts         measure the agent against a corpus
 
   github/         App auth, webhook intake, job runner, API pull requests
-  llm/            provider presets, the HTTP client, and the prompts behind `ask`
+  llm/propose.ts  the structured strategy: one mechanism, four jobs
+  llm/prompts.ts  what the model is told, the four prompts side by side
+  llm/client.ts   the HTTP transport
+  llm/providers.ts provider presets
 ```
 
 ---

@@ -25,7 +25,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { classifyHunks, parseDiffHunks, type DiffHunk, type HunkClassification } from './gate.ts';
 import { chat } from './llm/client.ts';
-import { resolveAgent } from './llm/providers.ts';
+import { PROVIDERS, resolveAgent, resolveLlmConfig } from './llm/providers.ts';
+import { listModels } from './llm/client.ts';
 import type { CallSite, SurfaceChange } from './types.ts';
 
 const execFileAsync = promisify(execFile);
@@ -822,8 +823,50 @@ export {
   selectLintEdits,
   selectReviewEdits,
   nearbySymbols,
-  NARROWING_RULE,
   type TextEdit,
   type EditClassification,
   type AgentProposal,
 } from './llm/propose.ts';
+export { NARROWING_RULE } from './llm/prompts.ts';
+
+/**
+ * What a provider serves, for `emend models`.
+ *
+ * Here rather than in the CLI because the rule is that nothing outside this
+ * module knows a provider exists — and a listing is still knowing. The CLI is
+ * left with what it is for: choosing what to print.
+ */
+export interface Catalogue {
+  ok: boolean;
+  /** Why not, when `ok` is false. */
+  reason?: string;
+  label?: string;
+  baseUrl?: string;
+  models?: string[];
+  /** The preset's recommended model, so a listing can mark it. */
+  defaultModel?: string;
+}
+
+export async function catalogue(providerId: string): Promise<Catalogue> {
+  const resolved = resolveLlmConfig({
+    ...(providerId ? { provider: providerId } : {}),
+    // A listing needs an endpoint, not a model choice.
+    model: 'placeholder',
+  });
+  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+
+  const listed = await listModels(resolved.config);
+  const preset = PROVIDERS[providerId]?.defaultModel;
+  return listed.ok
+    ? {
+        ok: true,
+        label: resolved.config.providerLabel,
+        baseUrl: resolved.config.baseUrl,
+        models: listed.models,
+        ...(preset ? { defaultModel: preset } : {}),
+      }
+    : { ok: false, reason: `could not list models: ${listed.error}` };
+}
+
+/** The provider presets, for the "here is how to configure one" help text. */
+export { PROVIDERS } from './llm/providers.ts';
