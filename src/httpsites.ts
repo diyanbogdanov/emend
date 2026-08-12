@@ -788,3 +788,49 @@ export function matchAgainstDiff(
   }
   return hits;
 }
+
+/**
+ * Names a vendor uses for "which slice of the result do you want".
+ *
+ * Not an attempt to know every API's vocabulary — these are the forms that
+ * actually appeared, plus the ones every REST convention shares. A name this
+ * misses costs a note nobody sees; a name it wrongly matches would call a
+ * filter a truncation, so it stays literal rather than fuzzy.
+ */
+const PAGINATION_PARAMS: ReadonlySet<string> = new Set([
+  'page',
+  'pagesize',
+  'per_page',
+  'perpage',
+  'limit',
+  'offset',
+  'cursor',
+  'after',
+  'before',
+  'starting_after',
+  'ending_before',
+  'page_token',
+  'pagetoken',
+  'continuationtoken',
+]);
+
+/**
+ * Whether a newly offered parameter controls the size of the result rather than
+ * its contents.
+ *
+ * The distinction decides what a reader should do about it, and the two are
+ * opposite. A new filter — Stripe's `customer_account`, Xero's `searchTerm` —
+ * is a capability, and adopting one changes which rows come back: an automated
+ * edit there would be the Resend regression in reverse, same response shape and
+ * a different result set.
+ *
+ * A pagination control is not a capability. Its appearance says the endpoint
+ * pages, and a caller that never pages has been taking the default and treating
+ * it as the whole answer — which is how a kubespec fix quietly started
+ * returning thirty tags. That is a latent bug the vendor just disclosed, and it
+ * is worth saying so.
+ */
+export function offersPagination(changePath: string): boolean {
+  const param = changePath.match(/ query:(\S+)$/)?.[1];
+  return param !== undefined && PAGINATION_PARAMS.has(param.toLowerCase());
+}

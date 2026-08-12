@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkAgainstSpec, findHttpCalls } from '../src/httpsites.ts';
+import { checkAgainstSpec, findHttpCalls, offersPagination } from '../src/httpsites.ts';
 import { httpContractDetector } from '../src/detectors.ts';
 import type { SpecCandidate } from '../src/specs.ts';
 
@@ -639,4 +639,34 @@ test('a finding says the description lacks the route, not that the API dropped i
   assert.equal(findings.length, 1);
   assert.match(findings[0]?.change.guidance ?? '', /not described|no such route|does not describe/i);
   assert.doesNotMatch(findings[0]?.change.guidance ?? '', /\bremoved\b|\bdeleted\b/i);
+});
+
+// ---------------------------------------------------------------------------
+// A newly available parameter is not a repair
+// ---------------------------------------------------------------------------
+
+test('a pagination control is read as a possible truncation', () => {
+  // The one class of newly-offered parameter that is a correctness signal
+  // rather than an enhancement. A `pageSize` appearing on an endpoint means the
+  // endpoint pages, and a caller that never pages has been taking the default
+  // and calling it the whole result — which is exactly how a kubespec fix
+  // started silently returning 30 tags.
+  for (const p of ['pageSize', 'per_page', 'limit', 'offset', 'cursor', 'starting_after', 'page']) {
+    assert.equal(offersPagination(`GET /Invoices query:${p}`), true, p);
+  }
+});
+
+test('a filter is not read as one', () => {
+  // Adopting these changes which rows come back, so an automated edit would be
+  // the Resend failure in reverse: same shape, different result set. Measured
+  // across two vendors, 6 of 11 offered parameters were filters like these.
+  for (const p of ['customer_account', 'created', 'searchTerm', 'References', 'status']) {
+    assert.equal(offersPagination(`GET /v1/invoices query:${p}`), false, p);
+  }
+});
+
+test('a route addition offers no parameter at all', () => {
+  // `matchAgainstDiff` also emits a whole new route as a feature. There is no
+  // `query:` on it and nothing to read as pagination.
+  assert.equal(offersPagination('GET /v1/checkout/sessions'), false);
 });

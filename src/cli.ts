@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
 import { reintroduced } from './remediate.ts';
+import { offersPagination } from './httpsites.ts';
 import { fixFinding, needsSourceRepair, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
 import { Store } from './store.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug, summarisePr } from './pr.ts';
@@ -599,6 +600,49 @@ async function cmdScan(args: Args): Promise<number> {
 }
 
 /**
+ * Parameters the vendor added to endpoints this repository already calls.
+ *
+ * Reported and never repaired, which is the whole point of separating them. A
+ * new filter is a capability, and writing one into a call changes which rows
+ * come back — the Resend regression in reverse, identical response shape and a
+ * different result set. Emend does not make that choice for anybody, the same
+ * way `plan.ts` declines to pick a replacement route.
+ *
+ * A pagination control is called out differently because it is not a capability
+ * at all. Its appearance says the endpoint pages, so a caller that never pages
+ * has been taking the default and treating it as the whole answer.
+ */
+function reportOfferedParameters(findings: Finding[]): void {
+  if (findings.length === 0) return;
+
+  const paging = findings.filter((f) => offersPagination(f.change.path));
+  const capabilities = findings.filter((f) => !offersPagination(f.change.path));
+
+  console.log(c.bold('  newly offered by the vendor') + c.dim(`  (${findings.length})`));
+
+  if (paging.length > 0) {
+    console.log(
+      c.yellow('    These endpoints page, and these calls do not — check what you are missing:'),
+    );
+    for (const f of paging) {
+      console.log(`      ${c.cyan(f.pkg)}  ${f.change.path}`);
+      for (const site of f.sites.slice(0, 2)) {
+        console.log(c.dim(`        → ${site.file}:${site.line}`));
+      }
+    }
+  }
+
+  if (capabilities.length > 0) {
+    console.log(c.dim('    Available and unused. Adopting one changes which records come back,'));
+    console.log(c.dim('    so it is a decision rather than a repair and Emend will not make it:'));
+    for (const f of capabilities) {
+      console.log(c.dim(`      ${f.pkg}  ${f.change.path}`));
+    }
+  }
+  console.log('');
+}
+
+/**
  * Report wire-contract findings, and hand them to a session if asked.
  *
  * Its own function because it shares nothing with the package path but the
@@ -611,14 +655,26 @@ async function cmdScan(args: Args): Promise<number> {
 async function fixWireContracts(repoDir: string, findings: Finding[], args: Args): Promise<void> {
   if (findings.length === 0) return;
 
-  console.log(c.bold('  wire contracts') + c.dim(`  (${findings.length} finding(s))`));
-  for (const f of findings) {
-    console.log(`    ${c.cyan(f.pkg)}  ${f.change.path}`);
-    for (const site of f.sites.slice(0, 3)) {
-      console.log(c.dim(`      → ${site.file}:${site.line}  ${site.text.trim().slice(0, 80)}`));
+  // Split before anything else, because the two halves want opposite things. A
+  // route the description no longer contains is a repair; a parameter it newly
+  // offers is not, and handing one to `driveContractPrompt` would tell a session
+  // that a working call was removed.
+  const repairs = findings.filter((f) => f.change.severity !== 'feature');
+  const offered = findings.filter((f) => f.change.severity === 'feature');
+
+  if (repairs.length > 0) {
+    console.log(c.bold('  wire contracts') + c.dim(`  (${repairs.length} finding(s))`));
+    for (const f of repairs) {
+      console.log(`    ${c.cyan(f.pkg)}  ${f.change.path}`);
+      for (const site of f.sites.slice(0, 3)) {
+        console.log(c.dim(`      → ${site.file}:${site.line}  ${site.text.trim().slice(0, 80)}`));
+      }
+      if (f.change.guidance) console.log(c.dim(`      ${f.change.guidance}`));
     }
-    if (f.change.guidance) console.log(c.dim(`      ${f.change.guidance}`));
   }
+
+  reportOfferedParameters(offered);
+  if (repairs.length === 0) return;
 
   const model = args.flags.get('drive');
   if (!model) {
@@ -653,7 +709,7 @@ async function fixWireContracts(repoDir: string, findings: Finding[], args: Args
     return;
   }
 
-  for (const f of findings) {
+  for (const f of repairs) {
     console.log(c.dim(`    driving ${harness.id} for ${f.change.path}`));
     const run = await harness.run(repoDir, {
       // The wire-contract instruction, not the vulnerability one. The difference
