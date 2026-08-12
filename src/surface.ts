@@ -175,6 +175,75 @@ export function normaliseSignature(raw: string): string {
   return s;
 }
 
+/**
+ * Type text with every union put in one order.
+ *
+ * TypeScript orders a union's members by internal type id, so which order gets
+ * printed depends on what else the program happened to load: query-core's
+ * `QueryStatus` renders `"error" | "pending" | "success"` in 5.51 and
+ * `"pending" | "success" | "error"` in 5.101 and denotes the same set both
+ * times. Same family as the cache path and the printer suffix — the rendering
+ * moved and the type did not.
+ *
+ * Parsed rather than scanned, and that is the whole reason this works. Two
+ * hand-written attempts got it wrong in ways that mattered: a `|` unions only
+ * within a comma slot, so `Record<string, "b" | "a">` came back as
+ * `Record<"a" | string, "b">`, and `=>` binds looser than `|`, so the return
+ * type of a function was torn off and sorted against the function itself. That
+ * is a TypeScript parser's job, and TypeScript is already a dependency here.
+ *
+ * Text the parser rejects is returned untouched. `typeToString` elides a long
+ * object type as `... 5 more ...`, which is not TypeScript, and a canonical
+ * form derived from a broken parse would be comparing something the package
+ * never said.
+ */
+export function canonicalType(signature: string): string {
+  const file = ts.createSourceFile(
+    '__canonical.ts',
+    `type __E = ${signature};`,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS,
+  );
+  const problems = (file as unknown as { parseDiagnostics?: unknown[] }).parseDiagnostics;
+  if (Array.isArray(problems) && problems.length > 0) return signature;
+
+  const declaration = file.statements[0];
+  if (file.statements.length !== 1 || !declaration || !ts.isTypeAliasDeclaration(declaration)) {
+    return signature;
+  }
+
+  const show = (node: ts.Node) => CANONICAL_PRINTER.printNode(ts.EmitHint.Unspecified, node, file);
+
+  const transformed = ts.transform(declaration.type, [
+    (context) => (root) => {
+      const visit = (node: ts.Node): ts.Node => {
+        const visited = ts.visitEachChild(node, visit, context);
+        if (!ts.isUnionTypeNode(visited)) return visited;
+        // Sorted by their own printed form, so the order is a property of the
+        // members rather than of the file they were read out of.
+        const ordered = [...visited.types].sort((a, b) => {
+          const [x, y] = [show(a), show(b)];
+          return x < y ? -1 : x > y ? 1 : 0;
+        });
+        return ts.factory.updateUnionTypeNode(visited, ts.factory.createNodeArray(ordered));
+      };
+      return ts.visitNode(root, visit) as ts.TypeNode;
+    },
+  ]);
+
+  const out = transformed.transformed[0];
+  const text = out ? show(out) : signature;
+  transformed.dispose();
+  // The printer breaks long types across lines; the comparison is on one line.
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+const CANONICAL_PRINTER = ts.createPrinter({
+  removeComments: true,
+  newLine: ts.NewLineKind.LineFeed,
+});
+
 function isDeprecated(sym: ts.Symbol, checker: ts.TypeChecker): boolean {
   try {
     return sym.getJsDocTags(checker).some((t: ts.JSDocTagInfo) => t.name === 'deprecated');

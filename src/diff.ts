@@ -9,6 +9,7 @@
  * rather than trusted.
  */
 
+import { canonicalType } from './surface.ts';
 import type { ApiSurface, ApiSymbol, SurfaceChange, SurfaceDiff } from './types.ts';
 
 /**
@@ -203,11 +204,15 @@ function comparableSignature(symbol: ApiSymbol, aliases?: ReadonlyMap<string, st
     out = out.replace(new RegExp(`\\b${escaped}\\b`, 'g'), `\u0000T${i}`);
   });
   const reduced = withoutPrinterSuffixes(positionalParams(out.replaceAll('\u0000', '')));
-  if (!aliases || aliases.size === 0) return reduced;
   // One pass, not a fixed point: an alias whose expansion names another alias
   // is left as it is rather than chased, because a cycle would not terminate
   // and nothing measured needed the second hop.
-  return reduced.replace(/\b[A-Za-z_$][\w$]*\b/g, (name) => aliases.get(name) ?? name);
+  const substituted =
+    aliases && aliases.size > 0
+      ? reduced.replace(/\b[A-Za-z_$][\w$]*\b/g, (name) => aliases.get(name) ?? name)
+      : reduced;
+  // Last, so it also settles whatever ordering the substitutions introduced.
+  return canonicalType(substituted);
 }
 
 /**
@@ -228,7 +233,15 @@ function agreedAliases(from: ApiSurface, to: ApiSurface): Map<string, string> {
   const agreed = new Map<string, string>();
   const theirs = to.typeAliases ?? {};
   for (const [name, expansion] of Object.entries(from.typeAliases ?? {})) {
-    if (theirs[name] === expansion) agreed.set(name, expansion);
+    const other = theirs[name];
+    if (other === undefined) continue;
+    // Compared canonically, because an expansion whose union the printer
+    // reordered is the same expansion. Measured on query-core, three of the six
+    // aliases that appeared to move — `NetworkMode`, `QueryStatus`,
+    // `MutationStatus` — had moved only that way.
+    if (other === expansion || canonicalType(other) === canonicalType(expansion)) {
+      agreed.set(name, expansion);
+    }
   }
   return agreed;
 }

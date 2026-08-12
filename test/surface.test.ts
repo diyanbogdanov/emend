@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normaliseSignature } from '../src/surface.ts';
+import { normaliseSignature,
+  canonicalType,
+} from '../src/surface.ts';
 
 // ---------------------------------------------------------------------------
 // A signature must name a module, not a place on this disk
@@ -62,4 +64,50 @@ test('no absolute path survives into a stored signature', () => {
 test('a qualified reference keeps its existing treatment', () => {
   // The rule that was already there: `import("…").Foo` becomes `Foo`.
   assert.equal(normaliseSignature('import("/tmp/x/package/dist/index").Foo'), 'Foo');
+});
+
+// ---------------------------------------------------------------------------
+// Canonical type text
+// ---------------------------------------------------------------------------
+
+test('a reordered union is canonicalised to one order', () => {
+  // TypeScript orders a union's members by internal type id, so which order is
+  // printed depends on what else the program happened to load. query-core's
+  // `QueryStatus` renders `"error" | "pending" | "success"` in 5.51 and
+  // `"pending" | "success" | "error"` in 5.101 and denotes the same set both
+  // times.
+  assert.equal(
+    canonicalType('"pending" | "success" | "error"'),
+    canonicalType('"error" | "pending" | "success"'),
+  );
+});
+
+test('a union nested anywhere is ordered where it sits', () => {
+  // The cases a depth-counting scanner gets wrong, and the reason this parses
+  // rather than scans: a `|` only unions within a comma slot, and `=>` binds
+  // looser than `|`. Hand-rolled, `Record<string, "b" | "a">` came out as
+  // `Record<"a" | string, "b">`.
+  assert.equal(canonicalType('Record<string, "b" | "a">'), canonicalType('Record<string, "a" | "b">'));
+  assert.equal(
+    canonicalType('(a: "y" | "x") => "b" | "a"'),
+    canonicalType('(a: "x" | "y") => "a" | "b"'),
+  );
+});
+
+test('a union that gained a member is still a different union', () => {
+  assert.notEqual(canonicalType('"error" | "pending"'), canonicalType('"error" | "pending" | "idle"'));
+});
+
+test('an intersection keeps its order', () => {
+  // `A & B` commutes too, but member order there interacts with how overlapping
+  // members render, and nothing measured needed it.
+  assert.equal(canonicalType('A & B'), 'A & B');
+});
+
+test('text the parser cannot read comes back untouched', () => {
+  // `typeToString` elides long object types as `... 5 more ...`, which is not
+  // TypeScript. A canonicaliser that returned a mangled parse of that would be
+  // comparing something the package never said.
+  const elided = '{ get?: AxiosHeaders; ... 5 more ...; common?: AxiosHeaders; }';
+  assert.equal(canonicalType(elided), elided);
 });
