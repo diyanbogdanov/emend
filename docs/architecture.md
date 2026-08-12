@@ -56,11 +56,15 @@ What it can prove, and the wording is deliberate:
 - **drift** — the signature changed in some other way. Something moved under
   you; Emend cannot tell from a string comparison whether it bites.
 
-That last distinction is the whole point of the tier. Measured on one large
-repository, of 44 non-removal signature changes, *none* had a shape a text
-comparison could adjudicate — roughly half were widenings that break nobody.
-Calling those "breaking" is what makes the word ignorable on the ones that
-deserve it.
+That last distinction is the whole point of the tier: calling a widening
+"breaking" is what makes the word ignorable on the changes that deserve it.
+
+Reading all 41 drift findings from one large repository individually, four were
+a parameter's name or its destructuring pattern and are now suppressed; the
+largest remaining class is a type alias inlined or renamed between versions
+(`QueryKey` → `readonly unknown[]`), which is a rendering difference the type
+checker could settle and string comparison cannot. The full table is in the
+README's known limitations.
 
 ### Tier 2 — known vulnerabilities
 
