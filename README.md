@@ -550,18 +550,21 @@ All 41 drift findings from one large repository, read individually:
 | what actually changed | n | is it a break? |
 | --- | --- | --- |
 | a parameter's name, or its destructuring pattern | 4 | **no — now suppressed** |
-| a type alias inlined or renamed (`QueryKey` → `readonly unknown[]`) | ~9 | no, but not yet provable |
+| a type alias inlined or renamed (`QueryKey` → `readonly unknown[]`) | ~9 | **no — now suppressed** |
 | an optional parameter or member added | 5 | no — a widening |
 | the return type narrowed (`ReactNode` → `ReactElement`) | 3 | no — returns are covariant |
 | `any` → a specific type on a parameter | 7 | technically yes, in practice rarely |
 | the result set narrowed (`(A \| B)[]` → `A[]`) | 3 | **type-safe, behaviour-changing** |
 | generics too large to adjudicate by text | ~10 | unknown, honestly |
 
-Two things that table is worth saying out loud. The largest remaining class is a
-**rendering** difference — `QueryKey` and `readonly unknown[]` are the same type,
-written differently by the library's authors between versions — and resolving it
-needs the type checker rather than string comparison. And the row that matters
-most is the smallest: a return type narrowing from `(A | B)[]` to `A[]` is
-*safe* to the compiler and means the call now returns fewer kinds of thing. No
-type-level analysis will ever catch that one; it is why the behaviour review
-exists.
+The alias row needed the type checker rather than string comparison, and it was
+the largest: on `@tanstack/react-query` 5.51 → 5.101 alone it was **40 findings**,
+because a library rewriting `type QueryKey = ReadonlyArray<unknown>` as a
+conditional changes nothing about the type and everything about how it prints.
+An alias is substituted only where both versions agree what it means, so it can
+collapse a difference the printer invented and never create one.
+
+The row that matters most is the smallest. A return type narrowing from
+`(A | B)[]` to `A[]` is *safe* to the compiler and means the call now returns
+fewer kinds of thing. No type-level analysis will ever catch that one; it is why
+the behaviour review exists.
