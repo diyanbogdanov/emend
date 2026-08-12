@@ -744,6 +744,386 @@ async function reviewBehaviour(
   }
 }
 
+/**
+ * Lint findings, all in one workspace.
+ *
+ * One rather than one each: the repairs are independent text edits in separate
+ * files, and a single verification answers for the lot. That is the opposite of
+ * the vulnerability path, where each fix is its own dependency change and
+ * bundling them would let one failure withhold every other.
+ */
+async function runLintFixes(repoDir: string, findings: Finding[], args: Args): Promise<boolean> {
+  if (findings.length === 0) return false;
+
+  console.log(c.bold('  lint') + c.dim(`  (${findings.length} finding(s))`));
+  const result = await fixLint(repoDir, findings, {
+    keepWorkspace: args.flags.get('keep') === true,
+    useAgent: agentAllowed(args),
+    onProgress: (m) => console.log(c.dim(`    ${m}`)),
+  });
+
+  const ok = result.verification !== null && verificationPassed(result.verification.outcome);
+  if (result.repaired.length > 0 || result.agentEdits > 0) {
+    const what = [
+      result.repaired.length > 0 ? `${result.repaired.length} file(s) by shellcheck` : '',
+      result.agentEdits > 0 ? `${result.agentEdits} edit(s) by the model` : '',
+    ]
+      .filter(Boolean)
+      .join(', ');
+    console.log(`    ${ok ? c.green('VERIFIED') : c.red('NOT VERIFIED')}  ${c.dim(what)}`);
+  }
+  // Never silent about the half nothing can repair.
+  if (result.unrepairable.length > 0) {
+    console.log(
+      c.yellow(
+        `    ${result.unrepairable.length} finding(s) still unrepaired${agentAllowed(args) ? '' : ' — this run was --no-agent, so the model never tried'}:`,
+      ),
+    );
+    for (const u of result.unrepairable.slice(0, 5)) {
+      console.log(c.dim(`      ${u.finding.change.path} — ${u.reason}`));
+    }
+  }
+  if (result.caveat) console.log(c.yellow(`    ${result.caveat}`));
+  if (result.workspaceDir) console.log(c.dim(`    workspace kept at ${result.workspaceDir}`));
+  return ok;
+}
+
+/**
+ * Packages behind their latest version where nothing this repository calls
+ * changed. A plain bump, verified — there is no migration to plan.
+ */
+async function runFreshnessFixes(repoDir: string, findings: Finding[], args: Args): Promise<boolean> {
+  let verified = false;
+  for (const finding of findings) {
+    console.log(
+      c.bold(`  ${finding.pkg} ${finding.fromVersion} → ${finding.toVersion}`) +
+        c.dim('  (behind latest)'),
+    );
+    const result = await fixFreshness(repoDir, finding, {
+      keepWorkspace: args.flags.get('keep') === true,
+      onProgress: (m) => console.log(c.dim(`    ${m}`)),
+    });
+    const ok = result.verification !== null && verificationPassed(result.verification.outcome);
+    if (ok) verified = true;
+    console.log(
+      `    ${ok ? c.green('VERIFIED') : c.red('NOT VERIFIED')}  ${c.dim(result.verification?.summary ?? '')}`,
+    );
+    if (result.workspaceDir) console.log(c.dim(`    workspace kept at ${result.workspaceDir}`));
+  }
+  return verified;
+}
+
+/**
+ * Version literals that disagree with something able to arbitrate them.
+ *
+ * Deterministic throughout: the target version is known, the location is known,
+ * and the change is a substring substitution. No model is offered one here
+ * because none is needed.
+ */
+async function runPinFixes(repoDir: string, findings: Finding[], args: Args): Promise<boolean> {
+  if (findings.length === 0) return false;
+
+  console.log(c.bold(`  version pins`) + c.dim(`  (${findings.length} drifted)`));
+  const result = await fixPins(repoDir, {
+    keepWorkspace: args.flags.get('keep') === true,
+    onProgress: (m) => console.log(c.dim(`    ${m}`)),
+  });
+  const ok = verificationPassed(result.verification.outcome);
+  console.log(
+    `    ${ok ? c.green('VERIFIED') : c.red(result.verification.outcome.toUpperCase())}` +
+      `  ${result.appliedEdits} pin edit(s)`,
+  );
+  console.log('');
+  return ok && result.appliedEdits > 0;
+}
+
+/**
+ * What every branch of `cmdFix` needs and none of them owns.
+ *
+ * `store` because a fix that landed has to be recorded, and `reviewHarness`
+ * because it is resolved once from the flags — building one per package would
+ * be the same object made repeatedly, and would make the reviewer look like a
+ * per-package decision rather than a run-wide one.
+ */
+interface FixContext {
+  store: Store;
+  reviewHarness: Harness | undefined;
+}
+
+/**
+ * Known vulnerabilities, each in its own workspace.
+ *
+ * Getting one package out of the tree is a self-contained change, and bundling
+ * them would make a single failure withhold every other fix.
+ */
+async function runVulnerabilityFixes(
+  repoDir: string,
+  findings: Finding[],
+  args: Args,
+  ctx: FixContext,
+): Promise<boolean> {
+  let verified = false;
+
+  for (const finding of findings) {
+    console.log(
+      c.bold(`  ${finding.pkg} ${finding.fromVersion} → ${finding.toVersion}`) +
+        c.dim('  (vulnerability)'),
+    );
+
+    // `--drive` hands the whole loop to an opencode session pointed at Emend's
+    // own MCP server. Emend keeps the deterministic half as tools it cannot
+    // fake; the session does the repairing, which it can do because it has edit
+    // rights and a loop of its own.
+    if (args.flags.get('drive')) {
+      await driveOneFinding(repoDir, finding, args);
+      continue;
+    }
+
+    const result = await fixVulnerability(repoDir, finding, {
+      keepWorkspace: args.flags.get('keep') === true,
+      // Without this the repair loop is unreachable and a security bump that
+      // breaks the build is reported as unfixable by the one tool here that
+      // knows how to fix it.
+      useAgent: agentAllowed(args),
+      ...(ctx.reviewHarness ? { reviewHarness: ctx.reviewHarness } : {}),
+      onProgress: (m) => console.log(c.dim(`    ${m}`)),
+    });
+
+    // Why this package is in the tree at all — the first thing a reviewer asks
+    // of a transitive advisory, and the reason bumping `express` for a CVE in
+    // `qs` is an instruction rather than a non sequitur.
+    if (result.remediation.kind === 'parent') {
+      for (const route of result.remediation.paths) {
+        console.log(c.dim(`    via  ${route.join(' → ')}`));
+      }
+    }
+    // The repo-wide review's findings. Advisory output for a human, so the human
+    // has to see it.
+    for (const f of result.reviewNotes ?? []) {
+      console.log(`    ${c.yellow(`[${f.severity}]`)} ${f.file}  ${c.dim(f.what)}`);
+      console.log(c.dim(`        ${f.why}`));
+    }
+    // A repaired fix and a fix that never needed repair are not the same result,
+    // and a reviewer reading the diff is entitled to know which one this is.
+    if (result.agent) {
+      const { attempts, finalErrors, initialErrors } = result.agent;
+      console.log(
+        c.dim(
+          `    repaired the breaking upgrade in ${attempts.length} attempt(s), ` +
+            `${initialErrors} → ${finalErrors} error(s)`,
+        ),
+      );
+    }
+
+    // Two conditions, and both must hold. A green build with the vulnerable
+    // version still installed is the failure most easily mistaken for success.
+    const passed = result.verification !== null && verificationPassed(result.verification.outcome);
+    const fixed = passed && result.resolved;
+    if (fixed) {
+      verified = true;
+      // Only on a verified fix. Recording an attempt would make the regression
+      // guard fire on a package that was never actually repaired.
+      ctx.store.recordVulnerabilityFixed(
+        repoDir,
+        finding.pkg,
+        result.installedAfter ?? finding.toVersion,
+        [finding.change.path],
+      );
+    }
+    console.log(
+      `    ${
+        fixed
+          ? c.green('FIXED')
+          : result.remediation.kind === 'none'
+            ? c.yellow('NO FIX AVAILABLE')
+            : c.red('NOT FIXED')
+      }  ${c.dim(result.verification?.summary ?? result.note ?? '')}`,
+    );
+    // Never silent. An override forces a version a dependency did not ask for,
+    // and a reviewer has to know a constraint was overridden rather than met.
+    if (result.overrode) {
+      console.log(
+        c.yellow(
+          `    forced via an overrides entry — no dependency's own range selects ${finding.toVersion}`,
+        ),
+      );
+    }
+    if (result.note && !fixed) console.log(c.yellow(`    ${result.note}`));
+    if (result.workspaceDir) console.log(c.dim(`    workspace kept at ${result.workspaceDir}`));
+  }
+
+  return verified;
+}
+
+/**
+ * Hand one finding to a session that owns the workspace.
+ *
+ * There is no gate on this path — the session edits directly — so the log is
+ * the whole account of what happened, and hiding any of it would be the wrong
+ * trade. `false` means the session did not complete, which the package path
+ * treats as fatal and the vulnerability path does not.
+ */
+async function driveOneFinding(repoDir: string, finding: Finding, args: Args): Promise<boolean> {
+  const permitted = harnessPermitted({ untrusted: args.flags.get('untrusted') === true });
+  if (!permitted.ok) {
+    console.log(c.yellow(`    declining to drive: ${permitted.reason}`));
+    return false;
+  }
+  const model = args.flags.get('drive');
+  const harness = drivingHarness({
+    ...(typeof model === 'string' ? { model } : {}),
+    emendCommand: [
+      process.execPath,
+      '--experimental-strip-types',
+      fileURLToPath(import.meta.url),
+      'mcp',
+    ],
+  });
+  const availability = await harness.available();
+  if (!availability.ok) {
+    console.log(c.yellow(`    cannot drive: ${availability.reason}`));
+    return false;
+  }
+
+  console.log(c.dim(`    driving ${harness.id} against emend's own tools`));
+  const run = await harness.run(repoDir, {
+    instruction: drivePrompt({ repo: repoDir, findingId: finding.id, pkg: finding.pkg }),
+    failureOutput: '',
+  });
+  const said = assistantText(run.log).trim();
+  const summary = (run.summary ?? '').trim();
+  if (summary) console.log(c.dim(`    ${summary.slice(0, 2000)}`));
+  if (said) console.log(said.slice(0, 4000).split('\n').map((l) => `    ${l}`).join('\n'));
+  if (!run.ok) console.log(c.red(`    ${run.error ?? 'the session failed'}`));
+  if (run.ok && !said && !summary) console.log(c.yellow('    the session produced no output'));
+  return run.ok;
+}
+
+/**
+ * Dependency upgrades, one workspace per package.
+ *
+ * A version bump is atomic, so every finding for one package is fixed together
+ * and lands as one pull request.
+ *
+ * `exit` is not decoration. Under `--drive` this path stops the whole command
+ * after the first package rather than moving to the next, which is what the
+ * inline version did and is deliberately preserved here — the vulnerability
+ * path continues instead, and the two really do differ. Returning the code
+ * makes that visible; before, it was a `return` buried inside two loops.
+ */
+async function runPackageFixes(
+  repoDir: string,
+  byPackage: Map<string, Finding[]>,
+  args: Args,
+  ctx: FixContext,
+): Promise<{ verified: boolean; exit: number | null }> {
+  let verified = false;
+
+  for (const [pkg, findings] of byPackage) {
+    const first = findings[0];
+    if (!first) continue;
+
+    console.log(
+      c.bold(`  ${pkg} ${first.fromVersion} → ${first.toVersion}`) +
+        c.dim(`  (${findings.length} finding${findings.length === 1 ? '' : 's'})`),
+    );
+    for (const f of findings) {
+      console.log(c.dim(`    · ${f.change.path} (${f.change.kind}, ${f.id})`));
+    }
+
+    // Deleting runAgentRepair left drift with no repair mechanism at all —
+    // `--agent` became a no-op here — and drift is the thesis, so it needed a
+    // driven session more than vulnerabilities did.
+    if (args.flags.get('drive')) {
+      return { verified, exit: (await driveOneFinding(repoDir, first, args)) ? 0 : 1 };
+    }
+
+    const harness = harnessFrom(args);
+    const result = await fixPackage(repoDir, findings, {
+      keepWorkspace: args.flags.get('keep') === true,
+      useAgent: agentAllowed(args),
+      ...(harness ? { harness } : {}),
+      ...(ctx.reviewHarness ? { reviewHarness: ctx.reviewHarness } : {}),
+      onProgress: (m) => console.log(c.dim(`    ${m}`)),
+    });
+
+    const v = result.verification;
+    const badge =
+      v.outcome === 'verified'
+        ? c.green('VERIFIED')
+        : v.outcome === 'typecheck-only'
+          ? c.yellow('TYPECHECK ONLY')
+          : v.outcome === 'regression'
+            ? c.red('INCOMPLETE — not safe to merge')
+            : v.outcome === 'pre-existing-failure'
+              ? c.yellow('INCONCLUSIVE (repo was already failing)')
+              : c.yellow('UNVERIFIED');
+    const source = result.agent
+      ? c.magenta(`deterministic + agent(${result.agent.model})`)
+      : c.dim('deterministic');
+    console.log(`    ${badge}  ${source}  ${c.dim(`${result.appliedEdits} edit(s)`)}`);
+    console.log(`    ${c.dim(v.summary)}`);
+
+    if (result.unplanned.length > 0 && !result.agent) {
+      console.log(
+        c.yellow(
+          `    ${result.unplanned.length} finding(s) had no deterministic fix${agentAllowed(args) ? ' and the model did not land one' : ' — this run was --no-agent'}:`,
+        ),
+      );
+      for (const f of result.unplanned) console.log(c.dim(`      · ${f.change.path}`));
+    }
+    if (result.agent) {
+      for (const a of result.agent.attempts) {
+        console.log(
+          c.dim(`      attempt ${a.attempt}: ${a.outcome}${a.error ? ` — ${a.error.slice(0, 120)}` : ''}`),
+        );
+      }
+      if (result.agent.rationale) {
+        console.log(c.dim(`      rationale: ${result.agent.rationale.slice(0, 200)}`));
+      }
+    }
+    if (result.harness) {
+      const h = result.harness;
+      // An escalation that ran and achieved nothing has to be as visible as one
+      // that worked. It is the most expensive step in the pipeline, and a run
+      // that quietly declined to happen looks identical to one that tried.
+      console.log(
+        h.ok
+          ? c.magenta(
+              `      harness ${h.id}: ${h.keptHunks} hunk(s) kept, ${h.revertedHunks.length} reverted`,
+            )
+          : c.yellow(`      harness ${h.id}: ${h.reason}`),
+      );
+      for (const r of h.revertedHunks) {
+        console.log(c.dim(`        reverted ${r.hunk.file}:${r.hunk.start} — ${r.reason}`));
+      }
+    }
+    if (result.workspaceDir) console.log(`    ${c.dim(`workspace kept at ${result.workspaceDir}`)}`);
+    if (verificationPassed(v.outcome)) verified = true;
+
+    if (result.diff) {
+      console.log('');
+      for (const line of result.diff.split('\n').slice(0, 60)) {
+        if (line.startsWith('+') && !line.startsWith('+++')) console.log(`      ${c.green(line)}`);
+        else if (line.startsWith('-') && !line.startsWith('---')) console.log(`      ${c.red(line)}`);
+        else console.log(`      ${c.dim(line)}`);
+      }
+    }
+
+    const rationale =
+      result.plans.map((p) => p.rationale).join(' ') || result.agent?.rationale || null;
+    const agent = result.agent
+      ? { model: result.agent.model, provider: result.agent.provider }
+      : null;
+    for (const f of findings) {
+      ctx.store.recordRun(f.id, repoDir, v, rationale, result.diff, agent);
+    }
+    console.log('');
+  }
+
+  return { verified, exit: null };
+}
+
 async function cmdFix(args: Args): Promise<number> {
   const repoDir = path.resolve(args.positional[0] ?? '.');
   const store = new Store();
@@ -798,339 +1178,34 @@ async function cmdFix(args: Args): Promise<number> {
   }
 
   console.log('');
-  const reviewHarness = reviewHarnessFrom(args);
-  let anyVerified = false;
+  const ctx: FixContext = { store, reviewHarness: reviewHarnessFrom(args) };
 
-  // Each in its own workspace: getting one package out of the tree is a
-  // self-contained change, and bundling them would make a single failure
-  // withhold every other fix.
-  for (const finding of vulnTargets) {
-    console.log(
-      c.bold(`  ${finding.pkg} ${finding.fromVersion} → ${finding.toVersion}`) +
-        c.dim('  (vulnerability)'),
-    );
-    // `--drive` hands the whole loop to an opencode session pointed at Emend's
-    // own MCP server. Emend keeps the deterministic half as tools it cannot
-    // fake; the session does the repairing, which it can do because it has edit
-    // rights and a loop of its own. This is what `runAgentRepair` was, moved to
-    // something built for it.
-    if (args.flags.get('drive')) {
-      const permitted = harnessPermitted({ untrusted: args.flags.get('untrusted') === true });
-      if (!permitted.ok) {
-        console.log(c.yellow(`    declining to drive: ${permitted.reason}`));
-        continue;
-      }
-      const model = args.flags.get('drive');
-      const harness = drivingHarness({
-        ...(typeof model === 'string' ? { model } : {}),
-        emendCommand: [process.execPath, '--experimental-strip-types', fileURLToPath(import.meta.url), 'mcp'],
-      });
-      const availability = await harness.available();
-      if (!availability.ok) {
-        console.log(c.yellow(`    cannot drive: ${availability.reason}`));
-        continue;
-      }
-      console.log(c.dim(`    driving ${harness.id} against emend's own tools`));
-      const run = await harness.run(repoDir, {
-        instruction: drivePrompt({ repo: repoDir, findingId: finding.id, pkg: finding.pkg }),
-        failureOutput: '',
-      });
-      // Whatever it says, said plainly. There is no gate on this path — the
-      // session owns the workspace — so the log is the whole account of what
-      // happened and hiding any of it would be the wrong trade.
-      const said = assistantText(run.log).trim();
-      const summary = (run.summary ?? "").trim();
-      if (summary) console.log(c.dim(`    ${summary.slice(0, 2000)}`));
-      if (said) console.log(said.slice(0, 4000).split('\n').map((l) => `    ${l}`).join('\n'));
-      if (!run.ok) console.log(c.red(`    ${run.error ?? 'the session failed'}`));
-      if (run.ok && !said && !summary) console.log(c.yellow('    the session produced no output'));
-      continue;
-    }
-
-    const vulnResult = await fixVulnerability(repoDir, finding, {
-      keepWorkspace: args.flags.get('keep') === true,
-      // Without this the repair loop is unreachable and a security bump that
-      // breaks the build is reported as unfixable by the one tool here that
-      // knows how to fix it.
-      useAgent: agentAllowed(args),
-      ...(reviewHarness ? { reviewHarness } : {}),
-      onProgress: (m) => console.log(c.dim(`    ${m}`)),
-    });
-    // Why this package is in the tree at all — the first thing a reviewer asks
-    // of a transitive advisory, and the reason bumping `express` for a CVE in
-    // `qs` is an instruction rather than a non sequitur.
-    if (vulnResult.remediation.kind === 'parent') {
-      for (const route of vulnResult.remediation.paths) {
-        console.log(c.dim(`    via  ${route.join(' → ')}`));
-      }
-    }
-    // A repaired fix and a fix that never needed repair are not the same result,
-    // and a reviewer reading the diff is entitled to know which one this is.
-    // The repo-wide review's findings. Computed and then dropped on the floor
-    // until now, which made the whole pass decorative — it is advisory output for
-    // a human, so the human has to see it.
-    for (const f of vulnResult.reviewNotes ?? []) {
-      console.log(`    ${c.yellow(`[${f.severity}]`)} ${f.file}  ${c.dim(f.what)}`);
-      console.log(c.dim(`        ${f.why}`));
-    }
-    if (vulnResult.agent) {
-      const { attempts, finalErrors } = vulnResult.agent;
-      console.log(
-        c.dim(
-          `    repaired the breaking upgrade in ${attempts.length} attempt(s), ` +
-            `${vulnResult.agent.initialErrors} → ${finalErrors} error(s)`,
-        ),
-      );
-    }
-    const verified =
-      vulnResult.verification !== null && verificationPassed(vulnResult.verification.outcome);
-    // Two conditions, and both must hold. A green build with the vulnerable
-    // version still installed is the failure most easily mistaken for success.
-    const fixed = verified && vulnResult.resolved;
-    if (fixed) {
-      anyVerified = true;
-      // Only on a verified fix. Recording an attempt would make the regression
-      // guard fire on a package that was never actually repaired.
-      store.recordVulnerabilityFixed(
-        repoDir,
-        finding.pkg,
-        vulnResult.installedAfter ?? finding.toVersion,
-        [finding.change.path],
-      );
-    }
-    console.log(
-      `    ${
-        fixed
-          ? c.green('FIXED')
-          : vulnResult.remediation.kind === 'none'
-            ? c.yellow('NO FIX AVAILABLE')
-            : c.red('NOT FIXED')
-      }  ${c.dim(vulnResult.verification?.summary ?? vulnResult.note ?? '')}`,
-    );
-    // Never silent. An override forces a version a dependency did not ask for,
-    // and a reviewer has to know a constraint was overridden rather than met.
-    if (vulnResult.overrode) {
-      console.log(
-        c.yellow(
-          `    forced via an overrides entry — no dependency's own range selects ${finding.toVersion}`,
-        ),
-      );
-    }
-    if (vulnResult.note && !fixed) console.log(c.yellow(`    ${vulnResult.note}`));
-    if (vulnResult.workspaceDir) {
-      console.log(c.dim(`    workspace kept at ${vulnResult.workspaceDir}`));
-    }
-  }
-
-  // One workspace for all of them: the repairs are independent text edits in
-  // separate files, and a single verification answers for the lot.
-  if (lintTargets.length > 0) {
-    console.log(c.bold('  lint') + c.dim(`  (${lintTargets.length} finding(s))`));
-    const lintResult = await fixLint(repoDir, lintTargets, {
-      keepWorkspace: args.flags.get('keep') === true,
-      useAgent: agentAllowed(args),
-      onProgress: (m) => console.log(c.dim(`    ${m}`)),
-    });
-    const ok =
-      lintResult.verification !== null && verificationPassed(lintResult.verification.outcome);
-    if (ok) anyVerified = true;
-    if (lintResult.repaired.length > 0 || lintResult.agentEdits > 0) {
-      const what = [
-        lintResult.repaired.length > 0 ? `${lintResult.repaired.length} file(s) by shellcheck` : '',
-        lintResult.agentEdits > 0 ? `${lintResult.agentEdits} edit(s) by the model` : '',
-      ]
-        .filter(Boolean)
-        .join(', ');
-      console.log(`    ${ok ? c.green('VERIFIED') : c.red('NOT VERIFIED')}  ${c.dim(what)}`);
-    }
-    // Never silent about the half nothing can repair.
-    if (lintResult.unrepairable.length > 0) {
-      console.log(
-        c.yellow(
-          `    ${lintResult.unrepairable.length} finding(s) still unrepaired${agentAllowed(args) ? '' : ' — this run was --no-agent, so the model never tried'}:`,
-        ),
-      );
-      for (const u of lintResult.unrepairable.slice(0, 5)) {
-        console.log(c.dim(`      ${u.finding.change.path} — ${u.reason}`));
-      }
-    }
-    if (lintResult.caveat) console.log(c.yellow(`    ${lintResult.caveat}`));
-    if (lintResult.workspaceDir) console.log(c.dim(`    workspace kept at ${lintResult.workspaceDir}`));
-  }
-
-  for (const finding of freshTargets) {
-    console.log(
-      c.bold(`  ${finding.pkg} ${finding.fromVersion} → ${finding.toVersion}`) +
-        c.dim('  (behind latest)'),
-    );
-    const freshResult = await fixFreshness(repoDir, finding, {
-      keepWorkspace: args.flags.get('keep') === true,
-      onProgress: (m) => console.log(c.dim(`    ${m}`)),
-    });
-    const ok =
-      freshResult.verification !== null && verificationPassed(freshResult.verification.outcome);
-    if (ok) anyVerified = true;
-    console.log(
-      `    ${ok ? c.green('VERIFIED') : c.red('NOT VERIFIED')}  ${c.dim(freshResult.verification?.summary ?? '')}`,
-    );
-    if (freshResult.workspaceDir) console.log(c.dim(`    workspace kept at ${freshResult.workspaceDir}`));
-  }
-
+  // Collected rather than folded into a running flag. `anyVerified ||= await …`
+  // reads better and is wrong: once one branch has verified, `||=` stops
+  // evaluating its right-hand side, so every later branch would be skipped for
+  // the sole reason that an earlier one succeeded.
+  const verified: boolean[] = [];
+  verified.push(await runVulnerabilityFixes(repoDir, vulnTargets, args, ctx));
+  verified.push(await runLintFixes(repoDir, lintTargets, args));
+  verified.push(await runFreshnessFixes(repoDir, freshTargets, args));
   await fixWireContracts(repoDir, contractTargets, args);
+  verified.push(await runPinFixes(repoDir, pinTargets, args));
 
-  if (pinTargets.length > 0) {
-    console.log(c.bold(`  version pins`) + c.dim(`  (${pinTargets.length} drifted)`));
-    const pinResult = await fixPins(repoDir, {
-      keepWorkspace: args.flags.get('keep') === true,
-      onProgress: (m) => console.log(c.dim(`    ${m}`)),
-    });
-    const ok = verificationPassed(pinResult.verification.outcome);
-    console.log(
-      `    ${ok ? c.green('VERIFIED') : c.red(pinResult.verification.outcome.toUpperCase())}` +
-        `  ${pinResult.appliedEdits} pin edit(s)`,
-    );
-    if (ok && pinResult.appliedEdits > 0) anyVerified = true;
-    console.log('');
+  const packages = await runPackageFixes(repoDir, byPackage, args, ctx);
+  // A driven run reports its own exit and stops the command — one package, then
+  // done. Preserved from the inline version rather than reconciled with the
+  // vulnerability path, which continues; changing that is a behaviour decision,
+  // not a refactor.
+  if (packages.exit !== null) {
+    store.close();
+    return packages.exit;
   }
-
-  for (const [pkg, findings] of byPackage) {
-    const first = findings[0];
-    if (!first) continue;
-    console.log(
-      c.bold(`  ${pkg} ${first.fromVersion} → ${first.toVersion}`) +
-        c.dim(`  (${findings.length} finding${findings.length === 1 ? '' : 's'})`),
-    );
-    for (const f of findings) {
-      console.log(c.dim(`    · ${f.change.path} (${f.change.kind}, ${f.id})`));
-    }
-
-    // Same as the vulnerability path: hand the loop to an opencode session
-    // pointed at Emend's own tools. Deleting runAgentRepair left drift with no
-    // repair mechanism at all — `--agent` became a no-op here — and drift is the
-    // thesis, so it needed this more than vulnerabilities did.
-    if (args.flags.get('drive')) {
-      const permitted = harnessPermitted({ untrusted: args.flags.get('untrusted') === true });
-      if (!permitted.ok) {
-        console.log(c.yellow(`    declining to drive: ${permitted.reason}`));
-        return 1;
-      }
-      const model = args.flags.get('drive');
-      const driver = drivingHarness({
-        ...(typeof model === 'string' ? { model } : {}),
-        emendCommand: [process.execPath, '--experimental-strip-types', fileURLToPath(import.meta.url), 'mcp'],
-      });
-      const availability = await driver.available();
-      if (!availability.ok) {
-        console.log(c.yellow(`    cannot drive: ${availability.reason}`));
-        return 1;
-      }
-      console.log(c.dim(`    driving ${driver.id} against emend's own tools`));
-      const run = await driver.run(repoDir, {
-        instruction: drivePrompt({
-          repo: repoDir,
-          findingId: first.id,
-          pkg: first.pkg,
-        }),
-        failureOutput: '',
-      });
-      const said = assistantText(run.log).trim();
-      const summary = (run.summary ?? '').trim();
-      if (summary) console.log(c.dim(`    ${summary.slice(0, 2000)}`));
-      if (said) console.log(said.slice(0, 4000).split('\n').map((l) => `    ${l}`).join('\n'));
-      if (!run.ok) console.log(c.red(`    ${run.error ?? 'the session failed'}`));
-      if (run.ok && !said && !summary) console.log(c.yellow('    the session produced no output'));
-      return run.ok ? 0 : 1;
-    }
-
-    const harness = harnessFrom(args);
-    const reviewHarness = reviewHarnessFrom(args);
-    const result = await fixPackage(repoDir, findings, {
-      keepWorkspace: args.flags.get('keep') === true,
-      useAgent: agentAllowed(args),
-      ...(harness ? { harness } : {}),
-      ...(reviewHarness ? { reviewHarness } : {}),
-      onProgress: (m) => console.log(c.dim(`    ${m}`)),
-    });
-
-    const v = result.verification;
-    const badge =
-      v.outcome === 'verified'
-        ? c.green('VERIFIED')
-        : v.outcome === 'typecheck-only'
-          ? c.yellow('TYPECHECK ONLY')
-          : v.outcome === 'regression'
-            ? c.red('INCOMPLETE — not safe to merge')
-            : v.outcome === 'pre-existing-failure'
-              ? c.yellow('INCONCLUSIVE (repo was already failing)')
-              : c.yellow('UNVERIFIED');
-
-    const source = result.agent
-      ? c.magenta(`deterministic + agent(${result.agent.model})`)
-      : c.dim('deterministic');
-    console.log(`    ${badge}  ${source}  ${c.dim(`${result.appliedEdits} edit(s)`)}`);
-    console.log(`    ${c.dim(v.summary)}`);
-
-    if (result.unplanned.length > 0 && !result.agent) {
-      console.log(
-        c.yellow(
-          `    ${result.unplanned.length} finding(s) had no deterministic fix${agentAllowed(args) ? ' and the model did not land one' : ' — this run was --no-agent'}:`,
-        ),
-      );
-      for (const f of result.unplanned) console.log(c.dim(`      · ${f.change.path}`));
-    }
-    if (result.agent) {
-      for (const a of result.agent.attempts) {
-        console.log(
-          c.dim(`      attempt ${a.attempt}: ${a.outcome}${a.error ? ` — ${a.error.slice(0, 120)}` : ''}`),
-        );
-      }
-      if (result.agent.rationale) {
-        console.log(c.dim(`      rationale: ${result.agent.rationale.slice(0, 200)}`));
-      }
-    }
-    if (result.harness) {
-      const h = result.harness;
-      // An escalation that ran and achieved nothing has to be as visible as one
-      // that worked. It is the most expensive step in the pipeline, and a run
-      // that quietly declined to happen looks identical to one that tried.
-      console.log(
-        h.ok
-          ? c.magenta(
-              `      harness ${h.id}: ${h.keptHunks} hunk(s) kept, ${h.revertedHunks.length} reverted`,
-            )
-          : c.yellow(`      harness ${h.id}: ${h.reason}`),
-      );
-      for (const r of h.revertedHunks) {
-        console.log(c.dim(`        reverted ${r.hunk.file}:${r.hunk.start} — ${r.reason}`));
-      }
-    }
-    if (result.workspaceDir) console.log(`    ${c.dim(`workspace kept at ${result.workspaceDir}`)}`);
-    if (verificationPassed(v.outcome)) anyVerified = true;
-
-    if (result.diff) {
-      console.log('');
-      for (const line of result.diff.split('\n').slice(0, 60)) {
-        if (line.startsWith('+') && !line.startsWith('+++')) console.log(`      ${c.green(line)}`);
-        else if (line.startsWith('-') && !line.startsWith('---')) console.log(`      ${c.red(line)}`);
-        else console.log(`      ${c.dim(line)}`);
-      }
-    }
-
-    const rationale =
-      result.plans.map((p) => p.rationale).join(' ') || result.agent?.rationale || null;
-    const agent = result.agent
-      ? { model: result.agent.model, provider: result.agent.provider }
-      : null;
-    for (const f of findings) {
-      store.recordRun(f.id, repoDir, v, rationale, result.diff, agent);
-    }
-    console.log('');
-  }
+  verified.push(packages.verified);
 
   store.close();
   console.log(c.dim(`  Run ${c.bold('emend pr <repo> --finding <id>')} to preview a pull request.`));
   console.log('');
-  return anyVerified ? 0 : 1;
+  return verified.some(Boolean) ? 0 : 1;
 }
 
 async function cmdPr(args: Args): Promise<number> {
