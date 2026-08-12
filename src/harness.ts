@@ -661,6 +661,12 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
           error: result.stderr.trim() || `opencode exited ${result.code}`,
         };
       }
+      // The exit code is not the whole answer. opencode exits 0 on a session
+      // that never reached a model at all — the API error arrives as an event
+      // and the process still ends cleanly — so trusting the code alone reports
+      // a run that could not happen as a run that found nothing to do.
+      const failure = sessionError(result.stdout);
+      if (failure) return { ok: false, log, summary, error: failure };
       return { ok: true, log: log || result.stderr.trim(), summary };
     },
   };
@@ -673,17 +679,56 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
  * worth of it is far too much for a PR body. Errors and assistant text are what
  * a reader needs; tool-call traffic is not.
  */
-export function summariseEvents(stdout: string): string {
-  const lines: string[] = [];
+interface OpenCodeEvent {
+  type?: string;
+  text?: string;
+  error?: unknown;
+}
+
+/** The JSONL stream, minus the lines that are not events. */
+function* jsonEvents(stdout: string): Generator<OpenCodeEvent> {
   for (const raw of stdout.split('\n')) {
     const line = raw.trim();
     if (!line.startsWith('{')) continue;
-    let event: { type?: string; text?: string; error?: unknown };
     try {
-      event = JSON.parse(line);
+      yield JSON.parse(line);
     } catch {
       continue;
     }
+  }
+}
+
+/**
+ * The reason a session failed, when one failed.
+ *
+ * Separate from `summariseEvents` because the two answer different questions:
+ * that one asks what the session said, this one asks whether it ran at all. An
+ * `error` event with a clean exit is the case that motivated it — a model that
+ * was never reachable produces no diff, and an empty diff is otherwise
+ * indistinguishable from a model that read the code and left it alone.
+ *
+ * Truncated because the message that prompted this carried the provider's
+ * entire model catalogue, and this string ends up in a PR body.
+ */
+export function sessionError(stdout: string): string | undefined {
+  for (const event of jsonEvents(stdout)) {
+    if (event.type !== 'error') continue;
+    const err = event.error;
+    const message =
+      typeof err === 'string'
+        ? err
+        : ((err as { data?: { message?: unknown } })?.data?.message ??
+          (err as { message?: unknown })?.message ??
+          (err as { name?: unknown })?.name);
+    const text = typeof message === 'string' && message.trim() ? message.trim() : JSON.stringify(err);
+    return text.length > 400 ? `${text.slice(0, 400)}…` : text;
+  }
+  return undefined;
+}
+
+export function summariseEvents(stdout: string): string {
+  const lines: string[] = [];
+  for (const event of jsonEvents(stdout)) {
     if (event.type === 'error') {
       lines.push(`error: ${typeof event.error === 'string' ? event.error : JSON.stringify(event.error)}`);
     } else if (event.type === 'text' && typeof event.text === 'string') {
@@ -707,6 +752,33 @@ export function summariseEvents(stdout: string): string {
  * `emendCommand` is how this process was started, so the child runs the same
  * build rather than whatever `emend` happens to be on PATH.
  */
+/**
+ * The harness that repairs a finding, with its model resolved.
+ *
+ * §11 made this the only thing that changes code, which raises the stakes on a
+ * question that had been left open: *which* model. The answer was "whichever
+ * one opencode resolves", and opencode resolves from its own config — so a
+ * repository whose operator had authenticated opencode against something else
+ * got that instead, silently, no matter what `EMEND_LLM_PROVIDER` said.
+ *
+ * Measured on the first end-to-end `emend pr`: opencode reached GitHub Copilot,
+ * which rejected the request, and the escalation recorded "changed nothing".
+ * The open-weight default this project runs on was never consulted.
+ *
+ * The order is: what the operator pinned, then what Emend was configured with,
+ * then opencode's own resolution. Only the last is a guess, and it is the one
+ * the original "no default model" note was protecting — an operator who
+ * configured opencode deliberately and Emend not at all. That deference is safe
+ * only now that a session which cannot reach its model says so instead of
+ * returning an empty diff.
+ */
+export function repairHarness(options: { pinned?: string } = {}): OpenCodeHarness {
+  if (options.pinned) return openCodeHarness({ model: options.pinned });
+  const resolved = resolveLlmConfig();
+  if (!resolved.ok || !resolved.config.providerId) return openCodeHarness({});
+  return openCodeHarness({ model: `${resolved.config.providerId}/${resolved.config.model}` });
+}
+
 export function drivingHarness(options: {
   model?: string;
   emendCommand: string[];

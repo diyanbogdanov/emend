@@ -215,3 +215,39 @@ test('a summary is built from what the model said, and dropped when it says noth
   const silent: Asker = { model: 'test/model', ask: async () => null };
   assert.equal(await summarisePr(silent, result()), null);
 });
+
+// ---------------------------------------------------------------------------
+// Zero edits is not the same claim as zero edits needed
+// ---------------------------------------------------------------------------
+
+test('a body over a failed verification does not tell the reader the call sites were fine', () => {
+  // Rendered verbatim by the first end-to-end `emend pr`, in a body whose own
+  // verification table three sections above read **FAIL (exit 2)**:
+  //
+  //   _These lines use the changed symbol. They were checked against the new
+  //    version and needed no edit …_
+  //
+  // Nothing had checked them. The harness never reached its model, applied
+  // nothing, and `appliedEdits === 0` was read as "the bump alone typechecked".
+  // A reader is being told the opposite of what the same page proves.
+  const body = renderPrBody(
+    result({
+      appliedEdits: 0,
+      verification: {
+        outcome: 'regression',
+        summary: 'baseline passed and the post-change run failed',
+        baseline: { typecheck: { ok: true }, test: { ok: true } },
+        post: { typecheck: { ok: false }, test: { ok: true } },
+      } as unknown as FixResult['verification'],
+    }),
+  );
+
+  assert.doesNotMatch(body, /needed no edit/);
+  // And it still says why they are listed, rather than dropping the section.
+  assert.match(body, /src\/schema\.ts/);
+});
+
+test('a body over a clean verification keeps the claim, because there it is earned', () => {
+  const body = renderPrBody(result({ appliedEdits: 0 }));
+  assert.match(body, /needed no edit/);
+});

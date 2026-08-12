@@ -33,6 +33,7 @@ import { verificationPassed } from './verify.ts';
 import { serve as serveMcp } from './mcp.ts';
 import {
   openCodeHarness,
+  repairHarness,
   drivingHarness,
   drivePrompt,
   driveContractPrompt,
@@ -131,12 +132,16 @@ function parseArgs(argv: string[]): Args {
  * decision. `--harness=<provider/model>` pins one, which is the mitigation for
  * the reproducibility cost §7.1 prices: a regression that cannot be attributed
  * to a model is a regression nobody can chase.
+ *
+ * Which model an unpinned run gets is `repairHarness`'s decision, not this
+ * function's — and it used to be opencode's, which is how a sweep that pinned
+ * GLM on the command line stayed green over a `fix` that never reached it.
  */
 function harnessFrom(args: Args): Harness | undefined {
   const flag = args.flags.get('harness');
   if (flag === false || args.flags.get('no-harness') === true) return undefined;
   if (!agentAllowed(args)) return undefined;
-  return openCodeHarness(typeof flag === 'string' ? { model: flag } : {});
+  return repairHarness(typeof flag === 'string' ? { pinned: flag } : {});
 }
 
 /**

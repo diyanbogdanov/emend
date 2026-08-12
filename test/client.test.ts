@@ -25,6 +25,7 @@ async function stubProvider(
       baseUrl: `http://127.0.0.1:${port}`,
       apiKey: 'test',
       model: 'test-model',
+      providerId: 'stub',
       providerLabel: 'stub',
       temperature: 0,
       maxRetries: 3,

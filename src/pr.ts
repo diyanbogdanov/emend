@@ -13,6 +13,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { renderReviewFindings } from './reviewharness.ts';
+import { verificationPassed } from './verify.ts';
 import type { Asker } from './harness.ts';
 import type { FixResult } from './fix.ts';
 import type { CallSite, CommandResult, SurfaceChange } from './types.ts';
@@ -205,11 +206,23 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
   // Without this, a reader sees line numbers and expects to find them in the
   // diff. When the bump alone typechecks there is nothing to find, and the
   // list looks like a promise the pull request did not keep.
+  //
+  // Which of those it is cannot be read off `appliedEdits` alone. Zero edits
+  // over a green verification means the new version accepted these lines as
+  // they stand; zero edits over a failed one means nothing was applied, and
+  // saying they "needed no edit" there contradicts the verification table on
+  // the same page. Measured: the first end-to-end run rendered exactly that,
+  // over `FAIL (exit 2)`.
+  const checkedClean = result.appliedEdits === 0 && !!result.verification &&
+    verificationPassed(result.verification.outcome);
   lines.push(
-    result.appliedEdits === 0
+    checkedClean
       ? '_These lines use the changed symbol. They were checked against the new ' +
         'version and needed no edit — they are listed so you can confirm that yourself._'
-      : '_These are the lines the change reaches. Edits below apply to them._',
+      : result.appliedEdits === 0
+        ? '_These lines use the changed symbol. Nothing was applied to them — see ' +
+          'the verification above for what happened — so they are where to start reading._'
+        : '_These are the lines the change reaches. Edits below apply to them._',
   );
   lines.push('');
   lines.push('| File | Line | Source | Resolved via |');

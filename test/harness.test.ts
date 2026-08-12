@@ -17,6 +17,7 @@ import {
   drivePrompt,
   summariseEvents,
   type HarnessRun,
+  repairHarness,
 } from '../src/harness.ts';
 import type { CallSite, SurfaceChange } from '../src/types.ts';
 
@@ -659,4 +660,83 @@ test('a run’s log is the whole stream, and the summary is the derived thing', 
   assert.equal(run.summary, undefined);
   assert.match(run.summary ?? run.log, /the answer nobody could see/);
   assert.equal(typeof h.id, 'string');
+});
+
+test('a session that fails its API call is not reported as a run that changed nothing', async () => {
+  // Measured, on the first end-to-end run of `emend pr`. opencode emitted an
+  // `error` event — HTTP 400, `model_not_available_for_integrator` — and then
+  // exited 0. `run()` read only the exit code, so the harness reported success,
+  // the diff was empty, and the escalation recorded "opencode changed nothing".
+  //
+  // That sentence is the cardinal rule broken one layer below where it has been
+  // caught before: a run that *could not happen* read exactly like a run that
+  // happened and found nothing worth doing. A PR body then told a reader the
+  // call sites "needed no edit" over a failed typecheck.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-apierr-'));
+  const bin = path.join(dir, 'errors-then-exits-zero');
+  writeFileSync(
+    bin,
+    `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "9.9.9"; exit 0; fi
+if [ "$1" = "run" ] && [ "$2" = "--help" ]; then echo "  --dir  x"; exit 0; fi
+echo '{"type":"error","error":{"name":"APIError","data":{"message":"The requested model is not available for integrator \\"opencode\\"."}}}'
+exit 0
+`,
+    { mode: 0o755 },
+  );
+  try {
+    const harness = openCodeHarness({ bin, timeoutMs: 5000 });
+    await harness.available();
+    const result = await harness.run(dir, { instruction: 'x', failureOutput: '' });
+
+    assert.equal(result.ok, false, 'an errored session is not a successful run');
+    assert.match(result.error ?? '', /not available for integrator/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with no harness pinned, the repair uses the model Emend was configured with', async () => {
+  // The gap the first end-to-end `emend pr` run walked into. `harnessFrom` built
+  // `openCodeHarness({})`, which passes no `--model` and writes no provider
+  // block, so opencode resolved through whatever *it* had authenticated —
+  // GitHub Copilot — and rejected the request. Emend's own `OPENROUTER_API_KEY`
+  // was never consulted, while `emend --help` advertised a GLM default.
+  //
+  // The eval never saw it because a sweep pins the model on the command line.
+  const before = { ...process.env };
+  try {
+    process.env.EMEND_LLM_PROVIDER = 'openrouter';
+    process.env.OPENROUTER_API_KEY = 'test-key-not-a-real-one';
+    delete process.env.EMEND_LLM_MODEL;
+
+    const argv = repairHarness().commandFor('/ws', 'x');
+    assert.ok(argv.includes('--model'), 'a model must be named rather than left to opencode');
+    assert.equal(argv[argv.indexOf('--model') + 1], 'openrouter/z-ai/glm-5.2');
+
+    // And the provider block that makes that model reachable at all.
+    const config = JSON.parse(repairHarness().envFor().OPENCODE_CONFIG_CONTENT ?? '{}');
+    assert.deepEqual(config.enabled_providers, ['openrouter']);
+  } finally {
+    process.env = before;
+  }
+});
+
+test('an operator who pins a harness model keeps it, and one who configured nothing keeps opencode', async () => {
+  const before = { ...process.env };
+  try {
+    process.env.EMEND_LLM_PROVIDER = 'openrouter';
+    process.env.OPENROUTER_API_KEY = 'test-key-not-a-real-one';
+    const pinned = repairHarness({ pinned: 'openrouter/z-ai/glm-4.6' }).commandFor('/ws', 'x');
+    assert.equal(pinned[pinned.indexOf('--model') + 1], 'openrouter/z-ai/glm-4.6');
+
+    // Nothing configured: defer to opencode's own resolution rather than
+    // inventing a choice. Safe now only because a session that cannot reach its
+    // model reports that instead of an empty diff — see the API-error test.
+    delete process.env.EMEND_LLM_PROVIDER;
+    delete process.env.EMEND_LLM_BASE_URL;
+    assert.ok(!repairHarness().commandFor('/ws', 'x').includes('--model'));
+  } finally {
+    process.env = before;
+  }
 });

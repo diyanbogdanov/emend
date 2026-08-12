@@ -113,6 +113,15 @@ export interface LlmConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /**
+   * Which preset answered, or empty for a bare `EMEND_LLM_BASE_URL`.
+   *
+   * The label is for people; this is for anything that has to name the provider
+   * back to another tool. The harness needs it to write opencode's
+   * `provider/model`, and deriving that from the label would mean parsing
+   * prose.
+   */
+  providerId: string;
   providerLabel: string;
   temperature: number;
   maxRetries: number;
@@ -246,6 +255,7 @@ export function resolveLlmConfig(overrides: Partial<{
       baseUrl: baseUrl.replace(/\/+$/, ''),
       apiKey: apiKey || 'not-needed',
       model,
+      providerId,
       providerLabel: label,
       temperature: temperature.value,
       maxRetries: maxRetries.value,
