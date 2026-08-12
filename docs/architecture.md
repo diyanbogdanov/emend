@@ -256,11 +256,46 @@ implemented in `llm/propose.ts`, and its header derives the design from them.
 What *was* shared and duplicated is the boundary: at one point six modules
 resolved a provider and three built requests. Provider, key, retry policy and
 the three-state availability now live in one place, and a feature module owns
-its prompt and nothing else.
+what it says and nothing else.
 
 `gate.ts` is the judge both strategies answer to, and it consults no model on
 purpose — it decides whether a model's work may land, and a judge that can be
 talked round is not one.
+
+### How a job is expressed
+
+> Decided in [§5 of the model boundary spec](./specs/2026-08-12-model-boundary.md);
+> the code is being moved onto it now. What follows is the shape it lands in, and
+> the byte-identity test at the end of this section is what makes moving safe.
+
+Four jobs reach `ask`: migrating a call site, tightening what stripping `any`
+exposed, reviewing a migration that is already green, and repairing what a linter
+flagged. They share a response shape and a rule for narrowing a union, and they
+**contradict each other on purpose** — migration forbids touching a function
+body, tightening requires it; the review job exists partly to say *do not report
+what the tightening job exists to remove*.
+
+Both the sharing and the contradicting are *relationships between jobs*, and
+copying is not a way to maintain a relationship — nothing checks that the copies
+still agree.
+
+- A **skill** is a named instruction fragment — the response shape, the narrowing
+  rule, the blast-radius rule. It exists once and is referenced.
+- A **task** is one job: which skills it includes, what it says beyond them, and
+  how it renders its context.
+
+`runTask(task, ctx)` is the single entry point. The task supplies its parts; the
+harness composes the system and user prompts and calls `ask`. What that buys is
+not brevity. It is that a disagreement between two jobs becomes the presence or
+absence of a *named* skill — which can be checked — instead of prose in four
+places, which cannot.
+
+**The restructuring is not allowed to change a word.** These are the most-edited
+lines in the repository and the least covered by tests, because what a prompt is
+worth is measured by running it. So the composed prompts are asserted
+byte-identical to what the four hand-written builders produced, which is what
+makes this a refactor and not an experiment. Changes to wording are separate
+commits, measured through `eval.ts`.
 
 The model participates where the answer is a judgement:
 
@@ -319,7 +354,7 @@ src/
   verify.ts       baseline/post command running and comparison
   remediate.ts    the vulnerability remediation ladder
   fix.ts          the fix pipeline (per-package)
-  harness.ts      THE boundary: `ask` and `run`, and nothing else reaches a model
+  harness.ts      THE boundary: `ask`, `run`, `runTask` — nothing else reaches a model
   gate.ts         is this change one the failure asked for? no model involved
   reviewharness.ts read-only repo-wide and behaviour reviews
   quality.ts      deprecation gaps left behind by a migration
@@ -334,8 +369,9 @@ src/
   eval.ts         measure the agent against a corpus
 
   github/         App auth, webhook intake, job runner, API pull requests
-  llm/propose.ts  the structured strategy: one mechanism, four jobs
-  llm/prompts.ts  what the model is told, the four prompts side by side
+  llm/tasks.ts    the four jobs, each as skills + instructions + a renderer
+  llm/skills.ts   instruction fragments, named once and shared by reference
+  llm/propose.ts  the structured strategy: send, parse, gate what comes back
   llm/client.ts   the HTTP transport
   llm/providers.ts provider presets
 ```
@@ -362,6 +398,12 @@ validation reads as tidying, but if *every* entry was dropped, the honest result
 is "I did not understand this answer", not "there was nothing to report". Those
 are opposite claims, and one of them is a clean bill of health.
 
+**A rule that only one prompt carries is a rule the others are missing.** The
+narrowing rule lived in the tightening prompt alone, so a migration that had to
+narrow a union wrote `Number(value)` unguided and rendered `$NaN` in a chart that
+typechecked and passed every test. Instructions are named skills because of that,
+not for brevity.
+
 **Attribution can fail, and failing is a value.** Where Emend cannot tell whose
 API a pin belongs to, the subject is `null` rather than a guess — a wrong
 subject gets the pin compared against a different company's published version.
@@ -377,7 +419,7 @@ first.
 ## 7. Testing
 
 ```bash
-npm test            # 577 tests, node:test, no framework
+npm test            # 604 tests, node:test, no framework
 npm run typecheck   # tsc --noEmit; the real gate
 npm run audit:removals
 ```
