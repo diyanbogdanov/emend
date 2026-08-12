@@ -43,9 +43,9 @@ import {
   NARROWING_RULE,
   type TextEdit,
   type EditClassification,
-  type HunkClassification,
 } from './llm/agent.ts';
 import { asker, escalate, harnessPermitted, type Asker, type Harness } from './harness.ts';
+import type { HunkClassification } from './gate.ts';
 import { reviewSession, type ReviewFinding } from './reviewharness.ts';
 import {
   remainingDeprecations,

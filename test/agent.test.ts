@@ -1,10 +1,10 @@
+import { parseDiagnostics } from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   nearbySymbols,
   classifyEdits,
   selectEvidencedEdits,
-  parseDiagnostics,
   buildUserPrompt,
   MIGRATION_SYSTEM_PROMPT,
   TIGHTENING_SYSTEM_PROMPT,

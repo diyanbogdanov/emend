@@ -23,7 +23,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { classifyHunks, parseDiffHunks, type DiffHunk, type HunkClassification } from './llm/agent.ts';
+import { classifyHunks, parseDiffHunks, type DiffHunk, type HunkClassification } from './gate.ts';
 import { chat } from './llm/client.ts';
 import { resolveAgent } from './llm/providers.ts';
 import type { CallSite, SurfaceChange } from './types.ts';

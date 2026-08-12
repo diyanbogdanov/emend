@@ -1,6 +1,6 @@
+import { parseDiffHunks, classifyHunks } from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDiffHunks, classifyHunks } from '../src/llm/agent.ts';
 import type { CallSite, SurfaceChange } from '../src/types.ts';
 
 const DIFF = `diff --git a/src/schema.ts b/src/schema.ts

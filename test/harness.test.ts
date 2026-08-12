@@ -1,3 +1,4 @@
+import { parseDiffHunks } from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -17,7 +18,6 @@ import {
   summariseEvents,
   type HarnessRun,
 } from '../src/harness.ts';
-import { parseDiffHunks } from '../src/llm/agent.ts';
 import type { CallSite, SurfaceChange } from '../src/types.ts';
 
 /** execFile, not exec: argument arrays, never a shell string. */
