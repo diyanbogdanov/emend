@@ -111,3 +111,33 @@ test('text the parser cannot read comes back untouched', () => {
   const elided = '{ get?: AxiosHeaders; ... 5 more ...; common?: AxiosHeaders; }';
   assert.equal(canonicalType(elided), elided);
 });
+
+test('a type argument that is the declared default is dropped', () => {
+  // `QueryObserverResult` and `QueryObserverResult<unknown, Error>` are the same
+  // type when the declaration reads `<TData = unknown, TError = Error>`, and
+  // `typeToString` prints it both ways across versions. Measured on axios,
+  // react-query and query-core, this was 64 symbols.
+  const defaults = new Map([['Result', ['unknown', 'Error']]]);
+  assert.equal(canonicalType('Result<unknown, Error>', defaults), canonicalType('Result', defaults));
+  // Trailing only: an explicit non-default earlier in the list has to stay.
+  assert.equal(canonicalType('Result<string, Error>', defaults), 'Result<string>');
+});
+
+test('a type argument that is not the default is kept', () => {
+  const defaults = new Map([['Result', ['unknown', 'Error']]]);
+  assert.notEqual(canonicalType('Result<string>', defaults), canonicalType('Result', defaults));
+});
+
+test('defaults are dropped inside a nested type argument too', () => {
+  // The reason this rides on the parser rather than a regex over `<...>`: a
+  // nested argument list is exactly what a non-nesting pattern cannot see.
+  const defaults = new Map([['Inner', ['unknown']], ['Outer', ['never']]]);
+  assert.equal(
+    canonicalType('Outer<Inner<unknown>>', defaults),
+    canonicalType('Outer<Inner>', defaults),
+  );
+});
+
+test('a type with no recorded defaults is untouched', () => {
+  assert.equal(canonicalType('Result<unknown, Error>', new Map()), 'Result<unknown, Error>');
+});

@@ -193,7 +193,14 @@ function withoutPrinterSuffixes(signature: string): string {
  * disambiguating suffixes, the names of type parameters, and the names of value
  * parameters. What survives is arity, optionality, and the types themselves.
  */
-function comparableSignature(symbol: ApiSymbol, aliases?: ReadonlyMap<string, string>): string {
+interface Reduction {
+  /** Aliases both versions agree the meaning of. Shared between the two sides. */
+  aliases: ReadonlyMap<string, string>;
+  /** This version's own declared defaults, for the type names both agree on. */
+  defaults: ReadonlyMap<string, readonly string[]>;
+}
+
+function comparableSignature(symbol: ApiSymbol, reduce?: Reduction): string {
   const params = symbol.typeParams ?? [];
 
   // A sentinel keeps a substitution from being substituted again, which a
@@ -207,12 +214,13 @@ function comparableSignature(symbol: ApiSymbol, aliases?: ReadonlyMap<string, st
   // One pass, not a fixed point: an alias whose expansion names another alias
   // is left as it is rather than chased, because a cycle would not terminate
   // and nothing measured needed the second hop.
+  const aliases = reduce?.aliases;
   const substituted =
     aliases && aliases.size > 0
       ? reduced.replace(/\b[A-Za-z_$][\w$]*\b/g, (name) => aliases.get(name) ?? name)
       : reduced;
   // Last, so it also settles whatever ordering the substitutions introduced.
-  return canonicalType(substituted);
+  return canonicalType(substituted, reduce?.defaults);
 }
 
 /**
@@ -229,6 +237,51 @@ function comparableSignature(symbol: ApiSymbol, aliases?: ReadonlyMap<string, st
  * one true one is the wrong direction for this codebase, so a disagreement
  * means the alias is left alone on both sides and nothing changes.
  */
+/**
+ * Type names whose defaults the two versions agree about, position by position.
+ *
+ * Positions only one version has are not a disagreement. Adding a defaulted type
+ * parameter cannot break a caller — `Config` and `Config<Foo>` both still bind
+ * when `P = any` is appended — which is the reasoning
+ * `widenedByDefaultedTypeParams` already applies at the declaration, applied
+ * here at every place the type is referenced. Measured, that is where most of it
+ * happens: axios 1.18 -> 1.19 adds one defaulted parameter and 17 symbols
+ * mention it.
+ *
+ * A shared position whose default genuinely moved excludes the type entirely.
+ * `TError = Error` becoming `TError = unknown` changes what a bare reference
+ * means, and dropping the argument on both sides would hide it.
+ */
+function agreedDefaults(
+  from: ApiSurface,
+  to: ApiSurface,
+  aliases: ReadonlyMap<string, string>,
+): Set<string> {
+  const agreed = new Set<string>();
+  const theirs = to.typeDefaults ?? {};
+  // Through the same reduction the signatures get: one version writes the
+  // default as `QueryKey` and the other as `readonly unknown[]`, and those are
+  // the same default.
+  const reduced = (text: string) =>
+    canonicalType(
+      withoutPrinterSuffixes(text).replace(/\b[A-Za-z_$][\w$]*\b/g, (n) => aliases.get(n) ?? n),
+    );
+
+  for (const [name, ours] of Object.entries(from.typeDefaults ?? {})) {
+    const other = theirs[name];
+    if (other === undefined) continue;
+    let agrees = true;
+    for (let i = 0; i < Math.min(ours.length, other.length); i++) {
+      if (reduced(ours[i] ?? '') !== reduced(other[i] ?? '')) {
+        agrees = false;
+        break;
+      }
+    }
+    if (agrees) agreed.add(name);
+  }
+  return agreed;
+}
+
 function agreedAliases(from: ApiSurface, to: ApiSurface): Map<string, string> {
   const reduced = (text: string) => withoutPrinterSuffixes(canonicalType(text));
   const agreed = new Map<string, string>();
@@ -370,6 +423,26 @@ const CUT = '\u2026<truncated>';
 export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
   const changes: SurfaceChange[] = [];
   const aliases = agreedAliases(from, to);
+  const shared = agreedDefaults(from, to, aliases);
+  // Substituted the same way the signatures are, or they no longer match what
+  // they are compared against: after `QueryKey` becomes `readonly unknown[]` in
+  // a signature, a default still recorded as `QueryKey` matches nothing.
+  const substitute = (text: string) =>
+    aliases.size === 0
+      ? text
+      : text.replace(/\b[A-Za-z_$][\w$]*\b/g, (name) => aliases.get(name) ?? name);
+  const only = (all: Record<string, string[]> | undefined): Map<string, readonly string[]> =>
+    new Map(
+      Object.entries(all ?? {})
+        .filter(([name]) => shared.has(name))
+        .map(([name, defaults]) => [name, defaults.map(substitute)]),
+    );
+  // Each side drops its OWN defaults; `shared` only decides which type names may
+  // be dropped at all. The texts differ legitimately — one version writes
+  // `QueryKey` where the other writes `readonly unknown[]` — and each is the
+  // default that version declared.
+  const fromSide: Reduction = { aliases, defaults: only(from.typeDefaults) };
+  const toSide: Reduction = { aliases, defaults: only(to.typeDefaults) };
   const notes: string[] = [];
 
   const unanalyzable = from.entry === null || to.entry === null;
@@ -503,7 +576,7 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
       // not a change. Their names are not something a caller can refer to.
       if (
         before.signature !== after.signature &&
-        comparableSignature(before, aliases) !== comparableSignature(after, aliases)
+        comparableSignature(before, fromSide) !== comparableSignature(after, toSide)
       ) {
         const beforeRequired = requiredArity(before.signature);
         const afterRequired = requiredArity(after.signature);

@@ -197,7 +197,19 @@ export function normaliseSignature(raw: string): string {
  * form derived from a broken parse would be comparing something the package
  * never said.
  */
-export function canonicalType(signature: string): string {
+export function canonicalType(
+  signature: string,
+  /**
+   * Type name -> the declared default for each type parameter, `''` where a
+   * parameter has none.
+   *
+   * With it, a trailing argument that merely restates its default is dropped:
+   * `QueryObserverResult<unknown, Error>` and `QueryObserverResult` are one
+   * type where the declaration reads `<TData = unknown, TError = Error>`, and
+   * `typeToString` prints it both ways across versions.
+   */
+  defaults?: ReadonlyMap<string, readonly string[]>,
+): string {
   const file = ts.createSourceFile(
     '__canonical.ts',
     `type __E = ${signature};`,
@@ -219,6 +231,27 @@ export function canonicalType(signature: string): string {
     (context) => (root) => {
       const visit = (node: ts.Node): ts.Node => {
         const visited = ts.visitEachChild(node, visit, context);
+        if (ts.isTypeReferenceNode(visited) && visited.typeArguments) {
+          const declared = defaults?.get(visited.typeName.getText(file));
+          if (declared) {
+            // Trailing only. An argument before an explicit one still has to be
+            // written, so it is not redundant even when it equals its default.
+            const given = visited.typeArguments;
+            let keep = given.length;
+            while (keep > 0 && declared[keep - 1] !== undefined && declared[keep - 1] !== '') {
+              const arg = show(given[keep - 1]!);
+              if (arg !== declared[keep - 1]) break;
+              keep--;
+            }
+            if (keep < given.length) {
+              return ts.factory.updateTypeReferenceNode(
+                visited,
+                visited.typeName,
+                keep === 0 ? undefined : ts.factory.createNodeArray(given.slice(0, keep)),
+              );
+            }
+          }
+        }
         if (!ts.isUnionTypeNode(visited)) return visited;
         // Sorted by their own printed form, so the order is a property of the
         // members rather than of the file they were read out of.
@@ -422,6 +455,43 @@ const MAX_ALIAS_EXPANSION = 200;
  * type everywhere it is named pushes signatures past the length at which they
  * are stored only in part, and a truncated comparison is unsound.
  */
+function collectTypeDefaults(
+  program: ts.Program,
+  checker: ts.TypeChecker,
+): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const file of program.getSourceFiles()) {
+    if (file.fileName.includes('/node_modules/typescript/lib/')) continue;
+    ts.forEachChild(file, function walk(node) {
+      const declaration = node as unknown as {
+        name?: ts.Identifier;
+        typeParameters?: ts.NodeArray<ts.TypeParameterDeclaration>;
+      };
+      const named =
+        ts.isInterfaceDeclaration(node) ||
+        ts.isTypeAliasDeclaration(node) ||
+        ts.isClassDeclaration(node);
+      if (named && declaration.name && declaration.typeParameters?.length) {
+        const name = declaration.name.text;
+        if (out[name] === undefined) {
+          out[name] = declaration.typeParameters.map((param) => {
+            if (!param.default) return '';
+            try {
+              return checker.typeToString(checker.getTypeFromTypeNode(param.default));
+            } catch {
+              // Unresolvable is recorded as "no default", which only ever means
+              // an argument is kept that might have been dropped.
+              return '';
+            }
+          });
+        }
+      }
+      ts.forEachChild(node, walk);
+    });
+  }
+  return out;
+}
+
 function collectTypeAliases(program: ts.Program, checker: ts.TypeChecker): Record<string, string> {
   const out: Record<string, string> = {};
   for (const file of program.getSourceFiles()) {
@@ -748,6 +818,7 @@ export async function extractSurface(
     byTypeMember,
     aliases,
     typeAliases: collectTypeAliases(program, checker),
+    typeDefaults: collectTypeDefaults(program, checker),
     entry,
     truncated,
     ...(truncated

@@ -91,6 +91,17 @@ export interface ApiSurface {
    */
   typeAliases?: Record<string, string>;
   /**
+   * Type name -> the declared default for each of its type parameters, `''`
+   * where a parameter has none.
+   *
+   * Recorded because `typeToString` spells a default out in some renderings and
+   * elides it in others, so `QueryFilters` and `QueryFilters<readonly
+   * unknown[]>` are one type printed two ways. The differ drops a trailing
+   * argument that restates its default, at positions both versions declare
+   * the same.
+   */
+  typeDefaults?: Record<string, string[]>;
+  /**
    * Resolved `.d.ts` entry point, or null when the package ships no types.
    * Null is meaningful: it means "unanalyzable", never "clean". See honesty
    * rules in the spec (§9).
