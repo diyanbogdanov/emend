@@ -4,6 +4,7 @@ import {
   diffSurfaces,
   consumerImpacting,
   parameterList,
+  positionalParams,
   requiredArity,
 } from '../src/diff.ts';
 import type { ApiSurface, ApiSymbol } from '../src/types.ts';
@@ -656,4 +657,61 @@ test('a widening is still a feature, not drift', () => {
     ]),
   ).changes;
   assert.equal(changes[0]?.severity, 'feature');
+});
+
+// ---------------------------------------------------------------------------
+// A parameter's name is not part of the contract
+// ---------------------------------------------------------------------------
+
+test('a renamed parameter is not a signature change', () => {
+  // TypeScript has no named arguments, so a caller cannot observe what a
+  // parameter is called. cron-validator went `options?` -> `partialOptions?`
+  // between 1.3.1 and 1.4.0 and nothing else moved; reporting that is reporting
+  // the implementation's choice of identifier.
+  assert.equal(
+    positionalParams('(cron: string, options?: Partial<Options>) => boolean'),
+    positionalParams('(cron: string, partialOptions?: Partial<Options>) => boolean'),
+  );
+});
+
+test('a destructuring pattern is not a signature change either', () => {
+  // The same fact in the shape it actually arrives in. TypeScript prints the
+  // binding pattern where a parameter is destructured, so a component that
+  // pulls one more prop out of an argument whose declared type never changed
+  // renders as a different signature — @xyflow/react's `BaseEdge` and
+  // react-hook-form's `FormProvider` both did, across 21 call sites.
+  assert.equal(
+    positionalParams('({ id, path, labelX }: BaseEdgeProps) => any'),
+    positionalParams('({ path, labelX, ...props }: BaseEdgeProps) => any'),
+  );
+  assert.equal(
+    positionalParams('(props: FormProviderProps<T>) => React.JSX.Element'),
+    positionalParams('({ children, watch, getValues }: FormProviderProps<T>) => React.JSX.Element'),
+  );
+});
+
+test('what a parameter IS still counts', () => {
+  // The negative controls, and they are the point. An earlier rule of this shape
+  // matched too loosely and hid real removals across a whole package, so each of
+  // these is a way this one could go wrong.
+  const differs = (a: string, b: string) =>
+    assert.notEqual(positionalParams(a), positionalParams(b), `${a} vs ${b}`);
+
+  differs('(a: string) => void', '(a: number) => void');          // type changed
+  differs('(a: string) => void', '(a?: string) => void');         // became optional
+  differs('(a: string) => void', '(a: string, b: number) => void'); // arity changed
+  differs('(a: string) => void', '(...a: string[]) => void');     // became rest
+  differs('(a: string) => X', '(a: string) => Y');                // return changed
+});
+
+test('an object type is left alone', () => {
+  // The discriminator. Members of an object type are named and their names are
+  // absolutely part of the contract — only a binding directly inside a
+  // parameter list is positional, and confusing the two would erase real
+  // property renames everywhere.
+  assert.notEqual(
+    positionalParams('(o: { mode: string }) => void'),
+    positionalParams('(o: { style: string }) => void'),
+  );
+  assert.notEqual(positionalParams('{ a: string }'), positionalParams('{ b: string }'));
 });

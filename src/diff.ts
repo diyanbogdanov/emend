@@ -185,9 +185,15 @@ function withoutPrinterSuffixes(signature: string): string {
   return signature.replace(/\b([A-Za-z_$][\w$]*?)_\d+\b/g, '$1');
 }
 
-function withPositionalTypeParams(symbol: ApiSymbol): string {
+/**
+ * A signature reduced to what a caller is actually held to.
+ *
+ * Three things a consumer cannot observe are stripped: the printer's
+ * disambiguating suffixes, the names of type parameters, and the names of value
+ * parameters. What survives is arity, optionality, and the types themselves.
+ */
+function comparableSignature(symbol: ApiSymbol): string {
   const params = symbol.typeParams ?? [];
-  if (params.length === 0) return withoutPrinterSuffixes(symbol.signature);
 
   // A sentinel keeps a substitution from being substituted again, which a
   // parameter already named `T0` would otherwise trigger.
@@ -196,7 +202,121 @@ function withPositionalTypeParams(symbol: ApiSymbol): string {
     const escaped = param.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     out = out.replace(new RegExp(`\\b${escaped}\\b`, 'g'), `\u0000T${i}`);
   });
-  return withoutPrinterSuffixes(out.replaceAll('\u0000', ''));
+  return withoutPrinterSuffixes(positionalParams(out.replaceAll('\u0000', '')));
+}
+
+/**
+ * One parameter binding: `props`, `{ a, b }`, `...rest`, and whether it is optional.
+ *
+ * Returns null when what follows is not a binding at all, which is most of the
+ * time \u2014 `(A | B)[]` and `(T extends X ? A : B)` are parenthesised types, and a
+ * scanner that mistook either for a parameter would rewrite the type itself.
+ */
+function readBinding(
+  s: string,
+  from: number,
+): { rest: boolean; optional: boolean; end: number } | null {
+  let i = from;
+  while (s[i] === ' ') i++;
+
+  const rest = s.startsWith('...', i);
+  if (rest) i += 3;
+
+  const first = s[i];
+  if (first === undefined) return null;
+  if (first === '{' || first === '[') {
+    // A destructuring pattern, skipped whole: what it pulls out of the argument
+    // is the callee's business, and the declared type after the colon is the
+    // part a caller is held to.
+    const close = first === '{' ? '}' : ']';
+    let depth = 0;
+    for (; i < s.length; i++) {
+      if (s[i] === first) depth++;
+      else if (s[i] === close && --depth === 0) {
+        i++;
+        break;
+      }
+    }
+    if (depth !== 0) return null;
+  } else if (/[A-Za-z_$]/.test(first)) {
+    while (i < s.length && /[\w$]/.test(s[i] ?? '')) i++;
+  } else {
+    return null;
+  }
+
+  const optional = s[i] === '?';
+  if (optional) i++;
+  // Only a colon makes it a binding. Without one this was a type expression
+  // that happened to start with an identifier.
+  if (s[i] !== ':') return null;
+  return { rest, optional, end: i + 1 };
+}
+
+const OPENERS = '({[<';
+const CLOSERS = ')}]>';
+
+/**
+ * Parameter bindings replaced by their position.
+ *
+ * TypeScript has no named arguments, so what a parameter is *called* is
+ * unobservable to a caller \u2014 and where a parameter is destructured, the printer
+ * renders the binding pattern in place of a name, which means a callee pulling
+ * one more property out of an argument whose declared type never moved renders
+ * as a changed signature. Measured on one repository: `@xyflow/react`'s
+ * `BaseEdge`, its `ReactFlowProvider` and react-hook-form's `FormProvider` were
+ * three findings across 21 call sites, all of them this.
+ *
+ * Only a binding directly inside a `(` group is rewritten. Members of an object
+ * type are also `name: Type` and their names are absolutely part of the
+ * contract, so confusing the two would erase every real property rename \u2014 the
+ * enclosing bracket is what tells them apart.
+ */
+export function positionalParams(signature: string): string {
+  const stack: Array<{ open: string; count: number }> = [];
+  let out = '';
+  let i = 0;
+  let atParamStart = false;
+
+  while (i < signature.length) {
+    const ch = signature[i] ?? '';
+
+    // `=>` before bracket handling: its `>` is not a closing angle, and popping
+    // on it would leave every following depth wrong.
+    if (ch === '=' && signature[i + 1] === '>') {
+      out += '=>';
+      i += 2;
+      atParamStart = false;
+      continue;
+    }
+
+    if (atParamStart && stack[stack.length - 1]?.open === '(') {
+      const binding = readBinding(signature, i);
+      if (binding) {
+        const group = stack[stack.length - 1]!;
+        out += `${binding.rest ? '...' : ''}p${group.count}${binding.optional ? '?' : ''}:`;
+        group.count++;
+        i = binding.end;
+        atParamStart = false;
+        continue;
+      }
+    }
+
+    if (OPENERS.includes(ch)) {
+      stack.push({ open: ch, count: 0 });
+      atParamStart = ch === '(';
+    } else if (CLOSERS.includes(ch)) {
+      stack.pop();
+      atParamStart = false;
+    } else if (ch === ',') {
+      atParamStart = true;
+    } else if (ch !== ' ') {
+      atParamStart = false;
+    }
+
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
 /** What `normaliseSignature` appends when it keeps only part of a signature. */
@@ -337,7 +457,7 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
       // not a change. Their names are not something a caller can refer to.
       if (
         before.signature !== after.signature &&
-        withPositionalTypeParams(before) !== withPositionalTypeParams(after)
+        comparableSignature(before) !== comparableSignature(after)
       ) {
         const beforeRequired = requiredArity(before.signature);
         const afterRequired = requiredArity(after.signature);
