@@ -8,3 +8,5 @@ dist/
 emend-demo/
 fixtures/demo-repo/node_modules/
 fixtures/demo-repo/package-lock.json
+fixtures/openai-repo/package-lock.json
+fixtures/react-query-repo/package-lock.json

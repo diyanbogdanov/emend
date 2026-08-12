@@ -1,0 +1,19 @@
+{
+  "name": "demo-orders-panel",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning test/*.test.ts"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^4.36.1",
+    "react": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "typescript": "^5.6.0"
+  }
+}

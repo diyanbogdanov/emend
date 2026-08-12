@@ -432,7 +432,71 @@ export const RECHARTS_CASE: EvalCase = {
   mustResolve: ['Cell'],
 };
 
-export const BUILT_IN_CASES: EvalCase[] = [DEMO_CASE, RECHARTS_CASE];
+/**
+ * The migration the RFS is literally about: a provider changing its own client.
+ *
+ * openai 3 -> 4 is not a rename. `Configuration` and `OpenAIApi` both stop
+ * existing, the package starts default-exporting a class, the method moves from
+ * the client's own surface onto a namespace, and the response stops being
+ * wrapped in an axios envelope. Nothing about that is guessable from a symbol
+ * list, and none of it is a compile error until the import is fixed first —
+ * which is why it is worth having in a corpus that otherwise scores
+ * one-shot repairs.
+ *
+ * Chosen also because it installs in seconds and needs no React, so widening the
+ * corpus does not mean multiplying the sweep's cost by its slowest case.
+ */
+export const OPENAI_CASE: EvalCase = {
+  id: 'openai-3.3.0-to-4.104.0',
+  pkg: 'openai',
+  toVersion: '4.104.0',
+  repo: { kind: 'fixture', name: 'openai-repo' },
+  // Four, counted by performing the migration rather than by estimating it:
+  //   1. `{ Configuration, OpenAIApi }` -> a default import
+  //   2. the two-step `new Configuration(...)` / `new OpenAIApi(...)` collapses
+  //      into one `new OpenAI(...)`
+  //   3. `createChatCompletion(...)` -> `chat.completions.create(...)`
+  //   4. `completion.data.choices` -> `completion.choices`
+  //
+  // The same caveat the recharts case carries applies: a model that rewrites the
+  // whole module in one region reports fewer edits than one making the same
+  // change in four, with an identical diff.
+  minimalEdits: 4,
+  mustResolve: ['Configuration', 'OpenAIApi'],
+};
+
+/**
+ * A migration where the compiler names only half the work.
+ *
+ * react-query 4 -> 5 breaks the positional `useQuery(key, fn, opts)` signature
+ * and renames `cacheTime` to `gcTime`; both are compile errors, and the second
+ * is masked by the first until it is fixed, so this case cannot be finished in
+ * one look at the diagnostics.
+ *
+ * `isLoading` is the interesting part and is deliberately **not scored**. It
+ * still exists in v5 with a narrower meaning — `isPending` is the one that means
+ * "no data yet" — so leaving it compiles, passes, and changes what the panel
+ * shows on a refetch. Whether replacing it is *required* is genuinely arguable,
+ * and a denominator that counts an arguable edit measures the corpus author's
+ * opinion rather than the migration. It is left in the fixture because it is
+ * exactly what the read-only behaviour review exists to notice, and noticing it
+ * is worth watching for even when nothing scores it.
+ */
+export const REACT_QUERY_CASE: EvalCase = {
+  id: 'react-query-4.36.1-to-5.90.2',
+  pkg: '@tanstack/react-query',
+  toVersion: '5.90.2',
+  repo: { kind: 'fixture', name: 'react-query-repo' },
+  // Two, and only the compiler-visible ones, for the reason above.
+  minimalEdits: 2,
+};
+
+export const BUILT_IN_CASES: EvalCase[] = [
+  DEMO_CASE,
+  RECHARTS_CASE,
+  OPENAI_CASE,
+  REACT_QUERY_CASE,
+];
 
 /** Put a case's repository on disk, ready to migrate. */
 export async function materialiseCase(evalCase: EvalCase): Promise<string> {
