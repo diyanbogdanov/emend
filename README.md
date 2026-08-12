@@ -43,6 +43,12 @@ together is in [docs/architecture.md](docs/architecture.md).
 
 Requires **Node 22.6+** (uses native TypeScript type stripping — there is no build step).
 
+Repairing anything also requires the [`opencode`](https://opencode.ai) binary on
+your `PATH`, plus a key for a model it can reach. Scanning does not — `emend
+scan` is fully deterministic and needs neither. A run that cannot reach a harness
+says so and repairs nothing, rather than reporting a clean scan: *could not fix
+is not the same as nothing to fix.*
+
 ```bash
 npm install
 
@@ -342,7 +348,9 @@ The model runs where the answer is a judgement: findings the planner declines,
 and the read-only review that asks whether a verified change still *means* the
 same thing. **Both are on by default.** A finding Emend will not attempt is a
 finding somebody repairs by hand; `--no-agent` and `--no-review` are there for
-runs that must stay offline or byte-for-byte reproducible.
+runs that must stay offline or byte-for-byte reproducible. `--no-agent` also
+turns off the harness, since from an operator's side "do not use a model" is one
+decision.
 
 It also writes the **What to look at** section of a pull request — one or two
 sentences on what the change does in your codebase's terms, and which of the
@@ -357,7 +365,9 @@ enough to invent a filename has said what the rest of its prose is worth.
 Without a key configured, the run still works and says so, rather than quietly
 delivering the deterministic half as though that were everything.
 
-It works with **any OpenAI-compatible endpoint**:
+Pin the harness's model with `--harness=<provider>/<model>`; the recommended
+defaults are open-weight. Emend's own reviews and PR summaries work with **any
+OpenAI-compatible endpoint**:
 
 ```bash
 export EMEND_LLM_PROVIDER=nebius     # or fireworks, together, groq,
@@ -376,25 +386,46 @@ export EMEND_LLM_BASE_URL=http://localhost:11434/v1   # local Ollama
 export EMEND_LLM_MODEL=qwen3-coder:30b
 ```
 
-### How the agent is constrained
+### How the model is constrained
 
-The model never touches your filesystem or a shell. It is given the API contract
-diff, the located call sites, the source, and the list of symbols that actually
-exist in the new version — then returns `find`/`replace` pairs as JSON. Emend
-locates them and **rejects anything missing or ambiguous**, so a hallucinated
-edit fails closed rather than corrupting source. If verification fails, the
-compiler's own errors are fed back and it retries, bounded.
+**One thing changes code: a harness working in a throwaway git worktree**, given
+the API contract diff, the located call sites, and the symbols that actually
+exist in the new version. It has tools, because a dependency bump breaks
+Dockerfiles, CI config and build scripts that no list of call sites contains, and
+reading those is not an enhancement to the repair — for those findings it *is*
+the repair.
 
-This design follows the literature rather than the intuition: Byam
-(arXiv 2505.07522) found end-to-end LLM migration fully repaired only **27%** of
-builds, improving markedly when given API diffs, failing lines, and compiler
-feedback; BigBag (arXiv 2606.24446) found one reusable validated transformation
-beats improvising per repository.
+Three things stand between it and your branch:
 
-A full sandboxed harness (OpenHands and similar) is the right tool for
-open-ended, repo-wide restructuring — see
-[`docs/research/llm-harness.md`](docs/research/llm-harness.md) for the provider
-and harness analysis, including why Emend doesn't start there.
+1. **The evidence gate** (`gate.ts`), which consults no model on purpose. Every
+   region the harness changed is checked against what the evidence pointed at,
+   and anything unaccounted for is reverted before verification. What counts as
+   evidence differs per job — a compiler diagnostic for a migration, the
+   migration's own diff for a review, the flagged line for a lint fix — because
+   a review runs on a build that already passes and has no diagnostics to judge
+   against at all.
+2. **Verification**, unchanged: baseline before any edit, apply, re-run, compare.
+   Only `verified` is reported as success.
+3. **A read-only behaviour review**, which reads the result and reports what a
+   green build cannot — whether the change still *means* the same thing.
+
+Nothing ever touches your working tree. All of it happens in a worktree that is
+thrown away unless it verifies.
+
+**What this gave up, stated plainly.** Emend used to have the model propose
+`find`/`replace` pairs which it located and applied, so an invented `find`
+matched nothing and was rejected before a byte was written — it failed closed.
+That property is gone, traded for tools and a materially better fix rate. The
+reasoning, the cost and the measurements are in
+[`docs/specs/2026-08-12-model-boundary.md`](docs/specs/2026-08-12-model-boundary.md) §11.
+
+This follows the literature rather than the intuition: Byam (arXiv 2505.07522)
+found end-to-end LLM migration fully repaired only **27%** of builds, improving
+markedly when given API diffs, failing lines and compiler feedback — all of which
+the harness is given. BigBag (arXiv 2606.24446) drives its agent through a
+harness for **78.6%**. See
+[`docs/research/llm-harness.md`](docs/research/llm-harness.md) for the full
+provider and harness analysis.
 
 ---
 
@@ -458,14 +489,17 @@ src/
   mcp.ts          MCP server, so a coding agent can drive Emend
   cli.ts          command surface
   github/         App auth, webhook intake, job runner, API pull requests
-  llm/propose.ts  the structured strategy: one mechanism, four jobs
-  llm/prompts.ts  what the model is told, the four prompts side by side
+  harness.ts      THE boundary: `ask` reports, `run` writes, `runTask` drives a job
+  gate.ts         is this change one the evidence asked for? no model involved
+  llm/tasks.ts    the four jobs, each as skills + instructions + a renderer
+  llm/skills.ts   instruction fragments, named once and shared by reference
+  llm/symbols.ts  symbols the new version really exports, to ground a replacement
   llm/client.ts   the HTTP transport · llm/providers.ts  provider presets
 docs/
   architecture.md             how it fits together, and why
   deployment.md               running it as a service
   github-app-setup.md         the App, step by step
-  specs/emend-mvp.md          design spec
+  specs/                      dated design specs; the authority over this file
 fixtures/demo-repo/           demo template with real drift
 ```
 
