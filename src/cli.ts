@@ -119,16 +119,23 @@ function parseArgs(argv: string[]): Args {
 }
 
 /**
- * The harness escalation, when one was asked for.
+ * The harness that makes the changes. **On unless turned off.**
  *
- * `--harness` alone leaves the model to opencode's own configuration;
- * `--harness=<provider/model>` pins one. Pinning is the mitigation for the
- * reproducibility cost the design spec prices: a regression that cannot be
- * attributed to a model is a regression nobody can chase.
+ * Opt-in until §11, which is when it became the only thing that changes code —
+ * and an opt-in flag for the only way anything gets repaired means the default
+ * run is a scanner. The same argument §2 made for the other two passes: a
+ * finding nobody repairs is a finding a person repairs by hand.
+ *
+ * `--no-agent` turns it off, sharing the switch with everything else that talks
+ * to a model, because from an operator's side "do not use a model" is one
+ * decision. `--harness=<provider/model>` pins one, which is the mitigation for
+ * the reproducibility cost §7.1 prices: a regression that cannot be attributed
+ * to a model is a regression nobody can chase.
  */
 function harnessFrom(args: Args): Harness | undefined {
   const flag = args.flags.get('harness');
-  if (flag === undefined || flag === false) return undefined;
+  if (flag === false || args.flags.get('no-harness') === true) return undefined;
+  if (!agentAllowed(args)) return undefined;
   return openCodeHarness(typeof flag === 'string' ? { model: flag } : {});
 }
 
@@ -1669,10 +1676,14 @@ ${c.bold('COMMANDS')}
                     vulnerable version actually leave the tree — and the session
                     does the repairing, which it can because it has edit rights.
                     Works on both the drift and vulnerability paths.
-    --harness[=m]   Escalate to opencode when structured edits still leave the
-                    build red, pinning provider/model if given. Every hunk it
-                    writes is held to the same evidence rule; anything the
-                    failure did not ask for is reverted. Slower and costlier.
+    --harness[=m]   Pin the harness's provider/model. The harness is ON by
+                    default and is the only thing that changes code: it works in
+                    an isolated worktree with tools, and every region it writes
+                    is held to the evidence rule — anything the failure did not
+                    ask for is reverted before the result is verified.
+                    Requires the 'opencode' binary. Without it nothing is
+                    repaired, and the run says so rather than reporting a clean
+                    scan.
     --review[=m]    Pin the reviewer's model. After a migration verifies, a
                     READ-ONLY model reads the repository and reports what the
                     diff cannot show: duplication against code it never loaded,
@@ -1690,8 +1701,8 @@ ${c.bold('COMMANDS')}
   pr <repo>       Render the pull request for a finding. Dry run by default.
     --finding <id>  Required
     --no-agent      Deterministic only, as for 'fix'
-    --harness[=m]   As for 'fix' — pass it here too, or the re-run reports a
-                    migration that verified under 'fix --harness' as unverified
+    --harness[=m]   As for 'fix'. On by default, so a re-run reproduces what
+                    'fix' did rather than reporting it as unverified
     --create        Actually push a branch and open a DRAFT PR
 
   serve           Local dashboard for browsing findings.
@@ -1711,10 +1722,10 @@ ${c.bold('COMMANDS')}
     --model <a,b>   Compare models. Omit to measure the deterministic path.
     --repeat <n>    Run each case n times. Migrations vary between runs, so a
                     single run is an anecdote rather than a measurement.
-    --harness[=m]   Measure the escalation path too. A harness swaps the editing
-                    engine, so its runs get their own row and are never averaged
-                    into the model's — and the table gains the hunks its gate
-                    kept and reverted.
+    --harness[=m]   Pin the harness's provider/model. It is on by default and
+                    is what does the editing, so the table reports the hunks its
+                    gate kept and reverted. --no-agent measures the
+                    deterministic path alone.
 
 ${c.bold('EXAMPLE')}
   emend demo ./emend-demo

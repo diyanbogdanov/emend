@@ -34,7 +34,6 @@ import {
 import { runPhase, compare, verificationPassed } from './verify.ts';
 
 import {
-  asker,
   escalate,
   revertHunks,
   harnessPermitted,
@@ -72,14 +71,26 @@ import type {
 const execFileAsync = promisify(execFile);
 
 /**
- * Said when the model was wanted and could not be reached.
+ * Said when the harness was wanted and cannot run.
  *
  * Named rather than inlined at three call sites, because the wording is the
- * point: a run that fixes less than it could must say why, and "unavailable" on
- * its own leaves a reader to conclude the model tried.
+ * point. §11 made the harness the only thing that changes code, so its absence
+ * is not a reduced service — it is the difference between "nothing needed
+ * repairing" and "nothing could be repaired", and those are opposite claims. The
+ * cardinal rule, applied to repair.
  */
-function unconfiguredAgent(reason: string): string {
-  return `the model is on by default but unavailable: ${reason} — pass --no-agent to stop asking`;
+async function unavailableWriter(
+  harness: Harness | undefined,
+  progress: (message: string) => void,
+): Promise<Harness | undefined> {
+  if (!harness) {
+    progress('  no harness: nothing can be repaired — this run was --no-agent');
+    return undefined;
+  }
+  const status = await harness.available();
+  if (status.ok) return harness;
+  progress(`  ${harness.id} cannot run: ${status.reason} — nothing will be repaired`);
+  return undefined;
 }
 
 export interface FixOptions {
@@ -651,10 +662,9 @@ export async function fixPackage(
   }
   progress(`  ${planned.length} deterministic, ${unplanned.length} needing an agent or a human`);
 
-  const llm = asker({ disabled: options.useAgent !== true });
-  // Wanting the agent and silently not getting one is the worst of both: the
-  // run looks like the model tried and failed, when it never ran at all.
-  if (!llm.ok && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
+  // Wanting a repair and silently not getting one is the worst of both: the run
+  // looks like the model tried and failed, when nothing ever ran.
+  const writer = await unavailableWriter(options.harness, progress);
 
   let ws: Workspace | null = null;
   try {
@@ -731,19 +741,10 @@ export async function fixPackage(
       }
     }
 
-    if (llm.ok && verificationPassed(verification.outcome)) {
-      const config = llm.asker;
+    if (writer && verificationPassed(verification.outcome)) {
       const dir = ws.dir;
       const diffSoFar = await workspaceDiff(ws);
       const extraFiles = await filesNamedInOutput(diffSoFar, dir);
-
-      // §11: the harness is the only thing that changes code, so a run without
-      // one repairs nothing here and has to say so. Silence would read as "there
-      // was nothing to tighten", which is the opposite claim.
-      const writer = options.harness;
-      if (!writer) {
-        progress('  no harness configured: skipping tightening and review');
-      }
 
       const tightened = writer
         ? await tightenAny(dir, phaseOpts, baseline, progress, (errors) =>
@@ -770,11 +771,11 @@ export async function fixPackage(
     // something outside the call sites Emend found, in a file it never loaded.
     let harnessRecord: HarnessEscalation | undefined;
     if (
-      options.harness &&
+      writer &&
       verification.outcome !== 'verified' &&
       verification.outcome !== 'typecheck-only'
     ) {
-      const harness = options.harness;
+      const harness = writer;
       const permitted = harnessPermitted({ untrusted });
       if (!permitted.ok) {
         progress(`declining to escalate to ${harness.id}: ${permitted.reason}`);
@@ -1234,11 +1235,7 @@ export async function fixVulnerability(
     // What still runs is polish on a bump that landed clean: tightening, then
     // the gated review. Both discover their own files from the diff now, which
     // is what the deleted repair loop was doing for them.
-    const llm = asker({ disabled: options.useAgent !== true });
-    if (!llm.ok && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
-
-    const writer = options.harness;
-    if (llm.ok && !writer) progress('  no harness configured: skipping tightening and review');
+    const writer = await unavailableWriter(options.harness, progress);
     if (writer && verificationPassed(verification.outcome)) {
       const dir = ws.dir;
       const extraFiles = await filesNamedInOutput(await workspaceDiff(ws), dir);
@@ -1388,10 +1385,7 @@ export async function fixLint(
     // list of what is wrong rather than a symptom of something hidden.
     let agentEdits = 0;
     const stillUnrepairable: typeof unrepairable = [];
-    const llm = asker({ disabled: options.useAgent !== true });
-    if (!llm.ok && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
-
-    const lintWriter = options.harness;
+    const lintWriter = await unavailableWriter(options.harness, progress);
     if (unrepairable.length > 0 && !lintWriter) {
       progress('  no harness configured: cannot repair what the linter\'s own autofix could not');
     }
