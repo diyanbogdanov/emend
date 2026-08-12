@@ -5,6 +5,7 @@ import {
   reviewGate,
   lintGate,
   touchedLines,
+  maskedFiles,
 } from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -261,4 +262,43 @@ test('migration still abstains when the failure names no locations at all', () =
   assert.equal(gate.whenNoAnchors, 'abstain');
   const classified = classifyHunks(parseDiffHunks(DIFF), gate);
   assert.ok(classified.every((h) => h.evidence === 'evidenced'));
+});
+
+test('a call site downstream of a broken import is not "the compiler is content"', () => {
+  // The openai 3 -> 4 regression, reduced. The harness migrated the file
+  // correctly in four places; the gate reverted three of them as "covers a call
+  // site with nothing outstanding on it", because the failed import on line 1
+  // meant lines 7, 22 and 30 carried no diagnostic of their own. What shipped
+  // was the new import over the old call shapes — more broken than the file it
+  // started from, and scored as a regression the model had actually repaired.
+  //
+  // This is the cardinal rule turned on the gate itself. Emend refuses to read
+  // silence as cleanliness about a call site it cannot parse or a route no
+  // description covers; a quiet line downstream of an unresolved import is the
+  // same inference, made by the one component that decides what may land.
+  // `site()` files everything under src/schema.ts, so the import error names it.
+  const importError =
+    "src/schema.ts(1,10): error TS2614: Module '\"openai\"' has no exported member 'Configuration'.";
+  const changes = [
+    { change: change('OpenAIApi', 'signature-changed'), sites: [site(22)] },
+  ];
+
+  assert.deepEqual([...maskedFiles(importError)], ['src/schema.ts']);
+
+  const gate = migrationGate(changes, importError);
+  assert.equal(gate.quiet?.length, 0, 'a masked file contributes no quiet lines');
+
+  // Neither anchored nor quiet, so it falls through to `allow` and verification
+  // decides — which is the honest answer when nothing was actually checked.
+  const classified = classifyHunks([{ file: 'src/schema.ts', start: 22, end: 23 }], gate);
+  assert.equal(classified[0]?.evidence, 'evidenced');
+});
+
+test('an ordinary type error does not mask the rest of its file', () => {
+  // The narrowness matters. A TS2554 at line 25 does not stop the compiler
+  // reading line 4, so the quiet rule still applies there — otherwise one error
+  // anywhere in a file would licence editing all of it.
+  assert.equal(maskedFiles('src/schema.ts(25,15): error TS2554: Expected 2 arguments.').size, 0);
+  const gate = migrationGate(CHANGES, FAILURE);
+  assert.ok((gate.quiet?.length ?? 0) > 0, 'unmasked files still contribute quiet lines');
 });
