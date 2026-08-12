@@ -14,7 +14,8 @@ import path from 'node:path';
 import type { Store } from '../store.ts';
 import { scanRepo } from '../analyze.ts';
 import { fixPackage, type FixResult } from '../fix.ts';
-import { renderPrBody, renderPrTitle, branchSlug } from '../pr.ts';
+import { renderPrBody, renderPrTitle, branchSlug, summarisePr } from '../pr.ts';
+import { resolveAgent } from '../llm/providers.ts';
 import { verificationPassed } from '../verify.ts';
 import { openPullRequest, type FileChange } from './pr.ts';
 import type { Finding, ScanReport } from '../types.ts';
@@ -135,6 +136,9 @@ export async function proposeMigrations(opts: ProposeOptions): Promise<number> {
       };
 
       const branch = `emend/${branchSlug(pkgName)}-${first.toVersion}`;
+      const agent = resolveAgent({ disabled: opts.useAgent !== true });
+      const summary = agent.on ? await summarisePr(agent.config, single) : null;
+
       const pr = await openPullRequest({
         token,
         owner: repo.owner,
@@ -142,7 +146,10 @@ export async function proposeMigrations(opts: ProposeOptions): Promise<number> {
         baseBranch: opts.baseBranch,
         headBranch: branch,
         title: renderPrTitle(single),
-        body: renderPrBody(single, { hosted: true }),
+        // Same guide the local path renders. The hosted run is the one where a
+        // reviewer has least context — they did not run the scan and may not
+        // have asked for the upgrade — so it is the path that needs it most.
+        body: renderPrBody(single, { hosted: true, ...(summary ? { summary } : {}) }),
         commitMessage: renderPrTitle(single),
         files: changed,
       });

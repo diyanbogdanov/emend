@@ -337,6 +337,16 @@ same thing. **Both are on by default.** A finding Emend will not attempt is a
 finding somebody repairs by hand; `--no-agent` and `--no-review` are there for
 runs that must stay offline or byte-for-byte reproducible.
 
+It also writes the **What to look at** section of a pull request — one or two
+sentences on what the change does in your codebase's terms, and which of the
+call sites is the one worth reading. Every other section of the body reports
+what happened; facts do not prioritise themselves. It is never a verdict: the
+verification table is the verdict, and it comes from commands that actually ran.
+
+A `path` the model names that appears in neither the call sites nor the diff
+sinks the whole summary rather than being quietly dropped. A model confident
+enough to invent a filename has said what the rest of its prose is worth.
+
 Without a key configured, the run still works and says so, rather than quietly
 delivering the deterministic half as though that were everything.
 

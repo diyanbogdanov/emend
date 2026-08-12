@@ -17,7 +17,7 @@ import { readRepo } from './inventory.ts';
 import { reintroduced } from './remediate.ts';
 import { fixFinding, needsSourceRepair, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
 import { Store } from './store.ts';
-import { renderPrBody, renderPrTitle, createPullRequest, branchSlug } from './pr.ts';
+import { renderPrBody, renderPrTitle, createPullRequest, branchSlug, summarisePr } from './pr.ts';
 import {
   assistantText,
   contractReviewPrompt,
@@ -29,7 +29,7 @@ import {
 } from './reviewharness.ts';
 import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
-import { PROVIDERS, resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
+import { PROVIDERS, resolveAgent, resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
 import { serve as serveMcp } from './mcp.ts';
 import {
   openCodeHarness,
@@ -1170,7 +1170,12 @@ async function cmdPr(args: Args): Promise<number> {
   store.close();
 
   const title = renderPrTitle(result);
-  const body = renderPrBody(result);
+  // The reading guide, when a model is reachable. Rendered from the same
+  // evidence the body already carries, and skipped in silence when it is not —
+  // `renderPrBody` stays pure and simply has one section fewer.
+  const briefing = agentAllowed(args) ? resolveAgent({}) : null;
+  const summary = briefing?.on ? await summarisePr(briefing.config, result) : null;
+  const body = renderPrBody(result, { ...(summary ? { summary } : {}) });
 
   if (!creating) {
     console.log('');

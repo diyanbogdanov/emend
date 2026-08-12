@@ -13,8 +13,10 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { renderReviewFindings } from './reviewharness.ts';
+import { chat } from './llm/client.ts';
+import type { LlmConfig } from './llm/providers.ts';
 import type { FixResult } from './fix.ts';
-import type { CommandResult } from './types.ts';
+import type { CallSite, CommandResult, SurfaceChange } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -71,6 +73,28 @@ export function renderPrTitle(result: FixResult): string {
   return `fix(${finding.pkg}): migrate \`${symbol}\` for ${finding.pkg}@${finding.toVersion}`;
 }
 
+/**
+ * A reviewer's starting point, written by a model from Emend's own evidence.
+ *
+ * The one thing this body could not say. Every other section reports what
+ * happened — the contract that changed, the sites it reaches, the commands that
+ * ran — and a reviewer facing nine call sites and a green table still has no
+ * idea which one is worth reading. Facts do not prioritise themselves.
+ *
+ * Deliberately never a verdict. `verification` decides whether the change is
+ * safe, from evidence, and a model sentence reading "low risk" above a
+ * regression badge would be a body that contradicts itself in a way a reader
+ * cannot adjudicate. The model is asked where to look, never whether it is fine.
+ */
+export interface PrSummary {
+  /** Named in the body: a reader who cannot tell what a model wrote cannot weight it. */
+  model: string;
+  /** What the change does, in the repository's terms rather than the diff's. */
+  says: string;
+  /** Specific places worth a reader's attention, and why each one. */
+  checks: Array<{ path: string; why: string }>;
+}
+
 export interface PrBodyOptions {
   /**
    * The migration was produced by the hosted analyser, which typechecks but
@@ -84,6 +108,15 @@ export interface PrBodyOptions {
    * themselves.
    */
   hosted?: boolean;
+  /**
+   * The model's review guide, when one was produced.
+   *
+   * Passed in rather than fetched here, which keeps this function pure and
+   * synchronous — the same reason `hosted` is a parameter. It also makes the
+   * model an input a caller can decline to supply, so an offline run renders a
+   * body that is smaller rather than one that is broken.
+   */
+  summary?: PrSummary;
 }
 
 export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): string {
@@ -142,6 +175,28 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
       '_The baseline runs before any edit, in the same isolated workspace. ' +
         'Without it, a repository that was already failing would have its pre-existing ' +
         'failures blamed on this migration._',
+    );
+    lines.push('');
+  }
+
+  // Below the verdict, above the evidence. A reviewer reads top-down and stops
+  // when they think they understand; the verdict has to be the first thing they
+  // meet, and the guide to the evidence has to come before the evidence itself
+  // or it is a summary of something they have already waded through.
+  if (options.summary) {
+    const s = options.summary;
+    lines.push('## What to look at');
+    lines.push('');
+    lines.push(s.says);
+    lines.push('');
+    for (const check of s.checks) {
+      lines.push(`- \`${check.path}\` — ${check.why}`);
+    }
+    if (s.checks.length > 0) lines.push('');
+    lines.push(
+      `_Written by \`${s.model}\` from the contract diff, the located call sites and the ` +
+        'change itself. It is a reading guide, not a verdict — the verification above is ' +
+        'the verdict, and it comes from commands that actually ran._',
     );
     lines.push('');
   }
@@ -467,4 +522,141 @@ export async function createPullRequest(
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+/**
+ * Ask for a reading guide, and rule out the two answers that would hurt.
+ *
+ * Not a verdict, because `verification` already is one and it came from
+ * commands that ran. Not a restatement of the diff either — the body renders
+ * the contract change, the call sites and the commands directly below this, and
+ * a paragraph re-narrating them costs the reader attention while adding nothing.
+ *
+ * What is left is the thing none of those sections can do: say which of nine
+ * call sites is the one to read, and why that one.
+ */
+export function prSummaryPrompt(input: {
+  pkg: string;
+  fromVersion: string;
+  toVersion: string;
+  change: SurfaceChange;
+  sites: CallSite[];
+  diff: string;
+  outcome: string;
+}): string {
+  return [
+    `\`${input.pkg}\` is going ${input.fromVersion} -> ${input.toVersion}. \`${input.change.path}\` ${input.change.kind}, and this repository uses it.`,
+    '',
+    'Write the note a reviewer reads first: what this change actually does to this codebase, and which lines deserve their attention.',
+    '',
+    '```diff',
+    `- ${input.change.path}: ${truncate(input.change.before ?? '(absent)', 600)}`,
+    `+ ${input.change.path}: ${truncate(input.change.after ?? '(removed)', 600)}`,
+    '```',
+    '',
+    'Call sites:',
+    ...input.sites.slice(0, 40).map((s) => `- ${s.file}:${s.line}  ${s.text.trim().slice(0, 160)}`),
+    '',
+    'The change that was made:',
+    '```diff',
+    input.diff.slice(0, 10_000),
+    '```',
+    '',
+    `Verification already ran and returned \`${input.outcome}\`. That is the verdict and it is not yours to give — do NOT say whether this is safe, low risk, or ready to merge. A reviewer who wants the verdict reads the table.`,
+    '',
+    'Do not restate the diff, the call site list, or the commands — all three are rendered directly below your note. Do not comment on style or naming.',
+    '',
+    'Two things only:',
+    '- `says`: one or two sentences on what changes about this codebase\'s BEHAVIOUR, in its own terms. If the answer is that nothing does, say that plainly.',
+    '- `checks`: the specific places worth reading, each with the reason it stands out from the others. Every `path` must be a file that appears above. An empty list is a real answer when no site is more interesting than the rest.',
+    '',
+    'Answer with a JSON object on its own line: {"says": "...", "checks": [{"path": "...", "why": "..."}]}',
+  ].join('\n');
+}
+
+/**
+ * Read the model's answer, and refuse it if it invented a file.
+ *
+ * The guard that matters. A prompt instruction not to hallucinate is a wish; the
+ * evidence is right here, so a `path` naming a file that appears in neither the
+ * call sites nor the diff can be *checked* — and a model confident enough to
+ * invent one has told you what its prose is worth. Dropping the bad check and
+ * keeping the paragraph would leave the least trustworthy part on the page.
+ */
+export function parsePrSummary(
+  log: string,
+  known: ReadonlySet<string>,
+): Omit<PrSummary, 'model'> | null {
+  const candidates = [...log.matchAll(/\{[\s\S]*?"says"[\s\S]*?\}\s*\}|\{[\s\S]*?"says"[\s\S]*?\]\s*\}/g)];
+  for (const raw of candidates.reverse()) {
+    let parsed: { says?: unknown; checks?: unknown };
+    try {
+      parsed = JSON.parse(raw[0]) as { says?: unknown; checks?: unknown };
+    } catch {
+      continue;
+    }
+    if (typeof parsed.says !== 'string' || parsed.says.trim() === '') continue;
+    const offered = Array.isArray(parsed.checks) ? parsed.checks : [];
+    const checks = offered
+      .map((c) => c as { path?: unknown; why?: unknown })
+      .filter(
+        (c): c is { path: string; why: string } =>
+          typeof c.path === 'string' && typeof c.why === 'string' && c.why !== '' && known.has(c.path),
+      );
+    if (checks.length === 0 && offered.length > 0) return null;
+    return { says: parsed.says.trim(), checks };
+  }
+  return null;
+}
+
+/** Files the evidence actually mentions, so an invented one can be spotted. */
+function filesInEvidence(result: FixResult): Set<string> {
+  const files = new Set(result.finding.sites.map((s) => s.file));
+  for (const line of result.diff.split('\n')) {
+    const match = line.match(/^\+\+\+ b\/(.+)$/);
+    if (match?.[1]) files.add(match[1]);
+  }
+  return files;
+}
+
+/**
+ * The reading guide for one migration, or nothing.
+ *
+ * Nothing is a real outcome and stays silent: an unreachable model, an
+ * unparseable answer, or one that named a file it made up. The body renders
+ * smaller in every one of those cases, which is the correct degradation — a
+ * heading with an apology under it is still a claim about a model that did not
+ * speak.
+ */
+export async function summarisePr(
+  config: LlmConfig,
+  result: FixResult,
+): Promise<PrSummary | null> {
+  const reply = await chat(
+    config,
+    [
+      {
+        role: 'system',
+        content:
+          'You brief a reviewer on someone else\'s dependency migration. You are read-only and report to a human. Be specific and short; a sentence that would be true of any migration is worth nothing here.',
+      },
+      {
+        role: 'user',
+        content: prSummaryPrompt({
+          pkg: result.finding.pkg,
+          fromVersion: result.finding.fromVersion,
+          toVersion: result.finding.toVersion,
+          change: result.finding.change,
+          sites: result.finding.sites,
+          diff: result.diff,
+          outcome: result.verification?.outcome ?? 'unverified',
+        }),
+      },
+    ],
+    { jsonMode: true },
+  );
+  if (!reply.ok) return null;
+
+  const parsed = parsePrSummary(reply.content, filesInEvidence(result));
+  return parsed ? { model: config.model, ...parsed } : null;
 }
