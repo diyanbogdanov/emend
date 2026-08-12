@@ -55,16 +55,26 @@ export interface Asker {
 }
 
 /**
- * An `Asker`, or null when no model is available.
+ * Whether a model can be reached, and if not, whose decision that was.
  *
- * Null rather than a throwing constructor: a run without a model does less and
- * says so, which is a degradation every caller here already knows how to render.
+ * Three states rather than two for the same reason `resolveAgent` has them: off
+ * and unreachable used to look identical from the outside, both producing fewer
+ * fixes and no explanation. Only the unreachable one has anything to tell you.
  */
-export function asker(options: { disabled?: boolean } = {}): Asker | null {
+export type AskerAvailability =
+  | { ok: true; asker: Asker }
+  | { ok: false; why: 'disabled'; reason?: undefined }
+  | { ok: false; why: 'unconfigured'; reason: string };
+
+export function asker(options: { disabled?: boolean } = {}): AskerAvailability {
   const agent = resolveAgent(options);
-  if (!agent.on) return null;
+  if (!agent.on) {
+    return agent.why === 'unconfigured'
+      ? { ok: false, why: 'unconfigured', reason: agent.reason }
+      : { ok: false, why: 'disabled' };
+  }
   const config = agent.config;
-  return {
+  const ask: Asker = {
     model: config.model,
     async ask(system, user, opts = {}) {
       const reply = await chat(
@@ -78,6 +88,7 @@ export function asker(options: { disabled?: boolean } = {}): Asker | null {
       return reply.ok ? reply.content : null;
     },
   };
+  return { ok: true, asker: ask };
 }
 
 export interface HarnessTask {

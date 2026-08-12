@@ -137,7 +137,7 @@ export async function proposeMigrations(opts: ProposeOptions): Promise<number> {
 
       const branch = `emend/${branchSlug(pkgName)}-${first.toVersion}`;
       const briefing = asker({ disabled: opts.useAgent !== true });
-      const summary = briefing ? await summarisePr(briefing, single) : null;
+      const summary = briefing.ok ? await summarisePr(briefing.asker, single) : null;
 
       const pr = await openPullRequest({
         token,

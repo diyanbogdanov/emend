@@ -30,7 +30,10 @@ import {
 } from './reviewharness.ts';
 import { startServer } from './server.ts';
 import { verificationPassed } from './verify.ts';
-import { PROVIDERS, resolveAgent, resolveLlmConfig, type LlmConfig } from './llm/providers.ts';
+// `emend models` lists what a provider serves, which is the one place the CLI
+// legitimately knows a provider exists. Everything that asks a model to *work*
+// goes through the harness.
+import { PROVIDERS, resolveLlmConfig } from './llm/providers.ts';
 import { serve as serveMcp } from './mcp.ts';
 import {
   openCodeHarness,
@@ -1306,7 +1309,7 @@ async function cmdPr(args: Args): Promise<number> {
   // evidence the body already carries, and skipped in silence when it is not —
   // `renderPrBody` stays pure and simply has one section fewer.
   const briefing = asker({ disabled: !agentAllowed(args) });
-  const summary = briefing ? await summarisePr(briefing, result) : null;
+  const summary = briefing.ok ? await summarisePr(briefing.asker, result) : null;
   const body = renderPrBody(result, { ...(summary ? { summary } : {}) });
 
   if (!creating) {

@@ -19,8 +19,8 @@
 
 import type { CallSite, Finding, SurfaceChange } from '../types.ts';
 import { renderImpact, type SymbolImpact } from '../impact.ts';
-import type { LlmConfig } from './providers.ts';
-import { chat, extractJson, type ChatMessage } from './client.ts';
+import { extractJson } from './client.ts';
+import type { Asker } from '../harness.ts';
 
 export interface TextEdit {
   file: string;
@@ -37,7 +37,6 @@ export interface AgentProposal {
   /** The model's own confidence, recorded for the PR body — never trusted as a gate. */
   modelConfidence: 'high' | 'medium' | 'low';
   error?: string;
-  usage?: { promptTokens: number; completionTokens: number };
 }
 
 export interface AgentContext {
@@ -421,10 +420,10 @@ function isTextEdit(value: unknown): value is TextEdit {
 
 /** Propose the edits that carry a codebase onto the new version of a dependency. */
 export async function proposeEdits(
-  config: LlmConfig,
+  asker: Asker,
   ctx: AgentContext,
 ): Promise<AgentProposal> {
-  return propose(config, MIGRATION_SYSTEM_PROMPT, buildUserPrompt(ctx));
+  return propose(asker, MIGRATION_SYSTEM_PROMPT, buildUserPrompt(ctx));
 }
 
 /**
@@ -434,10 +433,10 @@ export async function proposeEdits(
  * after the request is one shape, parsed one way.
  */
 export async function proposeTightening(
-  config: LlmConfig,
+  asker: Asker,
   ctx: TighteningContext,
 ): Promise<AgentProposal> {
-  return propose(config, TIGHTENING_SYSTEM_PROMPT, buildTighteningPrompt(ctx));
+  return propose(asker, TIGHTENING_SYSTEM_PROMPT, buildTighteningPrompt(ctx));
 }
 
 /**
@@ -494,42 +493,36 @@ export function buildReviewPrompt(ctx: ReviewContext): string {
  * the prompt differs, and the three prompts contradict each other.
  */
 export async function proposeReview(
-  config: LlmConfig,
+  asker: Asker,
   ctx: ReviewContext,
 ): Promise<AgentProposal> {
-  return propose(config, REVIEW_SYSTEM_PROMPT, buildReviewPrompt(ctx));
+  return propose(asker, REVIEW_SYSTEM_PROMPT, buildReviewPrompt(ctx));
 }
 
 async function propose(
-  config: LlmConfig,
+  asker: Asker,
   system: string,
   user: string,
 ): Promise<AgentProposal> {
-  const messages: ChatMessage[] = [
-    { role: 'system', content: system },
-    { role: 'user', content: user },
-  ];
-
-  const res = await chat(config, messages, { jsonMode: true });
-  if (!res.ok) {
+  const answer = await asker.ask(system, user, { json: true });
+  if (answer === null) {
     return {
       ok: false,
       edits: [],
       rationale: '',
       modelConfidence: 'low',
-      error: res.error ?? 'request failed',
+      error: 'the model was unreachable or returned nothing',
     };
   }
 
-  const parsed = extractJson(res.content);
+  const parsed = extractJson(answer);
   if (!parsed || typeof parsed !== 'object') {
     return {
       ok: false,
       edits: [],
       rationale: '',
       modelConfidence: 'low',
-      error: `could not parse a JSON object from the response: ${res.content.slice(0, 300)}`,
-      ...(res.usage ? { usage: res.usage } : {}),
+      error: `could not parse a JSON object from the response: ${answer.slice(0, 300)}`,
     };
   }
 
@@ -551,7 +544,6 @@ async function propose(
       confidence === 'high' || confidence === 'medium' || confidence === 'low'
         ? confidence
         : 'medium',
-    ...(res.usage ? { usage: res.usage } : {}),
   };
 }
 
@@ -975,10 +967,10 @@ export function buildLintPrompt(ctx: LintFixContext): string {
 }
 
 export async function proposeLintFixes(
-  config: LlmConfig,
+  asker: Asker,
   ctx: LintFixContext,
 ): Promise<AgentProposal> {
-  return propose(config, LINT_SYSTEM_PROMPT, buildLintPrompt(ctx));
+  return propose(asker, LINT_SYSTEM_PROMPT, buildLintPrompt(ctx));
 }
 
 /**

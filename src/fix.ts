@@ -32,7 +32,6 @@ import {
   type Workspace,
 } from './apply.ts';
 import { runPhase, compare, verificationPassed } from './verify.ts';
-import { resolveAgent, type LlmConfig } from './llm/providers.ts';
 
 import {
   proposeTightening,
@@ -46,7 +45,7 @@ import {
   type EditClassification,
   type HunkClassification,
 } from './llm/agent.ts';
-import { escalate, harnessPermitted, type Harness } from './harness.ts';
+import { asker, escalate, harnessPermitted, type Asker, type Harness } from './harness.ts';
 import { reviewSession, type ReviewFinding } from './reviewharness.ts';
 import {
   remainingDeprecations,
@@ -309,14 +308,14 @@ async function tightenAny(
  * whose edits all failed to apply, and the run reported neither.
  */
 async function repairTightening(
-  config: LlmConfig,
+  asker: Asker,
   dir: string,
   finding: Finding,
   extraFiles: string[],
   progress: (message: string) => void,
   errors: string,
 ): Promise<number | null> {
-  const proposal = await proposeTightening(config, {
+  const proposal = await proposeTightening(asker, {
     finding,
     // Re-read: the files on disk are the stripped ones, not what the migration
     // was shown, and the prompt promises the model exactly what it is holding.
@@ -355,7 +354,7 @@ async function repairTightening(
  * spending three verifications chasing a nicer diff is the wrong trade.
  */
 async function reviewMigration(
-  config: LlmConfig,
+  asker: Asker,
   ws: Workspace,
   phaseOpts: { skipTests: boolean },
   baseline: Awaited<ReturnType<typeof runPhase>>,
@@ -381,7 +380,7 @@ async function reviewMigration(
   // and — below — the boundary of what it may change.
   const migrationDiff = await workspaceDiff(ws);
   const sources = await loadSources(ws.dir, finding, extraFiles);
-  const proposal = await proposeReview(config, {
+  const proposal = await proposeReview(asker, {
     finding,
     sources,
     diff: migrationDiff,
@@ -669,10 +668,10 @@ export async function fixPackage(
   }
   progress(`  ${planned.length} deterministic, ${unplanned.length} needing an agent or a human`);
 
-  const llm = resolveAgent({ disabled: options.useAgent !== true });
+  const llm = asker({ disabled: options.useAgent !== true });
   // Wanting the agent and silently not getting one is the worst of both: the
   // run looks like the model tried and failed, when it never ran at all.
-  if (!llm.on && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
+  if (!llm.ok && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
 
   let ws: Workspace | null = null;
   try {
@@ -729,8 +728,8 @@ export async function fixPackage(
     // needed here, so both now come from the workspace diff rather than being
     // threaded out of a repair.
     const agentRecord: FixResult['agent'] = undefined;
-    if (llm.on && verificationPassed(verification.outcome)) {
-      const config = llm.config;
+    if (llm.ok && verificationPassed(verification.outcome)) {
+      const config = llm.asker;
       const dir = ws.dir;
       const diffSoFar = await workspaceDiff(ws);
       const extraFiles = await filesNamedInOutput(diffSoFar, dir);
@@ -1236,21 +1235,21 @@ export async function fixVulnerability(
     // the gated review. Both discover their own files from the diff now, which
     // is what the deleted repair loop was doing for them.
     let agentRecord: FixResult['agent'];
-    const llm = resolveAgent({ disabled: options.useAgent !== true });
-    if (!llm.on && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
+    const llm = asker({ disabled: options.useAgent !== true });
+    if (!llm.ok && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
 
-    if (llm.on && verificationPassed(verification.outcome)) {
+    if (llm.ok && verificationPassed(verification.outcome)) {
       const dir = ws.dir;
       const extraFiles = await filesNamedInOutput(await workspaceDiff(ws), dir);
       const polishFinding: Finding = { ...finding, toVersion: worst ?? finding.toVersion };
 
       const tightened = await tightenAny(dir, phaseOpts, baseline, progress, (errors) =>
-        repairTightening(llm.config, dir, polishFinding, extraFiles, progress, errors),
+        repairTightening(llm.asker, dir, polishFinding, extraFiles, progress, errors),
       );
       if (tightened) verification = tightened;
 
       const reviewed = await reviewMigration(
-        llm.config, ws, phaseOpts, baseline, polishFinding, [],
+        llm.asker, ws, phaseOpts, baseline, polishFinding, [],
         extraFiles, [], progress,
       );
       if (reviewed) verification = reviewed.report;
@@ -1389,10 +1388,10 @@ export async function fixLint(
     // list of what is wrong rather than a symptom of something hidden.
     let agentEdits = 0;
     const stillUnrepairable: typeof unrepairable = [];
-    const llm = resolveAgent({ disabled: options.useAgent !== true });
-    if (!llm.on && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
+    const llm = asker({ disabled: options.useAgent !== true });
+    if (!llm.ok && llm.why === 'unconfigured') progress(unconfiguredAgent(llm.reason));
 
-    if (unrepairable.length > 0 && llm.on) {
+    if (unrepairable.length > 0 && llm.ok) {
       const targets = unrepairable.map((u) => ({
         file: u.finding.sites[0]?.file ?? '',
         line: u.finding.sites[0]?.line ?? 1,
@@ -1405,8 +1404,8 @@ export async function fixLint(
         if (body !== null) sources.set(file, body);
       }
 
-      progress(`  asking ${llm.config.model} to repair ${targets.length} finding(s) no tool can`);
-      const proposal = await proposeLintFixes(llm.config, { findings: targets, sources });
+      progress(`  asking ${llm.asker.model} to repair ${targets.length} finding(s) no tool can`);
+      const proposal = await proposeLintFixes(llm.asker, { findings: targets, sources });
       if (!proposal.ok) {
         progress(`    provider error: ${proposal.error}`);
         stillUnrepairable.push(...unrepairable);
