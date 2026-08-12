@@ -569,6 +569,15 @@ the AST, using the TypeScript compiler this project already depends on. The
 printer orders a union by internal type id, so which order you see depends on
 what else the program happened to load.
 
+So is a type argument that only restates its default: `QueryObserverResult` and
+`QueryObserverResult<unknown, Error>` are one type where the declaration reads
+`<TData = unknown, TError = Error>`. That one matters out of proportion to its
+subtlety — axios 1.18 → 1.19 adds a single defaulted type parameter, seventeen
+symbols mention it, and axios is in nearly every TypeScript repository.
+
+Together these removed **101 findings across five real package pairs and added
+none**.
+
 The row that matters most is the smallest. A return type narrowing from
 `(A | B)[]` to `A[]` is *safe* to the compiler and means the call now returns
 fewer kinds of thing. No type-level analysis will ever catch that one; it is why

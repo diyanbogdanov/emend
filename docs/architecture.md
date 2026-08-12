@@ -64,9 +64,10 @@ not changes to the contract at all but changes to how it was *rendered*: a
 parameter's name or destructuring pattern, a type alias the printer expanded in
 one version and named in the other, a union whose members it ordered differently,
 its own disambiguating suffix. Each is normalised away before comparing —
-`positionalParams`, the agreed-alias table, `canonicalType`,
-`withoutPrinterSuffixes` — and together they removed 80 findings across five real
-package pairs while adding none. The full table is in the README's known
+`positionalParams`, the agreed-alias table, `canonicalType` (which also drops a
+type argument that only restates its default), `withoutPrinterSuffixes` — and
+together they removed 101 findings across five real package pairs while adding
+none. The full table is in the README's known
 limitations.
 
 ### Tier 2 — known vulnerabilities
