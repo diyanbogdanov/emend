@@ -211,7 +211,15 @@ answer. Measured across two vendors, 5 of 11 offered parameters were that.
 | `emend serve` | Local dashboard |
 | `emend models` | List models your LLM provider serves |
 
-Useful flags: `--only pkg,pkg`, `--all`, `--json`, `--no-dev`, `--contracts` (scan);
+`emend scan --features` answers the other half of the question: not what broke,
+but what *arrived*. It lists new top-level exports in packages you already
+depend on — `@types/react` 18 → 19 reports `Activity`, `cache`, `cacheSignal`,
+`captureOwnerStack`, `use` — read from the declarations rather than a changelog.
+Types are excluded, only values count, and it never enters the headline: nothing
+in your repository is affected either way.
+
+Useful flags: `--only pkg,pkg`, `--all`, `--json`, `--no-dev`, `--contracts`,
+`--features`, `--freshness`, `--vulns`, `--lint` (scan);
 `--finding <id>`, `--no-agent`, `--no-review`, `--drive`, `--keep` (fix);
 `--create` (pr); `--model a,b`, `--repeat n`, `--cases <file>` (eval).
 
