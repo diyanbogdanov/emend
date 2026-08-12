@@ -841,6 +841,13 @@ export async function fixPackage(
           ...(escalation.reason ? { reason: escalation.reason } : {}),
         };
 
+        // Counted, for the same reason the review's hunks are: this is the work
+        // that repaired the build, and leaving it out makes `appliedEdits` report
+        // only what the deterministic planner managed. The first eval sweep after
+        // §11 scored a migration that verified as "1 of 6 required edits" for
+        // exactly this reason — the engine had changed and the counter had not.
+        appliedCount += escalation.keptHunks;
+
         if (!escalation.ok) {
           progress(`  ${escalation.reason}`);
         } else {
