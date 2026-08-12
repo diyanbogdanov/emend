@@ -10,7 +10,7 @@ import {
   TIGHTENING_SYSTEM_PROMPT,
   NARROWING_RULE,
   type TextEdit,
-} from '../src/llm/agent.ts';
+} from '../src/llm/propose.ts';
 import type { CallSite, Finding, SurfaceChange } from '../src/types.ts';
 
 function targetSymbols(

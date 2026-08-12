@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { applyLintPatch, repairableFiles } from '../src/lint.ts';
-import { selectLintEdits } from '../src/llm/agent.ts';
+import { selectLintEdits } from '../src/llm/propose.ts';
 import type { LintFinding } from '../src/lint.ts';
 
 const run = promisify(execFile);

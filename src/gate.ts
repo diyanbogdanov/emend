@@ -6,7 +6,7 @@
  * harness with write access proposes nothing and leaves only a diff, so the
  * same rule is applied to its hunks instead. One question, two inputs.
  *
- * It lived in `llm/agent.ts`, which meant `harness.ts` imported its own safety
+ * It lived in what was then `llm/agent.ts`, so `harness.ts` imported its own safety
  * property from a module named after the other strategy — the single largest
  * reason the two read as one thing badly split rather than two things that
  * share a judge.

@@ -799,3 +799,31 @@ export function driveContractPrompt(input: {
     `Report which route you chose, why the surrounding code picked that one over the alternatives, and what \`emend_verify\` said. If you changed nothing, say that plainly and why.`,
   ].join('\n');
 }
+
+/**
+ * The structured strategy, re-exported so a feature imports LLM work from here
+ * and nowhere else.
+ *
+ * The two ways to get a model to change code stay separate implementations —
+ * one proposes edits Emend locates and applies, so a hallucinated `find`
+ * matches nothing and fails closed; the other writes to the checkout and is
+ * judged afterwards by `gate.ts`. That difference is load-bearing and is why
+ * they are not one function. What was gratuitous was making a caller know which
+ * file each lived in: `fix.ts` imported half its model work from `harness.ts`
+ * and half from `llm/propose.ts`, and nothing about the split told a reader why.
+ *
+ * The prompts and the proposal parsing stay in `llm/propose.ts` because they
+ * are long and this file is the boundary, not a drawer.
+ */
+export {
+  proposeTightening,
+  proposeReview,
+  proposeLintFixes,
+  selectLintEdits,
+  selectReviewEdits,
+  nearbySymbols,
+  NARROWING_RULE,
+  type TextEdit,
+  type EditClassification,
+  type AgentProposal,
+} from './llm/propose.ts';

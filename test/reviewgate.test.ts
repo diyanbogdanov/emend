@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { touchedLines, selectReviewEdits } from '../src/llm/agent.ts';
-import type { TextEdit } from '../src/llm/agent.ts';
+import { touchedLines, selectReviewEdits } from '../src/llm/propose.ts';
+import type { TextEdit } from '../src/llm/propose.ts';
 
 // The real diff from the live axios repair, trimmed to the file that matters.
 const MIGRATION_DIFF = `diff --git a/src/client.ts b/src/client.ts

@@ -34,6 +34,9 @@ import {
 import { runPhase, compare, verificationPassed } from './verify.ts';
 
 import {
+  asker,
+  escalate,
+  harnessPermitted,
   proposeTightening,
   proposeReview,
   proposeLintFixes,
@@ -43,8 +46,9 @@ import {
   NARROWING_RULE,
   type TextEdit,
   type EditClassification,
-} from './llm/agent.ts';
-import { asker, escalate, harnessPermitted, type Asker, type Harness } from './harness.ts';
+  type Asker,
+  type Harness,
+} from './harness.ts';
 import type { HunkClassification } from './gate.ts';
 import { reviewSession, type ReviewFinding } from './reviewharness.ts';
 import {

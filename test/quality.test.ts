@@ -9,7 +9,7 @@ import {
   remainingDeprecations,
   describeDeprecationGaps,
 } from '../src/quality.ts';
-import { REVIEW_SYSTEM_PROMPT } from '../src/llm/agent.ts';
+import { REVIEW_SYSTEM_PROMPT } from '../src/llm/propose.ts';
 import type { Finding } from '../src/types.ts';
 
 function deprecationFinding(files: string[]): Finding {

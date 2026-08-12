@@ -5,7 +5,7 @@ import {
   buildTighteningPrompt,
   TIGHTENING_SYSTEM_PROMPT,
   type TighteningContext,
-} from '../src/llm/agent.ts';
+} from '../src/llm/propose.ts';
 
 test('removes a parameter any so the contextual type is inferred instead', () => {
   // recharts 3 widened the Tooltip formatter parameter. `(value: any)` compiles
