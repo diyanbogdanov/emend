@@ -715,3 +715,52 @@ test('an object type is left alone', () => {
   );
   assert.notEqual(positionalParams('{ a: string }'), positionalParams('{ b: string }'));
 });
+
+
+// ---------------------------------------------------------------------------
+// A type alias that both versions agree about
+// ---------------------------------------------------------------------------
+
+test('an alias rendered one way and then the other is not a change', () => {
+  // Measured on @tanstack/react-query. 5.51 declares `type QueryKey =
+  // ReadonlyArray<unknown>`, a plain alias the printer keeps the name of; 5.101
+  // declares it as a conditional over a `Register` interface, which the printer
+  // resolves. So `TQueryKey extends QueryKey = QueryKey` became
+  // `... = readonly unknown[]` and denotes exactly what it did before.
+  const before = surface('1.0.0', [sym('useQuery', 'ADD<T extends QueryKey = QueryKey>() => void')], {
+    typeAliases: { QueryKey: 'readonly unknown[]' },
+  });
+  const after = surface('2.0.0', [sym('useQuery', 'ADD<T extends QueryKey = readonly unknown[]>() => void')], {
+    typeAliases: { QueryKey: 'readonly unknown[]' },
+  });
+  assert.deepEqual(diffSurfaces(before, after).changes, []);
+});
+
+test('an alias the two versions disagree about is left alone entirely', () => {
+  // The guard that decides whether this ships at all. Where an alias MEANS
+  // something different, substituting it makes signatures differ that the
+  // printer had been rendering identically — and measured on query-core, of
+  // four aliases whose expansion moved, two had merely been reordered by the
+  // printer (`"error" | "pending"` vs `"pending" | "error"`), which would have
+  // bought two false findings for one true one.
+  //
+  // So an alias is substituted only where both versions agree what it is. That
+  // can only remove a false positive, never create one.
+  const before = surface('1.0.0', [sym('watch', '(cb: Listener) => void')], {
+    typeAliases: { Listener: '() => void' },
+  });
+  const after = surface('2.0.0', [sym('watch', '(cb: Listener) => void')], {
+    typeAliases: { Listener: '(focused: boolean) => void' },
+  });
+  assert.deepEqual(diffSurfaces(before, after).changes, []);
+});
+
+test('a real change is still a change when an alias sits beside it', () => {
+  const before = surface('1.0.0', [sym('f', '(a: Status, b: string) => void')], {
+    typeAliases: { Status: '"on" | "off"' },
+  });
+  const after = surface('2.0.0', [sym('f', '(a: "on" | "off", b: number) => void')], {
+    typeAliases: { Status: '"on" | "off"' },
+  });
+  assert.equal(diffSurfaces(before, after).changes.length, 1);
+});

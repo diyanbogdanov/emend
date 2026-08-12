@@ -81,6 +81,16 @@ export interface ApiSurface {
    */
   aliases: Record<string, string>;
   /**
+   * Non-generic type aliases, mapped to what the checker says they are.
+   *
+   * Recorded because the printer's choice of alias-or-expansion is not stable
+   * across versions: a plain `type QueryKey = ReadonlyArray<unknown>` prints as
+   * `QueryKey`, and the same alias rewritten as a conditional prints as
+   * `readonly unknown[]`, so the same type renders two ways. The differ
+   * substitutes an alias only where both versions agree what it means.
+   */
+  typeAliases?: Record<string, string>;
+  /**
    * Resolved `.d.ts` entry point, or null when the package ships no types.
    * Null is meaningful: it means "unanalyzable", never "clean". See honesty
    * rules in the spec (§9).

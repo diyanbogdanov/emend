@@ -324,6 +324,68 @@ function resolveModuleSymbol(
  * walk. We are diffing a surface against itself across versions, so both sides
  * degrade identically.
  */
+/** How long an alias expansion may be before recording it costs more than it buys. */
+const MAX_ALIAS_EXPANSION = 200;
+
+/**
+ * Non-generic type aliases, mapped to what the checker says they actually are.
+ *
+ * `TypeFormatFlags.InTypeAlias` is what does the work: without it the printer
+ * hands back the alias's own name for a plain alias and the resolved form for a
+ * conditional one, which is the whole problem — @tanstack/query-core declares
+ * `type QueryKey = ReadonlyArray<unknown>` in 5.51 and a conditional over a
+ * `Register` interface in 5.101, so the same type printed as `QueryKey` and
+ * then as `readonly unknown[]`. Measured, both render as `readonly unknown[]`
+ * under that flag.
+ *
+ * Three exclusions, each for a reason that was measured rather than guessed:
+ *
+ * Generic aliases are skipped, because `Foo<string>` cannot be replaced by
+ * `Foo`'s body without substituting the argument, which is a job for the
+ * checker and not for text.
+ *
+ * An expansion of `any` is skipped, because that is overwhelmingly the checker
+ * giving up on an import it could not resolve rather than a genuine `any` —
+ * remark-gfm's `Options` resolves to an unshipped `./lib/index.js` and rendered
+ * exactly that way, which would have made two unrelated signatures agree.
+ *
+ * Anything over `MAX_ALIAS_EXPANSION` is skipped, because substituting a long
+ * type everywhere it is named pushes signatures past the length at which they
+ * are stored only in part, and a truncated comparison is unsound.
+ */
+function collectTypeAliases(program: ts.Program, checker: ts.TypeChecker): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const file of program.getSourceFiles()) {
+    if (file.fileName.includes('/node_modules/typescript/lib/')) continue;
+    ts.forEachChild(file, function walk(node) {
+      if (ts.isTypeAliasDeclaration(node) && (node.typeParameters?.length ?? 0) === 0) {
+        const name = node.name.text;
+        if (out[name] === undefined) {
+          try {
+            const expanded = checker.typeToString(
+              checker.getTypeAtLocation(node.name),
+              undefined,
+              ts.TypeFormatFlags.InTypeAlias,
+            );
+            if (
+              expanded !== name &&
+              expanded !== 'any' &&
+              expanded.length <= MAX_ALIAS_EXPANSION
+            ) {
+              out[name] = expanded;
+            }
+          } catch {
+            // A declaration the checker cannot resolve records nothing, which is
+            // the same as not knowing what the alias means.
+          }
+        }
+      }
+      ts.forEachChild(node, walk);
+    });
+  }
+  return out;
+}
+
 export async function extractSurface(
   pkgDir: string,
   pkg: string,
@@ -616,6 +678,7 @@ export async function extractSurface(
     symbols,
     byTypeMember,
     aliases,
+    typeAliases: collectTypeAliases(program, checker),
     entry,
     truncated,
     ...(truncated

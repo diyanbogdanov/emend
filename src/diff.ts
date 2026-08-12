@@ -192,7 +192,7 @@ function withoutPrinterSuffixes(signature: string): string {
  * disambiguating suffixes, the names of type parameters, and the names of value
  * parameters. What survives is arity, optionality, and the types themselves.
  */
-function comparableSignature(symbol: ApiSymbol): string {
+function comparableSignature(symbol: ApiSymbol, aliases?: ReadonlyMap<string, string>): string {
   const params = symbol.typeParams ?? [];
 
   // A sentinel keeps a substitution from being substituted again, which a
@@ -202,7 +202,35 @@ function comparableSignature(symbol: ApiSymbol): string {
     const escaped = param.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     out = out.replace(new RegExp(`\\b${escaped}\\b`, 'g'), `\u0000T${i}`);
   });
-  return withoutPrinterSuffixes(positionalParams(out.replaceAll('\u0000', '')));
+  const reduced = withoutPrinterSuffixes(positionalParams(out.replaceAll('\u0000', '')));
+  if (!aliases || aliases.size === 0) return reduced;
+  // One pass, not a fixed point: an alias whose expansion names another alias
+  // is left as it is rather than chased, because a cycle would not terminate
+  // and nothing measured needed the second hop.
+  return reduced.replace(/\b[A-Za-z_$][\w$]*\b/g, (name) => aliases.get(name) ?? name);
+}
+
+/**
+ * Aliases the two versions agree about.
+ *
+ * The whole safety argument. Where an alias means the same thing in both,
+ * substituting it can only collapse a difference the printer invented — the
+ * comparison gets strictly more accurate. Where the two disagree, substituting
+ * would make signatures differ that had been rendering identically, and
+ * measured on query-core that trade was bad: of four aliases whose expansion
+ * moved between 5.51 and 5.101, two had merely been reordered by the printer
+ * (`"error" | "pending" | "success"` against `"pending" | "success" | "error"`),
+ * one was a genuine break and one was ambiguous. Two false findings bought for
+ * one true one is the wrong direction for this codebase, so a disagreement
+ * means the alias is left alone on both sides and nothing changes.
+ */
+function agreedAliases(from: ApiSurface, to: ApiSurface): Map<string, string> {
+  const agreed = new Map<string, string>();
+  const theirs = to.typeAliases ?? {};
+  for (const [name, expansion] of Object.entries(from.typeAliases ?? {})) {
+    if (theirs[name] === expansion) agreed.set(name, expansion);
+  }
+  return agreed;
 }
 
 /**
@@ -324,6 +352,7 @@ const CUT = '\u2026<truncated>';
 
 export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
   const changes: SurfaceChange[] = [];
+  const aliases = agreedAliases(from, to);
   const notes: string[] = [];
 
   const unanalyzable = from.entry === null || to.entry === null;
@@ -457,7 +486,7 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
       // not a change. Their names are not something a caller can refer to.
       if (
         before.signature !== after.signature &&
-        comparableSignature(before) !== comparableSignature(after)
+        comparableSignature(before, aliases) !== comparableSignature(after, aliases)
       ) {
         const beforeRequired = requiredArity(before.signature);
         const afterRequired = requiredArity(after.signature);
