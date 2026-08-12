@@ -183,6 +183,13 @@ limitations](#known-limitations).
 the only way to see a **deprecation** or a **newly available capability** —
 both are still in today's copy, so reading it alone can never surface either.
 
+A newly offered parameter is reported and never written into your code, because
+adopting a filter changes which records come back and that is a decision rather
+than a repair. One kind is treated differently: a **pagination control** showing
+up on an endpoint you call without paging is not a capability, it is the vendor
+disclosing that you have been taking the default and calling it the whole
+answer. Measured across two vendors, 5 of 11 offered parameters were that.
+
 ---
 
 ## Commands

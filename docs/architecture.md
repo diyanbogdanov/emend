@@ -105,6 +105,14 @@ Even with all three, a Tier 3 finding is a **lead, not a proof** — providers d
 serve endpoints they never described. The finding says *not described by* rather
 than *removed*, because that is what was actually checked.
 
+Comparing a description against its own past (`--since`) surfaces two more
+things, and they are routed apart because they want opposite handling. A route
+that went away is a repair. A parameter newly offered is not: adopting a filter
+changes which records come back, so it is reported and never written. The
+exception is a pagination control, which is not a capability — its appearance
+says the endpoint pages, and a caller that never pages has been treating the
+first page as the whole answer.
+
 ---
 
 ## 3. The pipeline
