@@ -59,12 +59,15 @@ What it can prove, and the wording is deliberate:
 That last distinction is the whole point of the tier: calling a widening
 "breaking" is what makes the word ignorable on the changes that deserve it.
 
-Reading all 41 drift findings from one large repository individually, four were
-a parameter's name or its destructuring pattern and are now suppressed; the
-largest remaining class is a type alias inlined or renamed between versions
-(`QueryKey` → `readonly unknown[]`), which is a rendering difference the type
-checker could settle and string comparison cannot. The full table is in the
-README's known limitations.
+Reading all 41 drift findings from one large repository individually, most were
+not changes to the contract at all but changes to how it was *rendered*: a
+parameter's name or destructuring pattern, a type alias the printer expanded in
+one version and named in the other, a union whose members it ordered differently,
+its own disambiguating suffix. Each is normalised away before comparing —
+`positionalParams`, the agreed-alias table, `canonicalType`,
+`withoutPrinterSuffixes` — and together they removed 80 findings across five real
+package pairs while adding none. The full table is in the README's known
+limitations.
 
 ### Tier 2 — known vulnerabilities
 

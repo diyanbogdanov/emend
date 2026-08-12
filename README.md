@@ -558,11 +558,16 @@ All 41 drift findings from one large repository, read individually:
 | generics too large to adjudicate by text | ~10 | unknown, honestly |
 
 The alias row needed the type checker rather than string comparison, and it was
-the largest: on `@tanstack/react-query` 5.51 → 5.101 alone it was **40 findings**,
-because a library rewriting `type QueryKey = ReadonlyArray<unknown>` as a
-conditional changes nothing about the type and everything about how it prints.
-An alias is substituted only where both versions agree what it means, so it can
-collapse a difference the printer invented and never create one.
+the largest: across five real package pairs it was **80 findings**, because a
+library rewriting `type QueryKey = ReadonlyArray<unknown>` as a conditional
+changes nothing about the type and everything about how it prints. An alias is
+substituted only where both versions agree what it means, so it can collapse a
+difference the printer invented and never create one.
+
+Union member order is settled the same way — by parsing the type and sorting on
+the AST, using the TypeScript compiler this project already depends on. The
+printer orders a union by internal type id, so which order you see depends on
+what else the program happened to load.
 
 The row that matters most is the smallest. A return type narrowing from
 `(A | B)[]` to `A[]` is *safe* to the compiler and means the call now returns
