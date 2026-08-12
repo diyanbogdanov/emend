@@ -37,13 +37,14 @@ import {
   asker,
   escalate,
   harnessPermitted,
-  proposeTightening,
-  proposeReview,
-  proposeLintFixes,
+  runTask,
+  TIGHTENING_TASK,
+  REVIEW_TASK,
+  LINT_TASK,
   selectLintEdits,
   nearbySymbols,
   selectReviewEdits,
-  NARROWING_RULE,
+  NARROWING,
   type TextEdit,
   type EditClassification,
   type Asker,
@@ -319,7 +320,7 @@ async function repairTightening(
   progress: (message: string) => void,
   errors: string,
 ): Promise<number | null> {
-  const proposal = await proposeTightening(asker, {
+  const proposal = await runTask(asker, TIGHTENING_TASK, {
     finding,
     // Re-read: the files on disk are the stripped ones, not what the migration
     // was shown, and the prompt promises the model exactly what it is holding.
@@ -384,7 +385,7 @@ async function reviewMigration(
   // and — below — the boundary of what it may change.
   const migrationDiff = await workspaceDiff(ws);
   const sources = await loadSources(ws.dir, finding, extraFiles);
-  const proposal = await proposeReview(asker, {
+  const proposal = await runTask(asker, REVIEW_TASK, {
     finding,
     sources,
     diff: migrationDiff,
@@ -821,7 +822,7 @@ export async function fixPackage(
               `repository, and the build no longer succeeds. Make the smallest set of changes ` +
               `that gets it building and passing its own tests again.\n\n` +
               `Change nothing the upgrade does not require. No new features, no reformatting, ` +
-              `no refactoring of code that already works.\n\n${NARROWING_RULE}`,
+              `no refactoring of code that already works.\n\n${NARROWING.text}`,
             failureOutput,
           },
           {
@@ -1409,7 +1410,7 @@ export async function fixLint(
       }
 
       progress(`  asking ${llm.asker.model} to repair ${targets.length} finding(s) no tool can`);
-      const proposal = await proposeLintFixes(llm.asker, { findings: targets, sources });
+      const proposal = await runTask(llm.asker, LINT_TASK, { findings: targets, sources });
       if (!proposal.ok) {
         progress(`    provider error: ${proposal.error}`);
         stillUnrepairable.push(...unrepairable);

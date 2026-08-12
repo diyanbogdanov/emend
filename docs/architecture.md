@@ -264,10 +264,6 @@ talked round is not one.
 
 ### How a job is expressed
 
-> Decided in [§5 of the model boundary spec](./specs/2026-08-12-model-boundary.md);
-> the code is being moved onto it now. What follows is the shape it lands in, and
-> the byte-identity test at the end of this section is what makes moving safe.
-
 Four jobs reach `ask`: migrating a call site, tightening what stripping `any`
 exposed, reviewing a migration that is already green, and repairing what a linter
 flagged. They share a response shape and a rule for narrowing a union, and they
@@ -279,23 +275,34 @@ Both the sharing and the contradicting are *relationships between jobs*, and
 copying is not a way to maintain a relationship — nothing checks that the copies
 still agree.
 
-- A **skill** is a named instruction fragment — the response shape, the narrowing
-  rule, the blast-radius rule. It exists once and is referenced.
-- A **task** is one job: which skills it includes, what it says beyond them, and
-  how it renders its context.
+- A **skill** (`llm/skills.ts`) is a named instruction fragment that more than one
+  job says: the response shape, and the rule for narrowing a union. It exists
+  once and is referenced.
+- A **task** (`llm/tasks.ts`) is one job: which skills it includes, what it says
+  beyond them, and how it renders its context. Rule numbering is generated, so
+  inserting a rule renumbers nothing by hand.
 
-`runTask(task, ctx)` is the single entry point. The task supplies its parts; the
-harness composes the system and user prompts and calls `ask`. What that buys is
+Anything said *once* stays inline in its task. A single-use fragment given a name
+is sharing that is not happening, and it costs every reader a hop to find out.
+
+`runTask(asker, task, ctx)` is the single entry point. The task supplies its
+parts; the harness composes the two prompts and calls `ask`. What that buys is
 not brevity. It is that a disagreement between two jobs becomes the presence or
-absence of a *named* skill — which can be checked — instead of prose in four
-places, which cannot.
+absence of a *named* skill — `REVIEW_TASK.rules.includes(NARROWING)` is a
+question with an answer, where "does the review prompt mention narrowing" is a
+question about 4KB of prose. The narrowing skill turned out to have a fifth
+consumer that is not a task at all: the escalation prompt `fix.ts` hands to the
+harness. That is one rule shared across *both* repair strategies, which is
+precisely the relationship copying cannot hold.
 
-**The restructuring is not allowed to change a word.** These are the most-edited
-lines in the repository and the least covered by tests, because what a prompt is
-worth is measured by running it. So the composed prompts are asserted
-byte-identical to what the four hand-written builders produced, which is what
-makes this a refactor and not an experiment. Changes to wording are separate
-commits, measured through `eval.ts`.
+**The restructuring was not allowed to change a word,** and that is asserted
+rather than asserted-to. `test/prompts.golden.test.ts` composes all four tasks
+over seven context fixtures — chosen so every conditional section in every
+renderer is entered by one and skipped by another — and compares the result byte
+for byte against goldens captured from the hand-written builders before they
+moved. Those goldens are not a snapshot to refresh when it goes red; they are the
+wording that was measured. Changing one is an experiment, and belongs in its own
+commit behind `eval.ts`.
 
 The model participates where the answer is a judgement:
 
@@ -430,7 +437,7 @@ first.
 ## 7. Testing
 
 ```bash
-npm test            # 604 tests, node:test, no framework
+npm test            # 611 tests, node:test, no framework
 npm run typecheck   # tsc --noEmit; the real gate
 npm run audit:removals
 ```

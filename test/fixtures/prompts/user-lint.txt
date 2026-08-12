@@ -1,0 +1,16 @@
+Findings to repair:
+
+Dockerfile:3:1: DL3006 — Always tag the version of an image explicitly
+scripts/release.sh:12:1: SC2086 — Double quote to prevent globbing and word splitting
+
+--- Dockerfile ---
+FROM node
+WORKDIR /app
+RUN npm ci
+
+
+--- scripts/release.sh ---
+#!/bin/sh
+set -e
+npm publish $TAG
+

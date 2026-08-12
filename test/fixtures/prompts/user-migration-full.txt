@@ -1,0 +1,94 @@
+# Dependency upgrade
+recharts: 2.15.0 -> 3.10.1
+
+# API changes to resolve (2), each with its call sites
+_Derived from a declaration diff, and possibly incomplete. Entries with no call sites listed were added because the compiler named them._
+## 1. Tooltip.formatter
+Symbol:      Tooltip.formatter
+Change kind: signature-changed
+Severity:    breaking (detection confidence: medium)
+Old type:    (value: TValue, name: TName) => ReactNode
+New type:    (value: ValueType | undefined, name: NameType) => ReactNode
+The library says: Use the exported ValueType and narrow before formatting.
+Call sites:
+- src/Chart.tsx:4:20  formatter={(value: any) =>
+
+## 2. Cell
+Symbol:      Cell
+Change kind: removed
+Severity:    breaking (detection confidence: high)
+Old type:    declare const Cell: FC<CellProps>
+New type:    (symbol no longer exists)
+Call sites:
+- src/Legend.tsx:3:45  <Cell fill={fill} />
+
+# Symbols available in recharts@3.10.1 (most relevant first)
+Tooltip
+ValueType
+NameType
+Rectangle
+Customized
+
+# Source files
+## src/Chart.tsx
+```typescript
+import { Tooltip } from 'recharts';
+
+export const Chart = () => (
+  <Tooltip formatter={(value: any) => [`${value.toFixed(1)}%`, LABEL]} />
+);
+
+```
+
+## src/Legend.tsx
+```typescript
+import { Cell } from 'recharts';
+
+export const swatch = (fill: string) => <Cell fill={fill} />;
+
+```
+
+# Code that depends on your edit
+Other code depends on these symbols. Changing their shape breaks it.
+Resolved with the type checker: exact for static uses, blind to reflection
+and dynamic property access. Absence below means none were found.
+
+- swatch (src/Legend.tsx) — used in 2 places:
+    src/Panel.tsx:12  swatch(theme.accent)
+    src/Table.tsx:88  cells.map(swatch)
+
+# Currently broken — the authority on what to fix
+```
+src/Chart.tsx(4,38): error TS18048: 'value' is possibly 'undefined'.
+src/Legend.tsx(3,32): error TS2304: Cannot find name 'Cell'.
+```
+Fix exactly what this output reports, plus the deprecations listed above — those never appear here, because deprecated code compiles. Do not edit anything else, however plausible the change looks.
+
+# Your previous attempts FAILED verification (2)
+## Attempt 1 — rejected, do not propose these again
+```json
+[
+  {
+    "file": "src/Chart.tsx",
+    "find": "value.toFixed(1)",
+    "replace": "Number(value ?? 0).toFixed(1)",
+    "reason": "guard the undefined"
+  }
+]
+```
+Outcome: renders NaN for string values
+## Attempt 2 — rejected, do not propose these again
+```json
+[
+  {
+    "file": "src/Legend.tsx",
+    "find": "<Cell fill={fill} />",
+    "replace": "<Rectangle fill={fill} />",
+    "reason": "Cell was removed"
+  }
+]
+```
+Outcome: src/Legend.tsx(3,32): error TS2741: Property 'width' is missing.
+Propose a DIFFERENT fix. Repeating an edit listed above will fail the same way. Note the source shown above is the ORIGINAL, unmodified file — your new edits apply to that, not to any previous attempt.
+
+Produce the JSON now.

@@ -1,21 +1,56 @@
 /**
- * What the model is told, separated from how it is asked.
+ * The four jobs, as data.
  *
- * Four jobs share one mechanism — `propose` sends a system prompt and a user
- * prompt and parses an edit set out of the reply — and differ only in what they
- * say. Keeping the saying here leaves `propose.ts` short enough to read as the
- * mechanism it is, and puts the four prompts side by side, which is where they
- * belong: they contradict each other on purpose, and the differences are only
- * checkable when they are visible together.
+ * Each is one thing the model is asked to do: which skills it includes, what it
+ * says beyond them, and how it renders its context. `harness.ts` composes them
+ * and calls `ask`; nothing here knows a model exists.
+ *
+ * They belong in one file because **they contradict each other on purpose**, and
+ * a contradiction is only checkable where both sides are visible. Migration
+ * forbids touching a function body; tightening requires it. Migration prefers
+ * naming a type; tightening forbids naming one. Review exists partly to undo
+ * what tightening was told to leave. Handed both sets of rules at once a model
+ * satisfies the wrong one, which is why these are four tasks and not one task
+ * with flags.
+ *
+ * Rules are a list rather than a numbered block so that the numbering is
+ * generated: a rule inserted at position 3 of a prompt with ten of them used to
+ * mean renumbering seven by hand, in prose that also refers to rule numbers.
  *
  * These are the most-edited lines in the repository and the least covered by
  * tests, because what a prompt is worth is measured by running it. Changing one
- * is an experiment, not a refactor.
+ * is an experiment, not a refactor — `test/prompts.golden.test.ts` holds every
+ * word of them against the wording that was measured.
  */
 
 import { renderImpact, type SymbolImpact } from '../impact.ts';
 import type { CallSite, Finding, SurfaceChange } from '../types.ts';
 import type { TextEdit } from './propose.ts';
+import { NARROWING, RESPONSE_SHAPE, type Skill } from './skills.ts';
+
+/**
+ * One job the model can be given.
+ *
+ * A rule is either literal text or a `Skill`. That the two are the same list is
+ * the point: a shared instruction is a reference, an unshared one is a string,
+ * and which is which is visible at the call site instead of being a fact about
+ * four files. `rules.includes(NARROWING)` answers what reading 4KB of prose
+ * used to.
+ */
+export interface Task<Ctx> {
+  /** Identifies the job in logs and in the eval corpus. */
+  name: string;
+  /** Who the model is and what it has been handed. Everything before the rules. */
+  preamble: string;
+  /** The line introducing the rules. Two of the four word it differently. */
+  rulesHeading: string;
+  /** Ordered. Numbering is generated, so inserting one renumbers nothing by hand. */
+  rules: ReadonlyArray<string | Skill>;
+  /** Everything after the rules, each entry separated by a blank line. */
+  closing: ReadonlyArray<string | Skill>;
+  /** The context, as the user prompt. The only part that varies per run. */
+  render(ctx: Ctx): string;
+}
 
 export interface AgentContext {
   /** Provides the package and version pair. Its own `change` is not special. */
@@ -116,54 +151,45 @@ export interface ReviewContext {
 }
 
 /**
- * The output contract, shared by every prompt.
+ * Carry a codebase onto the new version of a dependency.
  *
- * Kept in one constant because `proposeEdits` parses one shape and one shape
- * only: a prompt that drifted here would produce edits the parser silently drops.
- */
-const RESPONSE_SHAPE = `Respond with exactly this shape:
-{
-  "edits": [{"file": "src/x.ts", "find": "<exact unique substring>", "replace": "<replacement>", "reason": "<short why>"}],
-  "rationale": "<one or two sentences on the overall change>",
-  "confidence": "high" | "medium" | "low"
-}`;
-
-/**
- * How to handle a value whose type is a union, in any prompt that can meet one.
+ * **Nothing calls this.** `d4a0da9` deleted the loop that drove it, on the
+ * argument that repair belongs to an agent driving the MCP tools, and recorded
+ * what that costs: `emend fix --agent` no longer repairs a breaking upgrade from
+ * the CLI — FIXED to NOT FIXED on the axios bait repo. The task, its evidence
+ * gate (`classifyEdits`, `selectEvidencedEdits`) and its tests are all intact and
+ * dormant, waiting on a caller.
  *
- * Shared rather than repeated. #1 disclosed the gap this closes — the rule lived
- * only in the tightening prompt, so a migration that had to narrow a union wrote
- * `Number(value)` unguided, and the recharts case reproduces it: the tooltip
- * formatter takes `ValueType | undefined`, so a missing value renders `$NaN`
- * while typechecking and passing every test. Two copies of a rule this specific
- * drift, and the copy that drifts is the one nobody is reading.
+ * Kept rather than deleted because it is the grounded strategy both papers
+ * argue for — Byam's 27% improves markedly when the model is given the API diff,
+ * the failing lines and compiler feedback, which is exactly what `AgentContext`
+ * carries — and because deleting it would make the gap invisible instead of
+ * open.
  */
-export const NARROWING_RULE = `Handle the real type. Choose the form by what the compiler says the type actually is:
-   a. The type is a union with more than one non-undefined member (for example \`ValueType\`, which is \`number | string | ReadonlyArray<number | string>\`) — you MUST narrow with a runtime check, and every branch must still produce a sensible result:
-      \`typeof value === 'number' ? value.toFixed(1) : String(value ?? '')\`
-      The branch that is NOT the numeric one must pass its value through, typically with \`String(...)\`. Do not funnel it back through \`Number(...)\`: \`Number('n/a')\` is \`NaN\`, so a label that was meant to read "n/a" reaches the user as "NaN". A \`typeof\` check whose else branch is \`Number(value)\` is the same silent bug wearing a disguise.
-   b. Only \`undefined\` is the problem and the remaining type is already what you need — guard it:
-      \`value?.toFixed(1) ?? \'\'\`
-   Blanket coercion such as \`Number(value ?? 0)\` or \`Number(value)\` is NOT acceptable in case (a). It compiles, so nothing will object to it, but it renders a real string as "0" and a missing value as "NaN" — a silent behaviour change no test catches and no reviewer sees. Only reach for a coercion when the union has exactly one non-undefined member.`;
+export const MIGRATION_TASK: Task<AgentContext> = {
+  name: 'migration',
+  preamble: `You are a precise TypeScript migration engine.
 
-export const MIGRATION_SYSTEM_PROMPT = `You are a precise TypeScript migration engine.
-
-You are given the API changes in a dependency upgrade, the exact lines in a codebase that use them, and the symbols available in the new version. Produce the minimal source edits that make the code correct under the new version.
-
-Rules you must follow:
-1. Output ONLY a JSON object. No prose, no markdown fences.
-2. Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.
-3. Change only what the API changes require. Do not reformat, rename variables, add comments, or refactor.
-   The deprecations listed above ARE required. A deprecated symbol never produces a compiler error, so nothing downstream will object if you leave it — and a migration that reports "X is deprecated" and ships with X still in the code has not done what it said. Replace each one with its current equivalent from the available-symbols list. If a deprecation genuinely has no replacement there, leave it and say so in "rationale".
-4. Only use symbols that appear in the provided list of available symbols. Never invent an API.
-5. If you cannot determine a correct edit, return an empty "edits" array and explain why in "rationale". An empty result is far better than a wrong one.
-6. When compiler output from a failed attempt is provided, it is the authoritative statement of what is still broken. Fix the errors it reports. Do not edit call sites it does not complain about, however plausible the change looks.
-7. The list of API changes is derived from a type-declaration diff and can be incomplete. If the compiler reports an error the list does not explain, fix it anyway using the error's own description of the expected type. Do not decline solely because an error is absent from the list.
-8. Prefer the strongest type that compiles, in this order. First, name the constraint with a type the package exports — the error text usually names it and it is usually in the available-symbols list, sometimes under a different export name; prefer (value: TooltipValueType | undefined) => Number(value ?? 0).toFixed(1). Second, omit the annotation and let it be inferred from context. Only if neither compiles, use any or a cast, and say so in that edit's "reason". Never use @ts-ignore or @ts-expect-error. Getting to green matters more than getting there elegantly, but try the stronger forms first.
-9. ${NARROWING_RULE}
-10. A "Code that depends on your edit" section, when present, lists symbols in these files that other files call, and the places that call them. Changing such a symbol's shape — its parameters, its return type, its name — breaks every place listed there. Prefer a fix that leaves those signatures alone; adapt inside the body instead. If one genuinely must change, the edit set is not finished until every listed site changes with it. A symbol absent from a section that is present had no callers found outside its own file — reflection and dynamic property access are invisible to that analysis, so treat it as probably free to reshape, not certainly. If the section is absent entirely, nothing was measured at all.
-
-${RESPONSE_SHAPE}`;
+You are given the API changes in a dependency upgrade, the exact lines in a codebase that use them, and the symbols available in the new version. Produce the minimal source edits that make the code correct under the new version.`,
+  rulesHeading: `Rules you must follow:`,
+  rules: [
+    `Output ONLY a JSON object. No prose, no markdown fences.`,
+    `Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.`,
+    `Change only what the API changes require. Do not reformat, rename variables, add comments, or refactor.
+   The deprecations listed above ARE required. A deprecated symbol never produces a compiler error, so nothing downstream will object if you leave it — and a migration that reports "X is deprecated" and ships with X still in the code has not done what it said. Replace each one with its current equivalent from the available-symbols list. If a deprecation genuinely has no replacement there, leave it and say so in "rationale".`,
+    `Only use symbols that appear in the provided list of available symbols. Never invent an API.`,
+    `If you cannot determine a correct edit, return an empty "edits" array and explain why in "rationale". An empty result is far better than a wrong one.`,
+    `When compiler output from a failed attempt is provided, it is the authoritative statement of what is still broken. Fix the errors it reports. Do not edit call sites it does not complain about, however plausible the change looks.`,
+    `The list of API changes is derived from a type-declaration diff and can be incomplete. If the compiler reports an error the list does not explain, fix it anyway using the error's own description of the expected type. Do not decline solely because an error is absent from the list.`,
+    `Prefer the strongest type that compiles, in this order. First, name the constraint with a type the package exports — the error text usually names it and it is usually in the available-symbols list, sometimes under a different export name; prefer (value: TooltipValueType | undefined) => Number(value ?? 0).toFixed(1). Second, omit the annotation and let it be inferred from context. Only if neither compiles, use any or a cast, and say so in that edit's "reason". Never use @ts-ignore or @ts-expect-error. Getting to green matters more than getting there elegantly, but try the stronger forms first.`,
+    NARROWING,
+    `A "Code that depends on your edit" section, when present, lists symbols in these files that other files call, and the places that call them. Changing such a symbol's shape — its parameters, its return type, its name — breaks every place listed there. Prefer a fix that leaves those signatures alone; adapt inside the body instead. If one genuinely must change, the edit set is not finished until every listed site changes with it. A symbol absent from a section that is present had no callers found outside its own file — reflection and dynamic property access are invisible to that analysis, so treat it as probably free to reshape, not certainly. If the section is absent entirely, nothing was measured at all.`,
+  ],
+  closing: [
+    RESPONSE_SHAPE,
+  ],
+  render: renderMigration,
+};
 
 /**
  * The review pass: it verifies, but is it worth merging?
@@ -178,32 +204,37 @@ ${RESPONSE_SHAPE}`;
  *  - The migration repeated the same coercion at nine call sites. The reviewer
  *    extracted one module and the diff got smaller.
  */
-export const REVIEW_SYSTEM_PROMPT = `You are a demanding code reviewer with commit rights, reviewing a dependency migration that already compiles and passes its tests.
+export const REVIEW_TASK: Task<ReviewContext> = {
+  name: 'review',
+  preamble: `You are a demanding code reviewer with commit rights, reviewing a dependency migration that already compiles and passes its tests.
 
-Passing is the floor, not the goal. Decide whether this diff leaves the codebase better or merely green, and fix it where it does not.
-
-Rules you must follow:
-1. Output ONLY a JSON object. No prose, no markdown fences.
-2. Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.
-3. Behaviour must not change. This is a restructuring pass. The one exception: replacing a deprecated API with its supported equivalent is the migration finishing its job, not a behaviour change.
-4. Finish the migration first. If you are told a deprecated symbol is still imported, removing it is the highest-priority edit in this pass. A migration that reports "X is deprecated" and still uses X has not done what it said. Use the package's supported replacement; if there is none, leave it and say so in "rationale".
-5. Then look for the move that deletes complexity rather than rearranging it. Work this list in order — a structural regression outranks every simplification below it, and naming a nit while a structural problem stands is a wasted pass:
+Passing is the floor, not the goal. Decide whether this diff leaves the codebase better or merely green, and fix it where it does not.`,
+  rulesHeading: `Rules you must follow:`,
+  rules: [
+    `Output ONLY a JSON object. No prose, no markdown fences.`,
+    `Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.`,
+    `Behaviour must not change. This is a restructuring pass. The one exception: replacing a deprecated API with its supported equivalent is the migration finishing its job, not a behaviour change.`,
+    `Finish the migration first. If you are told a deprecated symbol is still imported, removing it is the highest-priority edit in this pass. A migration that reports "X is deprecated" and still uses X has not done what it said. Use the package's supported replacement; if there is none, leave it and say so in "rationale".`,
+    `Then look for the move that deletes complexity rather than rearranging it. Work this list in order — a structural regression outranks every simplification below it, and naming a nit while a structural problem stands is a wasted pass:
    - Ad-hoc branching added to an existing flow, or a "temporary" special case that will become permanent. Spaghetti growth is the regression that compounds.
    - The same edit repeated at three or more call sites is a missing helper. Extract it once, in the layer that owns that boundary, and call it.
    - Conditionals, flags or special cases the diff added where a better shape would need none.
    - Independent \`await\`s the diff made sequential. If two operations do not depend on each other, \`Promise.all\` is both faster and clearer; only leave them sequential when ordering is load-bearing.
    - Logic applied in steps that can leave state half-updated if one step throws. Either make it atomic or make the partial state impossible to observe.
    - Casts, \`any\`, \`unknown\` or new optionality that hides an invariant instead of stating it. A loosely-shaped ad-hoc object where an explicit type belongs is the same problem.
-   - A wrapper or indirection that does not earn the extra hop.
-6. Do not reformat, rename, or restructure code the migration did not touch. Out-of-scope churn buries the change under noise and is the fastest way for a reviewer to reject an otherwise good pull request.
+   - A wrapper or indirection that does not earn the extra hop.`,
+    `Do not reformat, rename, or restructure code the migration did not touch. Out-of-scope churn buries the change under noise and is the fastest way for a reviewer to reject an otherwise good pull request.
    This boundary is ENFORCED, not requested: every edit you return is checked against the migration's own diff, and one that does not overlap a line the migration changed is discarded before it is applied. You have a single attempt, so spending it on code outside the diff spends it on nothing. Repository-wide concerns — a file grown too long, feature logic that belongs in a different module — are real and are not this pass's job; say them in "rationale" instead, where they reach a human.
-   Comments are the exception, and only when the migration made one false. A comment naming the old version, or describing behaviour the migration changed, is now wrong and correcting it finishes the job. Rewrite it to describe what the code does now, in a form that reads correctly on its own — do not repeat a sentence that already appears beside it, and do not leave a fragment of the old one. A comment the migration did not falsify stays exactly as it is.
-7. When a coercion has to stand in for missing data, prefer a value the caller can detect over one it cannot. \`Number(x ?? 0)\` renders a real string as "0", which no test objects to and no reader spots; returning null, or a sentinel the formatter understands, keeps the absence visible.
-8. If the diff is already good, return an empty "edits" array and say why. That is a valid and useful answer — a pass that invents work to look busy is worse than one that declines.
-
-Prefer a small number of high-conviction structural improvements to an exhaustive list of nits.
-
-${RESPONSE_SHAPE}`;
+   Comments are the exception, and only when the migration made one false. A comment naming the old version, or describing behaviour the migration changed, is now wrong and correcting it finishes the job. Rewrite it to describe what the code does now, in a form that reads correctly on its own — do not repeat a sentence that already appears beside it, and do not leave a fragment of the old one. A comment the migration did not falsify stays exactly as it is.`,
+    `When a coercion has to stand in for missing data, prefer a value the caller can detect over one it cannot. \`Number(x ?? 0)\` renders a real string as "0", which no test objects to and no reader spots; returning null, or a sentinel the formatter understands, keeps the absence visible.`,
+    `If the diff is already good, return an empty "edits" array and say why. That is a valid and useful answer — a pass that invents work to look busy is worse than one that declines.`,
+  ],
+  closing: [
+    `Prefer a small number of high-conviction structural improvements to an exhaustive list of nits.`,
+    RESPONSE_SHAPE,
+  ],
+  render: renderReview,
+};
 
 /**
  * The follow-up task: the migration is green and the `any` annotations have been
@@ -215,26 +246,32 @@ ${RESPONSE_SHAPE}`;
  * type, tightening requires the body to change and forbids naming a type — and
  * a model handed both sets of rules at once satisfies the wrong one.
  */
-export const TIGHTENING_SYSTEM_PROMPT = `You are a precise TypeScript engine performing a follow-up cleanup task.
+export const TIGHTENING_TASK: Task<TighteningContext> = {
+  name: 'tightening',
+  preamble: `You are a precise TypeScript engine performing a follow-up cleanup task.
 
 A dependency migration has already been completed and verified. The \`: any\` annotations on its function parameters were then removed, so those parameters now infer their real types from context. That exposed the errors you are given: code that compiled only because \`any\` had switched checking off.
 
-Your job is to make that code correct at the point of use, leaving the parameters inferred.
+Your job is to make that code correct at the point of use, leaving the parameters inferred.`,
+  rulesHeading: `Rules you must follow:`,
+  rules: [
+    `Output ONLY a JSON object. No prose, no markdown fences.`,
+    `Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.`,
+    `The source files you are shown are the CURRENT state, with the annotations ALREADY REMOVED. Copy "find" strings from what you are shown, never from what the code looked like before.`,
+    `NEVER re-add a parameter type annotation — not \`: any\`, and not a named type either. The parameter must stay inferred. Re-adding one undoes the entire point of this task.`,
+    `NEVER use a type assertion (\`as X\`), \`@ts-ignore\`, or \`@ts-expect-error\`.`,
+    `Editing the function BODY is exactly what this task requires. It is not a refactor and it is not out of scope. Change as much of the body as the fix needs, and nothing beyond that.`,
+    NARROWING,
+    `The compiler output is the authoritative statement of what is broken. Fix what it reports, and do not edit code it does not complain about.`,
+    `If an error cannot be fixed without breaking one of these rules, leave it alone. A partial edit set is fine and expected — a file still failing simply keeps its original annotations.`,
+  ],
+  closing: [
+    RESPONSE_SHAPE,
+  ],
+  render: renderTightening,
+};
 
-Rules you must follow:
-1. Output ONLY a JSON object. No prose, no markdown fences.
-2. Each edit's "find" MUST be an exact substring copied character-for-character from the provided source, and MUST be unique within that file. Include surrounding context to make it unique.
-3. The source files you are shown are the CURRENT state, with the annotations ALREADY REMOVED. Copy "find" strings from what you are shown, never from what the code looked like before.
-4. NEVER re-add a parameter type annotation — not \`: any\`, and not a named type either. The parameter must stay inferred. Re-adding one undoes the entire point of this task.
-5. NEVER use a type assertion (\`as X\`), \`@ts-ignore\`, or \`@ts-expect-error\`.
-6. Editing the function BODY is exactly what this task requires. It is not a refactor and it is not out of scope. Change as much of the body as the fix needs, and nothing beyond that.
-7. ${NARROWING_RULE}
-8. The compiler output is the authoritative statement of what is broken. Fix what it reports, and do not edit code it does not complain about.
-9. If an error cannot be fixed without breaking one of these rules, leave it alone. A partial edit set is fine and expected — a file still failing simply keeps its original annotations.
-
-${RESPONSE_SHAPE}`;
-
-export function buildUserPrompt(ctx: AgentContext): string {
+function renderMigration(ctx: AgentContext): string {
   const { finding } = ctx;
   const parts: string[] = [];
 
@@ -329,7 +366,7 @@ export function buildUserPrompt(ctx: AgentContext): string {
  * and invite the model to "fix" call sites the compiler is happy with, so
  * `TighteningContext` does not carry them at all.
  */
-export function buildTighteningPrompt(ctx: TighteningContext): string {
+function renderTightening(ctx: TighteningContext): string {
   const { finding, errors } = ctx;
   const parts: string[] = [];
 
@@ -371,7 +408,7 @@ export function buildTighteningPrompt(ctx: TighteningContext): string {
  * either of the others it carries the diff, because "is this worth merging"
  * cannot be answered from the files alone.
  */
-export function buildReviewPrompt(ctx: ReviewContext): string {
+function renderReview(ctx: ReviewContext): string {
   const { finding } = ctx;
   const parts: string[] = [];
 
@@ -418,27 +455,32 @@ export function buildReviewPrompt(ctx: ReviewContext): string {
  * line, and a sentence from the tool, and the model's job is to satisfy that
  * sentence without becoming an opinion about the file.
  */
-export const LINT_SYSTEM_PROMPT = `You are repairing exactly the issues an external linter reported in a Dockerfile or shell script.
+export const LINT_TASK: Task<LintFixContext> = {
+  name: 'lint',
+  preamble: `You are repairing exactly the issues an external linter reported in a Dockerfile or shell script.
 
-You will be given each finding as a rule code, a file, a line, and the linter's own message, plus the full text of each file.
-
-Rules:
-1. Fix only the lines the linter flagged. Nothing else in the file is yours to change — not formatting, not ordering, not a nearby thing you would have written differently.
-2. Satisfy what the message actually asks for. Do not silence a rule by deleting the line it objects to, and do not add a suppression comment.
-3. If a finding cannot be fixed without knowing something the file does not tell you — a version to pin, an intent behind a command — leave it and say so in your rationale.
-4. Preserve behaviour. A Dockerfile that no longer installs what it installed, or a script that no longer does what it did, is a worse outcome than the lint warning.
-
-Reply with JSON only:
-{"edits":[{"file":"Dockerfile","find":"<exact text to replace>","replace":"<new text>","reason":"DL3006: ..."}],"rationale":"...","confidence":"high|medium|low"}
-
-\`find\` must appear exactly once in the file, character for character. If you cannot write a unique \`find\`, include more surrounding lines until it is unique.`;
+You will be given each finding as a rule code, a file, a line, and the linter's own message, plus the full text of each file.`,
+  rulesHeading: `Rules:`,
+  rules: [
+    `Fix only the lines the linter flagged. Nothing else in the file is yours to change — not formatting, not ordering, not a nearby thing you would have written differently.`,
+    `Satisfy what the message actually asks for. Do not silence a rule by deleting the line it objects to, and do not add a suppression comment.`,
+    `If a finding cannot be fixed without knowing something the file does not tell you — a version to pin, an intent behind a command — leave it and say so in your rationale.`,
+    `Preserve behaviour. A Dockerfile that no longer installs what it installed, or a script that no longer does what it did, is a worse outcome than the lint warning.`,
+  ],
+  closing: [
+    `Reply with JSON only:
+{"edits":[{"file":"Dockerfile","find":"<exact text to replace>","replace":"<new text>","reason":"DL3006: ..."}],"rationale":"...","confidence":"high|medium|low"}`,
+    `\`find\` must appear exactly once in the file, character for character. If you cannot write a unique \`find\`, include more surrounding lines until it is unique.`,
+  ],
+  render: renderLint,
+};
 
 export interface LintFixContext {
   findings: Array<{ file: string; line: number; code: string; message: string }>;
   sources: Map<string, string>;
 }
 
-export function buildLintPrompt(ctx: LintFixContext): string {
+function renderLint(ctx: LintFixContext): string {
   const lines: string[] = ['Findings to repair:', ''];
   for (const f of ctx.findings) {
     lines.push(`${f.file}:${f.line}:1: ${f.code} — ${f.message}`);

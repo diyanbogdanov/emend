@@ -17,23 +17,8 @@
  * and lets the existing verification decide. A hallucinated edit fails closed.
  */
 
-import type { CallSite, Finding, SurfaceChange } from '../types.ts';
-import { renderImpact, type SymbolImpact } from '../impact.ts';
+import type { CallSite, SurfaceChange } from '../types.ts';
 import { extractJson } from './client.ts';
-import {
-  MIGRATION_SYSTEM_PROMPT,
-  REVIEW_SYSTEM_PROMPT,
-  TIGHTENING_SYSTEM_PROMPT,
-  LINT_SYSTEM_PROMPT,
-  buildUserPrompt,
-  buildTighteningPrompt,
-  buildReviewPrompt,
-  buildLintPrompt,
-  type AgentContext,
-  type TighteningContext,
-  type ReviewContext,
-  type LintFixContext,
-} from './prompts.ts';
 import { parseDiagnostics, sameFile, type EditEvidence } from '../gate.ts';
 import type { Asker } from '../harness.ts';
 
@@ -77,42 +62,20 @@ function isTextEdit(value: unknown): value is TextEdit {
   );
 }
 
-/** Propose the edits that carry a codebase onto the new version of a dependency. */
-export async function proposeEdits(
-  asker: Asker,
-  ctx: AgentContext,
-): Promise<AgentProposal> {
-  return propose(asker, MIGRATION_SYSTEM_PROMPT, buildUserPrompt(ctx));
-}
-
 /**
- * Propose the edits that repair what removing the `any` annotations exposed.
+ * Send a composed pair of prompts and parse an edit set out of the reply.
  *
- * Separate from `proposeEdits` because only the prompt differs — everything
- * after the request is one shape, parsed one way.
- */
-export async function proposeTightening(
-  asker: Asker,
-  ctx: TighteningContext,
-): Promise<AgentProposal> {
-  return propose(asker, TIGHTENING_SYSTEM_PROMPT, buildTighteningPrompt(ctx));
-}
-
-
-/**
- * Propose the edits that make an already-green migration worth merging.
+ * The whole mechanism, and the only part every job shares. There used to be four
+ * near-identical wrappers around it — one per job, each naming a system prompt
+ * and a renderer — which made "what does a job consist of" a question you
+ * answered by reading four functions. A job is now a `Task`; `harness.runTask`
+ * composes one and calls this.
  *
- * Separate from `proposeEdits` for the same reason `proposeTightening` is: only
- * the prompt differs, and the three prompts contradict each other.
+ * Every failure is a value, never a throw. An unreachable model, an unparseable
+ * reply and a model that declined are three different things a caller has to be
+ * able to tell apart, and an exception collapses them into one.
  */
-export async function proposeReview(
-  asker: Asker,
-  ctx: ReviewContext,
-): Promise<AgentProposal> {
-  return propose(asker, REVIEW_SYSTEM_PROMPT, buildReviewPrompt(ctx));
-}
-
-async function propose(
+export async function propose(
   asker: Asker,
   system: string,
   user: string,
@@ -388,13 +351,6 @@ export function classifyEdits(
  */
 
 
-
-export async function proposeLintFixes(
-  asker: Asker,
-  ctx: LintFixContext,
-): Promise<AgentProposal> {
-  return propose(asker, LINT_SYSTEM_PROMPT, buildLintPrompt(ctx));
-}
 
 /**
  * Keep only the edits that touch a line the linter actually flagged.

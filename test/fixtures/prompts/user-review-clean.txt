@@ -1,0 +1,33 @@
+# What was migrated
+recharts: 2.15.0 -> 3.10.1. It verifies.
+
+# The diff under review
+```diff
+--- a/src/Chart.tsx
++++ b/src/Chart.tsx
+@@ -4,1 +4,1 @@
+-  <Tooltip formatter={(value) => value.toFixed(1)} />
++  <Tooltip formatter={(value: any) => value.toFixed(1)} />
+
+```
+
+# Source files — CURRENT state, with the migration applied
+## src/Chart.tsx
+```typescript
+import { Tooltip } from 'recharts';
+
+export const Chart = () => (
+  <Tooltip formatter={(value: any) => [`${value.toFixed(1)}%`, LABEL]} />
+);
+
+```
+
+## src/Legend.tsx
+```typescript
+import { Cell } from 'recharts';
+
+export const swatch = (fill: string) => <Cell fill={fill} />;
+
+```
+
+Produce the JSON now. An empty edit list is a valid answer.

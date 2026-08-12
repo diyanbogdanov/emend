@@ -1,0 +1,22 @@
+# Dependency upgrade
+recharts: 2.15.0 -> 3.10.1
+
+# API changes to resolve (1), each with its call sites
+_Derived from a declaration diff, and possibly incomplete. Entries with no call sites listed were added because the compiler named them._
+## 1. Tooltip.formatter
+Symbol:      Tooltip.formatter
+Change kind: signature-changed
+Severity:    drift (detection confidence: medium)
+Old type:    (value: TValue) => ReactNode
+New type:    (value: ValueType) => ReactNode
+Call sites:
+
+
+# Source files
+## src/Chart.tsx
+```typescript
+export const Chart = () => null;
+
+```
+
+Produce the JSON now.

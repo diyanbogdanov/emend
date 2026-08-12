@@ -2,10 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripParameterAny } from '../src/fix.ts';
 import {
-  buildTighteningPrompt,
-  TIGHTENING_SYSTEM_PROMPT,
+  TIGHTENING_TASK,
+  systemPrompt,
   type TighteningContext,
-} from '../src/llm/prompts.ts';
+} from '../src/harness.ts';
+
+const TIGHTENING_SYSTEM_PROMPT = systemPrompt(TIGHTENING_TASK);
+const buildTighteningPrompt = TIGHTENING_TASK.render;
 
 test('removes a parameter any so the contextual type is inferred instead', () => {
   // recharts 3 widened the Tooltip formatter parameter. `(value: any)` compiles

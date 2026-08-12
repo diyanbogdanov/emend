@@ -27,6 +27,9 @@ import { classifyHunks, parseDiffHunks, type DiffHunk, type HunkClassification }
 import { chat } from './llm/client.ts';
 import { PROVIDERS, resolveAgent, resolveLlmConfig } from './llm/providers.ts';
 import { listModels } from './llm/client.ts';
+import { propose, type AgentProposal } from './llm/propose.ts';
+import type { Task } from './llm/tasks.ts';
+import type { Skill } from './llm/skills.ts';
 import type { CallSite, SurfaceChange } from './types.ts';
 
 const execFileAsync = promisify(execFile);
@@ -801,6 +804,53 @@ export function driveContractPrompt(input: {
   ].join('\n');
 }
 
+const textOf = (part: string | Skill): string => (typeof part === 'string' ? part : part.text);
+
+/**
+ * A task's two prompts, without sending them anywhere.
+ *
+ * Separate from `runTask` so that what gets composed can be asserted without a
+ * model, a key or a network. That is not a convenience: the prompts are the
+ * least test-covered lines in the repository precisely because exercising them
+ * normally means paying to run one, and composition is the half of that which
+ * *can* be pinned down exactly. `test/prompts.golden.test.ts` pins it.
+ *
+ * Numbering is generated here rather than written into each rule, so a rule
+ * inserted in the middle costs nothing and cannot silently produce two rule 7s.
+ */
+export function composePrompts<Ctx>(task: Task<Ctx>, ctx: Ctx): { system: string; user: string } {
+  return { system: systemPrompt(task), user: task.render(ctx) };
+}
+
+/**
+ * The system half alone, which is the half that does not depend on a run.
+ *
+ * Its own function because that independence is worth being able to use: asking
+ * what a task tells the model should not require inventing a context for it.
+ */
+export function systemPrompt<Ctx>(task: Task<Ctx>): string {
+  const rules = task.rules.map((rule, i) => `${i + 1}. ${textOf(rule)}`).join('\n');
+  return [task.preamble, `${task.rulesHeading}\n${rules}`, ...task.closing.map(textOf)].join('\n\n');
+}
+
+/**
+ * Run one job. The third verb, and the one every structured repair goes through.
+ *
+ * `ask` and `run` are the two ways a model can be reached; this is the way a
+ * *feature* reaches one. Before it there were four functions that each knew a
+ * system prompt, a renderer and how to call `ask`, so adding a fifth job meant
+ * writing all three again and re-deriving which shared rules it needed. A task
+ * declares those; the composition is here, once.
+ */
+export async function runTask<Ctx>(
+  asker: Asker,
+  task: Task<Ctx>,
+  ctx: Ctx,
+): Promise<AgentProposal> {
+  const { system, user } = composePrompts(task, ctx);
+  return propose(asker, system, user);
+}
+
 /**
  * The structured strategy, re-exported so a feature imports LLM work from here
  * and nowhere else.
@@ -813,13 +863,11 @@ export function driveContractPrompt(input: {
  * file each lived in: `fix.ts` imported half its model work from `harness.ts`
  * and half from `llm/propose.ts`, and nothing about the split told a reader why.
  *
- * The prompts and the proposal parsing stay in `llm/propose.ts` because they
- * are long and this file is the boundary, not a drawer.
+ * The request, the parsing and the edit gate stay in `llm/propose.ts`, and what
+ * the tasks say stays in `llm/tasks.ts`, because both are long and this file is
+ * the boundary, not a drawer.
  */
 export {
-  proposeTightening,
-  proposeReview,
-  proposeLintFixes,
   selectLintEdits,
   selectReviewEdits,
   nearbySymbols,
@@ -827,7 +875,18 @@ export {
   type EditClassification,
   type AgentProposal,
 } from './llm/propose.ts';
-export { NARROWING_RULE } from './llm/prompts.ts';
+export {
+  MIGRATION_TASK,
+  REVIEW_TASK,
+  TIGHTENING_TASK,
+  LINT_TASK,
+  type Task,
+  type AgentContext,
+  type ReviewContext,
+  type TighteningContext,
+  type LintFixContext,
+} from './llm/tasks.ts';
+export { NARROWING, RESPONSE_SHAPE, type Skill } from './llm/skills.ts';
 
 /**
  * What a provider serves, for `emend models`.

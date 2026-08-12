@@ -1,4 +1,9 @@
-import { buildUserPrompt, MIGRATION_SYSTEM_PROMPT, TIGHTENING_SYSTEM_PROMPT, NARROWING_RULE } from '../src/llm/prompts.ts';
+import { MIGRATION_TASK, TIGHTENING_TASK, NARROWING, systemPrompt } from '../src/harness.ts';
+
+const buildUserPrompt = MIGRATION_TASK.render;
+const MIGRATION_SYSTEM_PROMPT = systemPrompt(MIGRATION_TASK);
+const TIGHTENING_SYSTEM_PROMPT = systemPrompt(TIGHTENING_TASK);
+const NARROWING_RULE = NARROWING.text;
 import { parseDiagnostics } from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';

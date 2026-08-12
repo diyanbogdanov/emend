@@ -1,4 +1,6 @@
-import { REVIEW_SYSTEM_PROMPT } from '../src/llm/prompts.ts';
+import { REVIEW_TASK, systemPrompt } from '../src/harness.ts';
+
+const REVIEW_SYSTEM_PROMPT = systemPrompt(REVIEW_TASK);
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';

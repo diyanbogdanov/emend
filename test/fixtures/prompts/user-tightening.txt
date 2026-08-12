@@ -1,0 +1,23 @@
+# What just happened
+recharts: 2.15.0 -> 3.10.1 migrated and verified. The `any` parameter annotations were then removed, and these errors appeared.
+
+# Compiler output (authoritative)
+```
+src/Chart.tsx(1,36): error TS18046: 'value' is of type 'unknown'.
+src/Legend.tsx(1,34): error TS18046: 'fill' is of type 'unknown'.
+```
+
+# Source files — CURRENT state, annotations already removed
+## src/Chart.tsx
+```typescript
+export const fmt = (value) => `${value.toFixed(1)}%`;
+
+```
+
+## src/Legend.tsx
+```typescript
+export const swatch = (fill) => fill.trim();
+
+```
+
+Produce the JSON now. Fix the bodies; leave the parameters inferred.
