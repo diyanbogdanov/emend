@@ -301,12 +301,23 @@ The model participates where the answer is a judgement:
 
 | Pass | What it does | Constraint |
 | --- | --- | --- |
-| Structured repair (`llm/propose.ts`) | Proposes text edits for findings the planner declines | No filesystem, no shell. Given the surface diff, the located sites and the source. Edits the failure did not ask for are withheld and recorded. |
-| Tightening | Strips parameter `any` and repairs what that exposes | Reverted wholesale if verification fails |
-| Harness escalation (`harness.ts`) | An opencode session with edit rights, when structured edits still leave the build red | Every hunk held to the evidence rule; anything the failure did not ask for is reverted |
+| Tightening | Strips parameter `any` and repairs what that exposes | No filesystem, no shell. Reverted wholesale if verification fails. |
+| Review | Decides whether a green migration is worth merging, and edits it | Every edit checked against the migration's own diff; one that overlaps nothing it changed is discarded |
+| Lint repair | Fixes what an external linter reported in a Dockerfile or shell script | Edits away from every flagged line are dropped — lint has no hidden cause |
+| Harness escalation (`harness.ts`) | An opencode session with edit rights, when the deterministic plan leaves the build red | Every hunk held to the evidence rule; anything the failure did not ask for is reverted |
 | Behaviour review (`reviewharness.ts`) | Reads the repository and reports what the diff cannot show | Read-only, enforced by comparing the workspace |
 
-It is **on by default**. `--no-agent` and `--no-review` turn it off for runs
+**The structured *migration* repair is built and not wired.** `proposeEdits`,
+its prompt, `classifyEdits` and `selectEvidencedEdits` have no caller in `src/`;
+their loop was removed in `d4a0da9`, which recorded the consequence exactly:
+`emend fix --agent` no longer repairs a breaking upgrade from the CLI, and on the
+axios bait repo it went from FIXED to NOT FIXED. The reasoning was that repair
+belongs to an agent driving the MCP tools. That is a defensible place to put it
+and it is not where a CLI user stands, so this is an open gap rather than a
+finished design — it is the one thing between Emend and the claim on its own tin.
+The machinery to close it is all still here.
+
+The rest is **on by default**. `--no-agent` and `--no-review` turn it off for runs
 that must stay offline or byte-for-byte reproducible. A finding the planner
 declines is a finding somebody repairs by hand, and a self-maintaining tool that
 stops at the mechanical cases is a linter that files issues.
