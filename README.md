@@ -582,3 +582,13 @@ The row that matters most is the smallest. A return type narrowing from
 `(A | B)[]` to `A[]` is *safe* to the compiler and means the call now returns
 fewer kinds of thing. No type-level analysis will ever catch that one; it is why
 the behaviour review exists.
+
+**A known blind spot, measured.** Where a package changes an *internal* type
+alias that its exported signatures mention, those signatures render identically
+in both versions and Emend reports nothing —
+`@tanstack/query-core`'s `Listener` went from `() => void` to
+`(focused: boolean) => void` and is invisible. Expanding aliases the two versions
+disagree about would surface it, and was tried: across 77 real package pairs it
+added **782** findings to catch that one, most of them differences buried deep in
+expanded inferred types. Reporting the changed alias itself instead measures at
+154 across the same 77 pairs, which is the shape a fix should take.
