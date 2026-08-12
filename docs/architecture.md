@@ -230,11 +230,35 @@ Detection, localisation and verification are **deterministic and always will
 be**. They are the parts whose answers must be reproducible and auditable, and a
 model cannot be either.
 
+**Everything that talks to a model goes through `harness.ts`.** One module, two
+verbs, because they are two capabilities and the difference decides how far a
+wrong answer gets:
+
+| Verb | What it is | Why a wrong answer is contained |
+| --- | --- | --- |
+| `ask(system, user)` | Messages in, text out. Never touches the checkout. | The caller interprets the answer. A proposed edit whose `find` string matches nothing is rejected before anything is written — it **fails closed**. |
+| `run(dir, task)` | A subprocess with tools, working in a directory. | It writes first and is judged after, by `gate.ts`: any changed region the failure did not ask for is reverted before verification. |
+
+That split is why the structured path was not folded into the harness when the
+two were unified. Byam's 27% is the case for keeping a constrained strategy;
+BigBag's is the case for it returning a *validated edit set* rather than a
+freeform patch, which is precisely what a harness produces. Both papers are
+implemented in `llm/propose.ts`, and its header derives the design from them.
+
+What *was* shared and duplicated is the boundary: at one point six modules
+resolved a provider and three built requests. Provider, key, retry policy and
+the three-state availability now live in one place, and a feature module owns
+its prompt and nothing else.
+
+`gate.ts` is the judge both strategies answer to, and it consults no model on
+purpose — it decides whether a model's work may land, and a judge that can be
+talked round is not one.
+
 The model participates where the answer is a judgement:
 
 | Pass | What it does | Constraint |
 | --- | --- | --- |
-| Structured repair (`llm/agent.ts`) | Proposes text edits for findings the planner declines | No filesystem, no shell. Given the surface diff, the located sites and the source. Edits the failure did not ask for are withheld and recorded. |
+| Structured repair (`llm/propose.ts`) | Proposes text edits for findings the planner declines | No filesystem, no shell. Given the surface diff, the located sites and the source. Edits the failure did not ask for are withheld and recorded. |
 | Tightening | Strips parameter `any` and repairs what that exposes | Reverted wholesale if verification fails |
 | Harness escalation (`harness.ts`) | An opencode session with edit rights, when structured edits still leave the build red | Every hunk held to the evidence rule; anything the failure did not ask for is reverted |
 | Behaviour review (`reviewharness.ts`) | Reads the repository and reports what the diff cannot show | Read-only, enforced by comparing the workspace |
@@ -287,7 +311,8 @@ src/
   verify.ts       baseline/post command running and comparison
   remediate.ts    the vulnerability remediation ladder
   fix.ts          the fix pipeline (per-package)
-  harness.ts      opencode escalation, with the evidence gate
+  harness.ts      THE boundary: `ask` and `run`, and nothing else reaches a model
+  gate.ts         is this change one the failure asked for? no model involved
   reviewharness.ts read-only repo-wide and behaviour reviews
   quality.ts      deprecation gaps left behind by a migration
   freshness.ts    upgrades simply sitting there, with nothing that touches you
@@ -301,7 +326,7 @@ src/
   eval.ts         measure the agent against a corpus
 
   github/         App auth, webhook intake, job runner, API pull requests
-  llm/            providers, client, structured repair loop
+  llm/            provider presets, the HTTP client, and the prompts behind `ask`
 ```
 
 ---

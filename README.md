@@ -451,13 +451,14 @@ src/
   apply.ts        isolated workspace, edit application, rollback
   verify.ts       baseline/post command running and comparison
   fix.ts          the fix pipeline (per-package)
-  harness.ts      opencode escalation, with the evidence gate
+  harness.ts      THE boundary: `ask` and `run` — nothing else reaches a model
+  gate.ts         is this change one the failure asked for? no model involved
   reviewharness.ts read-only repo-wide and behaviour reviews
   pr.ts           evidence-rich PR rendering + gh integration
   mcp.ts          MCP server, so a coding agent can drive Emend
   cli.ts          command surface
   github/         App auth, webhook intake, job runner, API pull requests
-  llm/            providers, client, structured repair loop
+  llm/            provider presets, the HTTP client, the prompts behind `ask`
 docs/
   architecture.md             how it fits together, and why
   deployment.md               running it as a service
