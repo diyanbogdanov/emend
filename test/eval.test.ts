@@ -198,3 +198,45 @@ test('a model that was never run on a case is not silently scored as failing', (
   assert.equal(row?.casesTotal, 2);
   assert.equal(row?.passRate, 1, 'scored over what it actually ran');
 });
+
+test('a run whose engine produced nothing is inconclusive, not a failure', () => {
+  // Measured, not hypothetical. A sweep once printed "25% pass" over nine
+  // consecutive runs where the harness reported `changed nothing` — the engine
+  // never attempted the work, and the table read as a quality result. That is
+  // the cardinal rule turned on the benchmark: Emend counts unreadable call
+  // sites rather than scoring them clean, and a run whose engine never ran is
+  // the same claim, made by the thing that measures.
+  const evalCase = { id: 'c', pkg: 'p', toVersion: '2.0.0', repo: { kind: 'local' as const, dir: '/x' }, minimalEdits: 2 };
+  const base = {
+    caseId: 'c', model: 'm', verdict: 'regression' as const, editsApplied: 0,
+    editsWithheld: 0, errorsBefore: 2, errorsAfter: 2, typeEscapes: 0,
+    deprecationGaps: 0, durationMs: 1,
+  };
+
+  const dead = scoreCase(evalCase, { ...base, inconclusive: 'opencode changed nothing' });
+  assert.equal(dead.inconclusive, true);
+  assert.match(dead.penalties[0] ?? '', /INCONCLUSIVE/);
+
+  const real = scoreCase(evalCase, base);
+  assert.equal(real.inconclusive, false);
+  assert.match(real.penalties[0] ?? '', /did not verify/);
+});
+
+test('rates are computed over runs that happened, with the rest counted beside them', () => {
+  // Three runs, one real pass and two dead engines. Averaging the dead ones in
+  // reports 33%; excluding them reports 100% with a visible "2 inconclusive".
+  // Those are different claims and only the second is true.
+  const evalCase = { id: 'c', pkg: 'p', toVersion: '2.0.0', repo: { kind: 'local' as const, dir: '/x' }, minimalEdits: 2 };
+  const base = {
+    caseId: 'c', model: 'm', editsApplied: 2, editsWithheld: 0,
+    errorsBefore: 2, errorsAfter: 0, typeEscapes: 0, deprecationGaps: 0, durationMs: 1,
+  };
+  const [row] = summarise([evalCase], [
+    { ...base, verdict: 'verified' as const },
+    { ...base, verdict: 'regression' as const, editsApplied: 0, errorsAfter: 2, inconclusive: 'changed nothing' },
+    { ...base, verdict: 'regression' as const, editsApplied: 0, errorsAfter: 2, inconclusive: 'unavailable' },
+  ]);
+  assert.equal(row?.runs, 3);
+  assert.equal(row?.inconclusive, 2);
+  assert.equal(row?.passRate, 1);
+});

@@ -76,6 +76,19 @@ export interface CaseOutcome {
   harnessKept?: number;
   harnessReverted?: number;
   verdict: VerifyOutcome;
+  /**
+   * Why this run produced no evidence about the migration at all.
+   *
+   * Set when the harness itself refused or produced nothing — unavailable, or
+   * `changed nothing`. Such a run says the engine did not attempt the work; it
+   * says *nothing* about whether the migration is repairable, and folding it into
+   * `regression` reports a dead provider as a quality result.
+   *
+   * This is the cardinal rule applied to the benchmark. Emend counts unreadable
+   * call sites and uncovered routes rather than scoring them clean; a run whose
+   * engine never ran is the same claim, made by the thing that measures.
+   */
+  inconclusive?: string;
   editsApplied: number;
   /** Edits the evidence gate withheld — informational, never a penalty. */
   editsWithheld: number;
@@ -101,6 +114,8 @@ export interface CaseScore {
   errorReduction: number;
   /** Why it was not clean, in the order a reader should care. */
   penalties: string[];
+  /** The engine never produced anything, so this run scores nothing either way. */
+  inconclusive: boolean;
 }
 
 /**
@@ -126,7 +141,8 @@ export function scoreCase(evalCase: EvalCase, outcome: CaseOutcome): CaseScore {
       : 0;
 
   const penalties: string[] = [];
-  if (!passed) penalties.push(`did not verify (${outcome.verdict})`);
+  if (outcome.inconclusive) penalties.push(`INCONCLUSIVE — ${outcome.inconclusive}`);
+  else if (!passed) penalties.push(`did not verify (${outcome.verdict})`);
   if (outcome.deprecationGaps > 0) {
     penalties.push(`${outcome.deprecationGaps} deprecation(s) reported and left in place`);
   }
@@ -151,6 +167,7 @@ export function scoreCase(evalCase: EvalCase, outcome: CaseOutcome): CaseScore {
   }
 
   return {
+    inconclusive: outcome.inconclusive !== undefined,
     caseId: outcome.caseId,
     model: outcome.model,
     passed,
@@ -171,6 +188,14 @@ export interface ModelSummary {
   runs: number;
   /** Cases in the corpus, so a partial run is visibly partial. */
   casesTotal: number;
+  /**
+   * Runs whose engine never produced anything, excluded from every rate above.
+   *
+   * Beside the rates rather than inside them, for the same reason the scan prints
+   * "skipped != clean": a rate computed over runs that did not happen is not a
+   * worse number, it is a different claim.
+   */
+  inconclusive: number;
   passRate: number;
   cleanRate: number;
   /** Mean over runs that failed, so partial progress on hard cases stays visible. */
@@ -250,19 +275,25 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
     .map(([key, scores]) => {
       const m = meta.get(key) ?? { escapes: 0, gaps: 0, ms: 0, withheld: 0, kept: 0, reverted: 0 };
       const engine = engines.get(key) ?? { model: key };
-      const failed = scores.filter((s) => !s.passed);
+      // Rates are computed over runs that actually happened. A run whose engine
+      // produced nothing is not a failure to average in — it is an absence of
+      // evidence, and dividing by it turns a dead provider into a fix rate.
+      const ran = scores.filter((s) => !s.inconclusive);
+      const denominator = Math.max(1, ran.length);
+      const failed = ran.filter((s) => !s.passed);
       return {
         model: engine.model,
         ...(engine.harness ? { harness: engine.harness } : {}),
         casesRun: new Set(scores.map((s) => s.caseId)).size,
         runs: scores.length,
         casesTotal: cases.length,
-        passRate: scores.filter((s) => s.passed).length / scores.length,
-        cleanRate: scores.filter((s) => s.clean).length / scores.length,
+        inconclusive: scores.length - ran.length,
+        passRate: ran.filter((s) => s.passed).length / denominator,
+        cleanRate: ran.filter((s) => s.clean).length / denominator,
         // Over the failures only: a pass has nothing left to reduce, and
         // averaging its 100% in would hide how far the failures actually got.
         meanErrorReduction: mean(failed.map((s) => s.errorReduction)),
-        meanEditRatio: mean(scores.filter((s) => s.passed).map((s) => s.editRatio)),
+        meanEditRatio: mean(ran.filter((s) => s.passed).map((s) => s.editRatio)),
         totalTypeEscapes: m.escapes,
         totalDeprecationGaps: m.gaps,
         totalEditsWithheld: m.withheld,
@@ -333,9 +364,18 @@ export async function runCase(
       : [];
     if (result.workspaceDir) await rm(result.workspaceDir, { recursive: true, force: true });
 
+    // A refusal only makes the run inconclusive when it also failed: a harness
+    // that declined on a migration the deterministic phase already fixed has not
+    // invalidated anything.
+    const passed =
+      result.verification.outcome === 'verified' ||
+      result.verification.outcome === 'typecheck-only';
+    const refused = result.harness && !result.harness.ok ? result.harness.reason : undefined;
+
     return {
       ...base,
       verdict: result.verification.outcome,
+      ...(refused && !passed ? { inconclusive: refused } : {}),
       editsApplied: result.appliedEdits,
       // From the harness, which is the only thing that writes now. It reports
       // reverted hunks rather than withheld edits — same question, and the only
@@ -536,15 +576,15 @@ export function renderSummary(rows: ModelSummary[]): string {
   // comparison is not widened by a column of dashes.
   const escalated = rows.some((r) => r.harness);
   const lines = [
-    `| Engine | Cases | Runs | Pass | Clean | Edit ratio | Withheld |${escalated ? ' Hunks kept | Hunks reverted |' : ''} Err. reduced (failed) | Escapes | Depr. gaps |`,
-    `| --- | --- | --- | --- | --- | --- | --- |${escalated ? ' --- | --- |' : ''} --- | --- | --- |`,
+    `| Engine | Cases | Runs | Inconc. | Pass | Clean | Edit ratio | Withheld |${escalated ? ' Hunks kept | Hunks reverted |' : ''} Err. reduced (failed) | Escapes | Depr. gaps |`,
+    `| --- | --- | --- | --- | --- | --- | --- | --- |${escalated ? ' --- | --- |' : ''} --- | --- | --- |`,
   ];
   const pct = (n: number): string => `${Math.round(n * 100)}%`;
   for (const r of rows) {
     // Model and harness together, because together is what produced the edits.
     const engine = r.harness ? `\`${r.model}\` + \`${r.harness}\`` : `\`${r.model}\``;
     lines.push(
-      `| ${engine} | ${r.casesRun}/${r.casesTotal} | ${r.runs} | ${pct(r.passRate)} | ${pct(r.cleanRate)} | ` +
+      `| ${engine} | ${r.casesRun}/${r.casesTotal} | ${r.runs} | ${r.inconclusive > 0 ? `**${r.inconclusive}**` : '0'} | ${pct(r.passRate)} | ${pct(r.cleanRate)} | ` +
         `${r.meanEditRatio.toFixed(1)}x | ${r.totalEditsWithheld} |` +
         (escalated ? ` ${r.totalHunksKept} | ${r.totalHunksReverted} |` : '') +
         ` ${pct(r.meanErrorReduction)} | ${r.totalTypeEscapes} | ${r.totalDeprecationGaps} |`,

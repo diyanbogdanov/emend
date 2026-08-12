@@ -1526,7 +1526,10 @@ async function cmdEval(args: Args): Promise<number> {
   // this: it swaps the editing engine, so it has to be measured as one.
   const evalHarness = harnessFrom(args);
   const outcomes: CaseOutcome[] = [];
-  for (const model of models) {
+  /** Consecutive runs whose engine produced nothing. Reset by any real result. */
+  let dead = 0;
+  const DEAD_RUN_LIMIT = 3;
+  outer: for (const model of models) {
     for (const evalCase of cases) {
       for (let run = 1; run <= repeat; run++) {
         const label = model || 'deterministic';
@@ -1545,12 +1548,31 @@ async function cmdEval(args: Args): Promise<number> {
           outcomes.push(outcome);
           const score = scoreCase(evalCase, outcome);
           console.log(
-            score.clean
-              ? c.green('clean')
-              : score.passed
-                ? c.yellow(`passed — ${score.penalties[0] ?? ''}`)
-                : c.red(outcome.verdict),
+            outcome.inconclusive
+              ? c.magenta(`inconclusive — ${outcome.inconclusive}`)
+              : score.clean
+                ? c.green('clean')
+                : score.passed
+                  ? c.yellow(`passed — ${score.penalties[0] ?? ''}`)
+                  : c.red(outcome.verdict),
           );
+
+          // Stop rather than keep spending. A run of inconclusives means the
+          // engine is not working — a dead provider, a rate limit, a binary that
+          // stopped answering — and every further run costs money to produce
+          // another absence of evidence. Measured: nine consecutive no-op harness
+          // runs once printed as "25% pass", which reads as a quality result.
+          dead = outcome.inconclusive ? dead + 1 : 0;
+          if (dead >= DEAD_RUN_LIMIT) {
+            console.log('');
+            console.log(
+              c.red(
+                `  stopping: ${dead} consecutive run(s) produced nothing — the engine is not working, ` +
+                  'and the rates below cover only the runs that happened',
+              ),
+            );
+            break outer;
+          }
         } finally {
           if (evalCase.repo.kind !== 'local') {
             await rm(dir, { recursive: true, force: true }).catch(() => {});
