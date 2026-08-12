@@ -640,6 +640,7 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
           path,
           kind: 'added',
           severity: 'feature',
+          symbolKind: after.kind,
           confidence: 'high',
           before: null,
           after: after.signature,

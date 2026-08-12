@@ -173,6 +173,15 @@ export type Confidence = 'high' | 'medium';
 export interface SurfaceChange {
   path: string;
   kind: ChangeKind;
+  /**
+   * What sort of declaration this is, when the differ knew.
+   *
+   * Distinct from `kind`, which is what *happened* to it. Recorded because an
+   * addition's usefulness depends on it: a new function is a capability, a new
+   * type is a helper for someone else's generics. Optional, so an absent value
+   * means "not recorded" rather than "not a value" — see `features.ts`.
+   */
+  symbolKind?: SymbolKind;
   severity: Severity;
   confidence: Confidence;
   before: string | null;
@@ -393,5 +402,12 @@ export interface ScanReport {
      * stop being read.
      */
     freshness: number;
+    /**
+     * Packages that gained a new top-level export.
+     *
+     * Never in the headline, and for a stronger reason than freshness: this
+     * class asserts nothing about the repository at all. Spec §13.
+     */
+    features: number;
   };
 }

@@ -369,6 +369,7 @@ function severityLabel(sev: string): string {
   if (sev === 'vulnerability') return c.red('vulnerable');
   if (sev === 'lint') return c.yellow('lint');
   if (sev === 'freshness') return c.dim('behind');
+  if (sev === 'feature') return c.dim('new');
   if (sev === 'deprecation') return c.yellow('deprecated');
   return c.dim(sev);
 }
@@ -526,6 +527,11 @@ function printScan(report: ScanReport, showAll: boolean, current: CurrentVersion
       c.dim(`           ${counts.freshness} package(s) behind latest with nothing that would break`),
     );
   }
+  if (counts.features > 0) {
+    console.log(
+      c.dim(`           ${counts.features} package(s) that gained exports you do not use yet`),
+    );
+  }
   console.log(
     c.dim(
       `           ${counts.packagesAnalyzed} package(s) analyzed, ${counts.packagesSkipped} skipped (skipped ≠ clean)`,
@@ -561,6 +567,7 @@ async function cmdScan(args: Args): Promise<number> {
     ...(vulnerabilities ? { vulnerabilities } : {}),
     ...(lintFrom(args) ? { lint: lintFrom(args)! } : {}),
     freshness: args.flags.get('freshness') === true,
+    features: args.flags.get('features') === true,
     onProgress: args.flags.get('json') === true ? () => {} : (m) => console.log(c.dim(`  ${m}`)),
   });
 
@@ -1679,6 +1686,10 @@ ${c.bold('COMMANDS')}
                     nothing this repository calls changed. Never counted in the
                     headline: every repository has some, and producing them
                     requires no analysis.
+    --features      Also list new top-level exports in packages you depend on.
+                    The other half of the problem: a capability that shipped
+                    while nobody read the changelog. Never counted in the
+                    headline — nothing in the repository is affected either way.
     --lint          Also run hadolint over Dockerfiles and shellcheck over shell
                     scripts. Reports what is not installed rather than passing
                     over it in silence.

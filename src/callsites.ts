@@ -1,10 +1,6 @@
 /**
  * Locates where a repository actually uses symbols from tracked packages.
  *
- * This is the half that turns a diff into a work order. "zod 3->4 removed 40
- * symbols" is noise; "zod 3->4 removed `.strict()`, which you call at
- * src/schema.ts:14" is actionable. Everything downstream keys off these sites.
- *
  * Two resolution strategies run together, because neither is sufficient alone:
  *
  *  - import-based catches direct use of an imported binding (`z.string()`)

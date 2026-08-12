@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { readRepo } from './inventory.ts';
 import { freshnessFindings } from './freshness.ts';
+import { featureFindings, newExports } from './features.ts';
 import { scanPins, resolvedVersions } from './pins.ts';
 import {
   detectorsFor,
@@ -75,6 +76,14 @@ export interface ScanOptions {
    * the way of proven findings.
    */
   freshness?: boolean;
+  /**
+   * Report new top-level exports in packages this repository depends on.
+   *
+   * Off by default for freshness's reason, which applies harder here: every
+   * upgrade adds something, and nothing in the repository is affected either
+   * way. See spec §13.
+   */
+  features?: boolean;
   /** Run external linters over Dockerfiles and shell scripts. */
   lint?: ExternalLintOptions;
   /** Progress callback for CLI output. */
@@ -144,6 +153,11 @@ interface Analyzed {
   report: PackageReport;
   surface?: ApiSurface;
   impacting?: SurfaceChange[];
+  /**
+   * New top-level exports, already narrowed. Absent unless asked for, so the
+   * default scan carries none of it.
+   */
+  features?: SurfaceChange[];
 }
 
 export async function scanRepo(
@@ -283,6 +297,10 @@ export async function scanRepo(
         // count for no benefit.
         surface: withoutSignatures(fromSurface),
         impacting,
+        // Narrowed here rather than held whole, for the reason the surface
+        // above is: what stays live for the rest of the scan should be what a
+        // finding could actually use.
+        ...(options.features ? { features: newExports(diff.changes) } : {}),
       };
     } catch (err) {
       return {
@@ -433,6 +451,35 @@ export async function scanRepo(
     packages.push({ ...group, status: 'analyzed', unlocatedBreaking: 0 });
   }
 
+  // Its own group, before freshness, because a package that gained something is
+  // still a package that broke nothing — and freshness reads `p.findings` to
+  // decide that, so a feature finding pushed into a real package's group would
+  // silently disqualify it from being reported as a free upgrade.
+  if (options.features) {
+    const gained = featureFindings(
+      analyzed.flatMap((a) =>
+        a.features && a.report.fromVersion && a.report.toVersion
+          ? [{
+              pkg: a.report.pkg,
+              fromVersion: a.report.fromVersion,
+              toVersion: a.report.toVersion,
+              added: a.features,
+            }]
+          : [],
+      ),
+    );
+    if (gained.length > 0) {
+      packages.push({
+        pkg: 'new since your version',
+        status: 'analyzed',
+        fromVersion: null,
+        toVersion: null,
+        findings: gained,
+        unlocatedBreaking: 0,
+      });
+    }
+  }
+
   // Last, and in its own group: a freshness finding says nothing this
   // repository calls changed, so it can only be computed once every package has
   // been analysed and every other detector has had its say.
@@ -464,6 +511,7 @@ export async function scanRepo(
   const vulnerabilities = allFindings.filter((f) => f.change.severity === 'vulnerability').length;
   const lint = allFindings.filter((f) => f.change.severity === 'lint').length;
   const freshness = allFindings.filter((f) => f.change.severity === 'freshness').length;
+  const features = allFindings.filter((f) => f.change.severity === 'feature').length;
 
   return {
     repo: options.repoKey ?? repoDir,
@@ -483,6 +531,7 @@ export async function scanRepo(
       vulnerabilities,
       lint,
       freshness,
+      features,
     },
   };
 }
