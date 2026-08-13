@@ -1,7 +1,3 @@
-import type { PinConflict, VersionPin } from './pins.ts';
-
-export type { PinConflict, VersionPin } from './pins.ts';
-
 /**
  * Core domain types for Emend.
  *
@@ -9,6 +5,10 @@ export type { PinConflict, VersionPin } from './pins.ts';
  * produces values of these shapes, which is what lets each stage be tested in
  * isolation without standing up the stage before it.
  */
+
+import type { PinConflict, VersionPin } from './pins.ts';
+
+export type { PinConflict, VersionPin } from './pins.ts';
 
 export type SymbolKind =
   | 'class'

@@ -21,54 +21,11 @@ export interface Diagnostic {
   line: number;
 }
 
-const TSC_DIAGNOSTIC = /^\s*(\S+?)\((\d+),(\d+)\):\s*error\b/gm;
-
-const COLON_DIAGNOSTIC = /^\s*(\S+?):(\d+):(\d+):\s*error\b/gm;
-
 /**
- * Where the failure points, not how much of it there is.
- *
- * `failureSize` in fix.ts already counts errors to drive keep-or-rollback. This
- * is the other half: a count cannot say whether a proposed edit lands somewhere
- * the compiler actually complained about, and that is the only question the
- * evidence gate below can be answered with.
- */
-export function parseDiagnostics(output: string): Diagnostic[] {
-  const seen = new Set<string>();
-  const out: Diagnostic[] = [];
-  for (const pattern of [TSC_DIAGNOSTIC, COLON_DIAGNOSTIC]) {
-    pattern.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = pattern.exec(output)) !== null) {
-      const [, file, rawLine, rawColumn] = m;
-      const line = Number(rawLine);
-      if (!file || !Number.isFinite(line)) continue;
-      const key = `${file}:${line}:${rawColumn}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ file, line });
-    }
-  }
-  return out;
-}
-
-/**
- * Errors that stop the compiler reading the rest of a file.
- *
- * A failed import is not one error among many. Every symbol it should have bound
- * is now unresolved, so nothing downstream of it can be typechecked at all — and
- * the silence that produces is indistinguishable, to a line-number gate, from the
- * compiler being satisfied.
- *
- * Measured on openai 3 -> 4. The harness migrated the file correctly in four
- * places; the gate reverted three of them as "covers a call site with nothing
- * outstanding on it", because the import error on line 1 meant lines 7, 22 and
- * 30 carried no diagnostic of their own. What was left was the new import over
- * the old call shapes — a file more broken than the one it started from, scored
- * as a regression the model had actually repaired.
- *
- * TS2305/TS2307/TS2614/TS2724 are the resolution failures: no exported member,
- * cannot find module, and the two "did you mean" variants.
+ * What a hunk's presence in the diff is worth: asked for by the evidence, or
+ * not. The failure that shaped how carefully this is decided — an unresolved
+ * import silencing every downstream diagnostic, so three correct repairs read
+ * as unrequested — is told at `reviewerDecides`, on the decision it forced.
  */
 export type EditEvidence = 'evidenced' | 'unrequested';
 
@@ -104,7 +61,7 @@ export interface HunkClassification {
  * survive.
  *
  * So the caller states its evidence and its policy, and the rule below is one
- * rule. `migrationGate`, `reviewGate` and `lintGate` are the three answers.
+ * rule. `reviewerDecides`, `reviewGate` and `lintGate` are the three answers.
  */
 export interface HunkGate {
   /** Lines that justify a change here. */
@@ -283,7 +240,7 @@ export function parseDiffHunks(diff: string): DiffHunk[] {
 }
 
 /**
- * Judge changed regions by the rule `classifyEdits` applies to proposed edits.
+ * Judge changed regions by the rule the old edit gate applied to proposed edits.
  *
  * Same question, same evidence, different shape — which is what lets the gate
  * survive a harness that writes files instead of proposing text. A diagnostic

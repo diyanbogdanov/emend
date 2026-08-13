@@ -94,12 +94,3 @@ export function nearbySymbols(
     return diff !== 0 ? diff : a.localeCompare(b);
   });
 }
-
-// ---------------------------------------------------------------------------
-// Evidence: deciding which proposed edits the upgrade actually asked for.
-// ---------------------------------------------------------------------------
-
-/** A compiler or test diagnostic, reduced to the location it points at. */
-
-/** `src/schema.ts(28,15): error TS2554: ...` — tsc's own format. */
-/** `src/schema.ts:28:15: error ...` — most other tools. */

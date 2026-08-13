@@ -385,18 +385,6 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
 }
 
 /**
- * Run one case and measure it.
- *
- * The workspace is kept until the metrics are read, because deprecation
- * completeness can only be measured against the migrated files — which is the
- * whole reason it is measured rather than asked for.
- *
- * A case that throws is returned as an `unverified` outcome rather than
- * propagated. One repository failing to install must not void a sweep, and
- * `unverified` is already the verdict Emend refuses to count as a pass, so the
- * failure lands in the scoreboard honestly instead of disappearing from it.
- */
-/**
  * The scan a case wants: its package, at the version its id names.
  *
  * Its own function so a test can assert the target actually reaches the scan.
@@ -410,6 +398,18 @@ export function scanOptionsFor(evalCase: EvalCase): ScanOptions {
   return { only: [evalCase.pkg], targets: { [evalCase.pkg]: evalCase.toVersion } };
 }
 
+/**
+ * Run one case and measure it.
+ *
+ * The workspace is kept until the metrics are read, because deprecation
+ * completeness can only be measured against the migrated files — which is the
+ * whole reason it is measured rather than asked for.
+ *
+ * A case that throws is returned as an `unverified` outcome rather than
+ * propagated. One repository failing to install must not void a sweep, and
+ * `unverified` is already the verdict Emend refuses to count as a pass, so the
+ * failure lands in the scoreboard honestly instead of disappearing from it.
+ */
 export async function runCase(
   evalCase: EvalCase,
   repoDir: string,

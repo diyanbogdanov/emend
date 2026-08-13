@@ -383,7 +383,7 @@ export async function escalate(
     const classified = classifyHunks(parseDiffHunks(diff), gate);
     const unrequested = classified.filter((c) => c.evidence === 'unrequested');
 
-    // The carve-out `selectEvidencedEdits` makes, for the same reason: if
+    // The carve-out the old edit gate made, kept for the same reason: if
     // nothing is evidenced then the harness's work is all there is, and
     // reverting all of it turns a possible repair into a guaranteed no-op.
     // Verification remains the judge.
@@ -433,7 +433,8 @@ export interface OpenCodeOptions {
    * diff, so the write capability buys nothing and costs the whole gate problem:
    * every other harness run is judged by `classifyHunks` reading what it changed,
    * and a run that changes nothing has nothing to judge. Not trusted on its own —
-   * `harnessReview` verifies the workspace is unchanged afterwards.
+   * `reviewSession` in reviewharness.ts verifies the workspace is unchanged
+   * afterwards.
    */
   readOnly?: boolean;
   /**

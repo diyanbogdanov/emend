@@ -26,7 +26,6 @@ import {
   prepareWorkspace,
   applyEdits,
   applyTextEdits,
-  restoreSnapshots,
   bumpDependency,
   workspaceDiff,
   type Workspace,
@@ -34,7 +33,6 @@ import {
 import { runPhase, compare, verificationPassed } from './verify.ts';
 
 import {
-  escalate,
   revertHunks,
   harnessPermitted,
   runTask,
@@ -43,7 +41,6 @@ import {
   reviewTask,
   LINT_TASK,
   nearbySymbols,
-  NARROWING,
   type Harness,
 } from './harness.ts';
 import {
@@ -54,11 +51,7 @@ import {
   type HunkClassification,
 } from './gate.ts';
 import { reviewSession, type ReviewFinding } from './reviewharness.ts';
-import {
-  remainingDeprecations,
-  describeDeprecationGaps,
-  deprecationStillPresent,
-} from './quality.ts';
+import { remainingDeprecations, describeDeprecationGaps } from './quality.ts';
 import type {
   ApiSymbol,
   CommandResult,
@@ -96,7 +89,12 @@ async function unavailableWriter(
 export interface FixOptions {
   /** Leave the workspace on disk for inspection. */
   keepWorkspace?: boolean;
-  /** Allow the LLM agent to attempt findings the deterministic planner declines. */
+  /**
+   * Whether model-driven work is wanted at all. Callers resolve the harness
+   * itself separately; in this module the flag decides one thing — `fixLint`
+   * still prepares a workspace when the linters' own autofixes have nothing to
+   * do, because a harness may repair what they could not.
+   */
   useAgent?: boolean;
   /**
    * Treat the repository as untrusted: execute nothing from it or its
@@ -467,22 +465,12 @@ async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol
 
 
 /**
- * Symbols from the new version that the compiler's own error text mentions.
- *
- * A type error names the types it is about — `Formatter`, `ValueType`,
- * `TooltipPayloadEntry` — and those are usually exported, sometimes under a
- * different name (`ValueType` ships as `TooltipValueType`). Matching them here
- * puts the vocabulary of the error into the model's list of usable symbols,
- * which is the difference between annotating the real constraint and reaching
- * for `any`.
- */
-/**
  * Symbols the compiler says are gone, as opposed to symbols it merely names.
  *
  * The candidate list is ranked by similarity to whatever broke. Drift findings
  * supply that; a vulnerability repair has none, so the compiler output is the
- * only source — and `symbolsNamedInErrors` cannot help, because it matches names
- * against the *new* version's symbols and a removed one matches nothing.
+ * only source — and matching error text against the *new* version's symbols
+ * cannot help, because a removed symbol matches nothing there.
  *
  * Measured live: axios 0.33.0 removes `AxiosTransformer`, tsc says so and
  * suggests only a default import, and `AxiosResponseTransformer` — which axios
@@ -718,19 +706,6 @@ export async function fixPackage(
     // about the whole of it rather than one finding at a time.
     const agentFinding = { ...first, sites: findings.flatMap((f) => f.sites) };
 
-    // Escalate to the agent only if deterministic work was not enough. The
-    // remaining errors are exactly the context the model needs.
-    // Polish, once the migration is green. Repair itself is no longer Emend's
-    // job — an agent driving the MCP tools has edit rights and a loop of its
-    // own, and `runAgentRepair` was 270 lines reimplementing that badly with a
-    // fixed three-attempt budget.
-    //
-    // What survived the deletion is the work that loop did *besides* retrying:
-    // finding which files a failure actually implicates, and grounding a
-    // replacement in symbols the target version really exports. Both are still
-    // needed here, so both now come from the workspace diff rather than being
-    // threaded out of a repair.
-
     // Hoisted out of the polish block: the escalation needs it too, and it is the
     // cheapest defence against an invented API — the model can still hallucinate,
     // but it has no excuse to.
@@ -776,22 +751,7 @@ export async function fixPackage(
         progress(`escalating to ${harness.id}`);
         const failureOutput = verificationErrors(verification);
 
-        // A deprecated call compiles, so it never produces a diagnostic and a
-        // hunk over it would be judged unrequested and reverted — cancelling
-        // exactly the repair the finding asked for. The carve-out the edit gate
-        // already has, applied to the same question in a different shape.
         const sources = await loadSources(ws.dir, agentFinding, []);
-        const stillDeprecated = new Set(
-          findings
-            .filter((f) => f.change.kind === 'deprecated')
-            .filter((f) =>
-              f.sites.some((s) => {
-                const source = sources.get(s.file);
-                return source ? deprecationStillPresent(f.change.path, pkg, source) : false;
-              }),
-            )
-            .map((f) => f.change.path),
-        );
 
         // MIGRATION_TASK, not an instruction written here. This was five
         // sentences that re-derived, badly, what the migration task already
@@ -1025,6 +985,30 @@ export interface PackageFixResult {
   workspaceMode: string | null;
   /** Present only when a harness was configured and the build was still red. */
   harness?: HarnessEscalation;
+  /**
+   * Advisory notes from the read-only repo-wide pass, when one ran.
+   *
+   * This was assigned through a spread for a while without being declared here,
+   * which TypeScript permits and every typed consumer therefore never saw — the
+   * most expensive step in the pipeline, computed and then invisible.
+   */
+  reviewNotes?: ReviewFinding[];
+}
+
+/**
+ * Whether a finding can only be repaired by editing source.
+ *
+ * `Finding.pkg` carries whatever its detector is about, and for `http-contract`
+ * that is a host — `api.github.com`. The package path took it for a package
+ * name and asked npm for it, which 404s; the same shape `version-pin` is
+ * already routed away from, because `npm install node@22` is nonsense too.
+ *
+ * There is no version to bump for a wire API. The description is the target and
+ * the repair is an edit at the call sites, so this belongs to the agent rather
+ * than to the registry.
+ */
+export function needsSourceRepair(finding: Finding): boolean {
+  return finding.detector === 'http-contract';
 }
 
 /**
@@ -1042,22 +1026,6 @@ export interface PackageFixResult {
  * will fail. This is only appropriate when the package has one finding, or for
  * rendering a single finding's evidence.
  */
-/**
- * Whether a finding can only be repaired by editing source.
- *
- * `Finding.pkg` carries whatever its detector is about, and for `http-contract`
- * that is a host — `api.github.com`. The package path took it for a package
- * name and asked npm for it, which 404s; the same shape `version-pin` is
- * already routed away from, because `npm install node@22` is nonsense too.
- *
- * There is no version to bump for a wire API. The description is the target and
- * the repair is an edit at the call sites, so this belongs to the agent rather
- * than to the registry.
- */
-export function needsSourceRepair(finding: Finding): boolean {
-  return finding.detector === 'http-contract';
-}
-
 export async function fixFinding(
   repoDir: string,
   finding: Finding,
@@ -1116,19 +1084,6 @@ export interface VulnFixResult {
 }
 
 /**
- * Get a vulnerable package out of the installed tree, and prove the build survives.
- *
- * Two questions, and both have to be answered. *Did the vulnerable version
- * leave?* is read back from the lockfile after installing — never predicted,
- * because predicting npm's resolution is a worse job than doing it and looking.
- * *Does the repository still work?* is the ordinary baseline comparison every
- * other repair here goes through.
- *
- * A bump that verifies green but leaves the vulnerable version installed is not
- * a fix, and reporting it as one would be the most expensive kind of false
- * certainty this product can produce.
- */
-/**
  * Whether a red build after a security bump is worth handing to the agent.
  *
  * Both halves matter, and the second is the dangerous one. Repairing a build
@@ -1144,6 +1099,19 @@ export function repairableAfterBump(state: {
   return state.resolved && !verificationPassed(state.outcome);
 }
 
+/**
+ * Get a vulnerable package out of the installed tree, and prove the build survives.
+ *
+ * Two questions, and both have to be answered. *Did the vulnerable version
+ * leave?* is read back from the lockfile after installing — never predicted,
+ * because predicting npm's resolution is a worse job than doing it and looking.
+ * *Does the repository still work?* is the ordinary baseline comparison every
+ * other repair here goes through.
+ *
+ * A bump that verifies green but leaves the vulnerable version installed is not
+ * a fix, and reporting it as one would be the most expensive kind of false
+ * certainty this product can produce.
+ */
 export async function fixVulnerability(
   repoDir: string,
   finding: Finding,
@@ -1284,11 +1252,10 @@ export async function fixVulnerability(
       const review = await reviewSession({
         harness: options.reviewHarness,
         dir: ws.dir,
-       
-          pkg: finding.pkg,
-          fromVersion: finding.fromVersion,
-          toVersion: worst ?? finding.toVersion,
-          diff: await workspaceDiff(ws),
+        pkg: finding.pkg,
+        fromVersion: finding.fromVersion,
+        toVersion: worst ?? finding.toVersion,
+        diff: await workspaceDiff(ws),
         progress,
       });
       if (review.findings.length > 0) reviewNotes = review.findings;

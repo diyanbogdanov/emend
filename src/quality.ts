@@ -82,9 +82,9 @@ function usesMemberAccess(source: string, member: string): boolean {
  * Top-level exports keep the import check, because `.Cell` never appears even
  * when `Cell` is very much in use.
  */
-export function deprecationStillPresent(path: string, pkg: string, source: string): boolean {
-  const dot = path.lastIndexOf('.');
-  const leaf = dot === -1 ? path : path.slice(dot + 1);
+export function deprecationStillPresent(symbolPath: string, pkg: string, source: string): boolean {
+  const dot = symbolPath.lastIndexOf('.');
+  const leaf = dot === -1 ? symbolPath : symbolPath.slice(dot + 1);
   return dot === -1 ? importsSymbolFrom(source, leaf, pkg) : usesMemberAccess(source, leaf);
 }
 

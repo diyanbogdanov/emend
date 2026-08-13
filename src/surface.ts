@@ -42,11 +42,6 @@ interface PackageJson {
 }
 
 /**
- * Resolve the `.d.ts` entry point for a package directory.
- * Returns null when the package ships no types — which the caller must treat as
- * "unanalyzable", never as "no changes".
- */
-/**
  * A declaration's type parameters, with whether each carries a default.
  *
  * Taken from the declaration rather than the type string because the type
@@ -60,6 +55,11 @@ function readTypeParams(decl: ts.Declaration): TypeParam[] {
   return params.map((p) => ({ name: p.name.text, defaulted: p.default !== undefined }));
 }
 
+/**
+ * Resolve the `.d.ts` entry point for a package directory.
+ * Returns null when the package ships no types — which the caller must treat as
+ * "unanalyzable", never as "no changes".
+ */
 export async function resolveTypesEntry(pkgDir: string): Promise<string | null> {
   let manifest: PackageJson;
   try {
@@ -418,42 +418,13 @@ function resolveModuleSymbol(
   return fileSymbol;
 }
 
-/**
- * Build the API surface for an already-extracted package directory.
- *
- * Missing transitive dependencies are expected and fine: unresolved imports
- * degrade to `any`, which affects a handful of signatures but never prevents the
- * walk. We are diffing a surface against itself across versions, so both sides
- * degrade identically.
- */
 /** How long an alias expansion may be before recording it costs more than it buys. */
 const MAX_ALIAS_EXPANSION = 200;
 
 /**
- * Non-generic type aliases, mapped to what the checker says they actually are.
- *
- * `TypeFormatFlags.InTypeAlias` is what does the work: without it the printer
- * hands back the alias's own name for a plain alias and the resolved form for a
- * conditional one, which is the whole problem — @tanstack/query-core declares
- * `type QueryKey = ReadonlyArray<unknown>` in 5.51 and a conditional over a
- * `Register` interface in 5.101, so the same type printed as `QueryKey` and
- * then as `readonly unknown[]`. Measured, both render as `readonly unknown[]`
- * under that flag.
- *
- * Three exclusions, each for a reason that was measured rather than guessed:
- *
- * Generic aliases are skipped, because `Foo<string>` cannot be replaced by
- * `Foo`'s body without substituting the argument, which is a job for the
- * checker and not for text.
- *
- * An expansion of `any` is skipped, because that is overwhelmingly the checker
- * giving up on an import it could not resolve rather than a genuine `any` —
- * remark-gfm's `Options` resolves to an unshipped `./lib/index.js` and rendered
- * exactly that way, which would have made two unrelated signatures agree.
- *
- * Anything over `MAX_ALIAS_EXPANSION` is skipped, because substituting a long
- * type everywhere it is named pushes signatures past the length at which they
- * are stored only in part, and a truncated comparison is unsound.
+ * Type-parameter defaults per generic declaration, so a type argument that
+ * merely restates its default — `QueryObserverResult<unknown, Error>` against
+ * `<TData = unknown, TError = Error>` — can be recognised as the same type.
  */
 function collectTypeDefaults(
   program: ts.Program,
@@ -492,6 +463,32 @@ function collectTypeDefaults(
   return out;
 }
 
+/**
+ * Non-generic type aliases, mapped to what the checker says they actually are.
+ *
+ * `TypeFormatFlags.InTypeAlias` is what does the work: without it the printer
+ * hands back the alias's own name for a plain alias and the resolved form for a
+ * conditional one, which is the whole problem — @tanstack/query-core declares
+ * `type QueryKey = ReadonlyArray<unknown>` in 5.51 and a conditional over a
+ * `Register` interface in 5.101, so the same type printed as `QueryKey` and
+ * then as `readonly unknown[]`. Measured, both render as `readonly unknown[]`
+ * under that flag.
+ *
+ * Three exclusions, each for a reason that was measured rather than guessed:
+ *
+ * Generic aliases are skipped, because `Foo<string>` cannot be replaced by
+ * `Foo`'s body without substituting the argument, which is a job for the
+ * checker and not for text.
+ *
+ * An expansion of `any` is skipped, because that is overwhelmingly the checker
+ * giving up on an import it could not resolve rather than a genuine `any` —
+ * remark-gfm's `Options` resolves to an unshipped `./lib/index.js` and rendered
+ * exactly that way, which would have made two unrelated signatures agree.
+ *
+ * Anything over `MAX_ALIAS_EXPANSION` is skipped, because substituting a long
+ * type everywhere it is named pushes signatures past the length at which they
+ * are stored only in part, and a truncated comparison is unsound.
+ */
 function collectTypeAliases(program: ts.Program, checker: ts.TypeChecker): Record<string, string> {
   const out: Record<string, string> = {};
   for (const file of program.getSourceFiles()) {
@@ -525,6 +522,14 @@ function collectTypeAliases(program: ts.Program, checker: ts.TypeChecker): Recor
   return out;
 }
 
+/**
+ * Build the API surface for an already-extracted package directory.
+ *
+ * Missing transitive dependencies are expected and fine: unresolved imports
+ * degrade to `any`, which affects a handful of signatures but never prevents the
+ * walk. We are diffing a surface against itself across versions, so both sides
+ * degrade identically.
+ */
 export async function extractSurface(
   pkgDir: string,
   pkg: string,

@@ -95,7 +95,7 @@ function fromDockerfile(file: string, source: string): VersionPin[] {
   return pins;
 }
 
-/**
+/*
  * Wire-protocol versions pinned in source.
  *
  * A vendor versions its HTTP API separately from the SDK that calls it.

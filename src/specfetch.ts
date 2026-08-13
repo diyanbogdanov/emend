@@ -430,10 +430,11 @@ export async function apisIoArtifacts(fetch: Fetcher, domain: string): Promise<V
 /**
  * Find every description of this vendor's API that can be located, best first.
  *
- * Sources are consulted in the order `SPEC_SOURCES` records, and the walk stops
- * as soon as the provider's own word is in hand: no third party's copy can
- * improve on it, so every further request is latency and somebody's rate limit
- * spent for nothing.
+ * Sources are consulted from the provider's own origin outward — well-known
+ * paths, then its `apis.json`, then its GitHub organisation, then the apis.io
+ * directory — and the walk stops as soon as the provider's own word is in hand:
+ * no third party's copy can improve on it, so every further request is latency
+ * and somebody's rate limit spent for nothing.
  *
  * An empty result means *not found*, and callers must render it that way. The
  * detector this feeds reports the call sites it located and says the spec was

@@ -195,20 +195,15 @@ function reviewHarnessFrom(args: Args): Harness | undefined {
     // comparing the workspace before and after and discarding the findings of a
     // session that changed anything — evidence rather than configuration. What
     // does widen is reach outside the checkout: `webfetch` is denied but bash
-    // could still curl, so this path stays blocked for untrusted repositories.
+    // could still curl. Nothing here enforces that against an untrusted
+    // checkout — what keeps this path out of one today is that the hosted
+    // runner never constructs a review harness. If that changes, this is the
+    // sentence that must become a `harnessPermitted` check.
     allowBash: true,
     ...(typeof flag === 'string' ? { model: flag } : {}),
   });
 }
 
-/**
- * Contract checking, when it was asked for.
- *
- * Returns the resolver rather than a boolean, because handing over the thing
- * that makes outbound requests is what "yes, go and ask the vendors" means.
- * `--contracts=<dir>` puts the description cache somewhere durable; a hosted
- * scan wants that, a one-off does not care.
- */
 /**
  * The API version each pinned vendor publishes, where a description says so.
  *
@@ -256,6 +251,14 @@ async function publishedVersions(
   return found;
 }
 
+/**
+ * Contract checking, when it was asked for.
+ *
+ * Returns the resolver rather than a boolean, because handing over the thing
+ * that makes outbound requests is what "yes, go and ask the vendors" means.
+ * `--contracts=<dir>` puts the description cache somewhere durable; a hosted
+ * scan wants that, a one-off does not care.
+ */
 function contractsFrom(args: Args): {
   resolve: (v: { domain: string }) => Promise<SpecCandidate[]>;
   previous?: (c: SpecCandidate) => Promise<SpecCandidate | null>;

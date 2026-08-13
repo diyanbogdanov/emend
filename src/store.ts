@@ -348,10 +348,6 @@ export class Store {
     }));
   }
 
-  // ---------------------------------------------------------------------------
-  // Hosted service: installations, repositories, and the job queue.
-  // ---------------------------------------------------------------------------
-
   /**
    * Record that a vulnerability was cleared, and at which version.
    *
@@ -386,6 +382,10 @@ export class Store {
       return { pkg: r.pkg, fixedAt: r.fixed_at, advisories };
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // Hosted service: installations, repositories, and the job queue.
+  // ---------------------------------------------------------------------------
 
   upsertInstallation(installationId: number, account: string): void {
     this.#db

@@ -157,20 +157,6 @@ function namesADeclaration(signature: string, path: string): boolean {
 }
 
 /**
- * A signature with its type parameters renamed to their positions.
- *
- * A type parameter's name is not observable to a caller: they are supplied
- * positionally, `useMutation<A, B, C, D>`, and nobody can reference one by
- * name. So @tanstack/react-query renaming `TContext` to `TOnMutateResult` —
- * used in the same slot throughout — changed the signature string and nothing
- * a consumer can see, and was reported as breaking.
- *
- * Comparing positionally is the same move that fixed the cache path and the
- * defaulted type parameter: normalise the representation, then compare meaning.
- * A rename that comes *with* a real change still differs after normalising,
- * and so does a reordering, because position is exactly what is preserved.
- */
-/**
  * A signature with the printer's disambiguating suffixes removed.
  *
  * `typeToString` appends `_2`, `_3` and so on when two types share a name in
@@ -186,13 +172,7 @@ function withoutPrinterSuffixes(signature: string): string {
   return signature.replace(/\b([A-Za-z_$][\w$]*?)_\d+\b/g, '$1');
 }
 
-/**
- * A signature reduced to what a caller is actually held to.
- *
- * Three things a consumer cannot observe are stripped: the printer's
- * disambiguating suffixes, the names of type parameters, and the names of value
- * parameters. What survives is arity, optionality, and the types themselves.
- */
+/** The agreed context a signature comparison is reduced under. */
 interface Reduction {
   /** Aliases both versions agree the meaning of. Shared between the two sides. */
   aliases: ReadonlyMap<string, string>;
@@ -200,6 +180,22 @@ interface Reduction {
   defaults: ReadonlyMap<string, readonly string[]>;
 }
 
+/**
+ * A signature reduced to what a caller is actually held to.
+ *
+ * Three things a consumer cannot observe are stripped: the printer's
+ * disambiguating suffixes, the names of type parameters, and the names of value
+ * parameters. What survives is arity, optionality, and the types themselves.
+ *
+ * Type parameters are renamed to their positions because their names are not
+ * observable: they are supplied positionally, `useMutation<A, B, C, D>`, and
+ * nobody can reference one by name. @tanstack/react-query renaming `TContext`
+ * to `TOnMutateResult` — used in the same slot throughout — changed the
+ * signature string and nothing a consumer can see, and was reported as
+ * breaking. A rename that comes *with* a real change still differs after
+ * normalising, and so does a reordering, because position is exactly what is
+ * preserved.
+ */
 function comparableSignature(symbol: ApiSymbol, reduce?: Reduction): string {
   const params = symbol.typeParams ?? [];
 
@@ -223,20 +219,6 @@ function comparableSignature(symbol: ApiSymbol, reduce?: Reduction): string {
   return canonicalType(substituted, reduce?.defaults);
 }
 
-/**
- * Aliases the two versions agree about.
- *
- * The whole safety argument. Where an alias means the same thing in both,
- * substituting it can only collapse a difference the printer invented — the
- * comparison gets strictly more accurate. Where the two disagree, substituting
- * would make signatures differ that had been rendering identically, and
- * measured on query-core that trade was bad: of four aliases whose expansion
- * moved between 5.51 and 5.101, two had merely been reordered by the printer
- * (`"error" | "pending" | "success"` against `"pending" | "success" | "error"`),
- * one was a genuine break and one was ambiguous. Two false findings bought for
- * one true one is the wrong direction for this codebase, so a disagreement
- * means the alias is left alone on both sides and nothing changes.
- */
 /**
  * Type names whose defaults the two versions agree about, position by position.
  *
@@ -282,6 +264,20 @@ function agreedDefaults(
   return agreed;
 }
 
+/**
+ * Aliases the two versions agree about.
+ *
+ * The whole safety argument. Where an alias means the same thing in both,
+ * substituting it can only collapse a difference the printer invented — the
+ * comparison gets strictly more accurate. Where the two disagree, substituting
+ * would make signatures differ that had been rendering identically, and
+ * measured on query-core that trade was bad: of four aliases whose expansion
+ * moved between 5.51 and 5.101, two had merely been reordered by the printer
+ * (`"error" | "pending" | "success"` against `"pending" | "success" | "error"`),
+ * one was a genuine break and one was ambiguous. Two false findings bought for
+ * one true one is the wrong direction for this codebase, so a disagreement
+ * means the alias is left alone on both sides and nothing changes.
+ */
 function agreedAliases(from: ApiSurface, to: ApiSurface): Map<string, string> {
   const reduced = (text: string) => withoutPrinterSuffixes(canonicalType(text));
   const agreed = new Map<string, string>();
@@ -307,7 +303,7 @@ function agreedAliases(from: ApiSurface, to: ApiSurface): Map<string, string> {
  * One parameter binding: `props`, `{ a, b }`, `...rest`, and whether it is optional.
  *
  * Returns null when what follows is not a binding at all, which is most of the
- * time \u2014 `(A | B)[]` and `(T extends X ? A : B)` are parenthesised types, and a
+ * time — `(A | B)[]` and `(T extends X ? A : B)` are parenthesised types, and a
  * scanner that mistook either for a parameter would rewrite the type itself.
  */
 function readBinding(
@@ -357,7 +353,7 @@ const CLOSERS = ')}]>';
  * Parameter bindings replaced by their position.
  *
  * TypeScript has no named arguments, so what a parameter is *called* is
- * unobservable to a caller \u2014 and where a parameter is destructured, the printer
+ * unobservable to a caller — and where a parameter is destructured, the printer
  * renders the binding pattern in place of a name, which means a callee pulling
  * one more property out of an argument whose declared type never moved renders
  * as a changed signature. Measured on one repository: `@xyflow/react`'s
@@ -366,7 +362,7 @@ const CLOSERS = ')}]>';
  *
  * Only a binding directly inside a `(` group is rewritten. Members of an object
  * type are also `name: Type` and their names are absolutely part of the
- * contract, so confusing the two would erase every real property rename \u2014 the
+ * contract, so confusing the two would erase every real property rename — the
  * enclosing bracket is what tells them apart.
  */
 export function positionalParams(signature: string): string {
@@ -663,10 +659,6 @@ export function diffSurfaces(from: ApiSurface, to: ApiSurface): SurfaceDiff {
     unanalyzable,
     ...(notes.length > 0 ? { note: notes.join('; ') } : {}),
   };
-}
-
-function majorOf(version: string): number {
-  return Number.parseInt(version.split('.')[0] ?? '0', 10) || 0;
 }
 
 /**
