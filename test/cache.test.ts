@@ -73,6 +73,24 @@ test('pruning one package leaves the rest of the cache alone', async () => {
   }
 });
 
+test('a scoped package is pruned under the name it is stored as', async () => {
+  // The one case where the on-disk name is not the package name: `cacheKey`
+  // writes `@scope/name` as `@scope+name`, `listCache` decodes it back, and a
+  // prune has to encode it again to find the directory. Re-deriving that by hand
+  // is how the two drift, and the drift is silent — the wrong path is simply not
+  // there, so `rm --force` succeeds and reports a package deleted that is still
+  // on disk.
+  const { root, cleanup } = cacheWith({ '@1password/sdk': ['0.5.0'], zod: ['4.4.3'] });
+  try {
+    const removed = await pruneCache({ pkg: '@1password/sdk' }, root);
+    assert.equal(removed.packages, 1);
+    assert.equal(existsSync(path.join(root, '@1password+sdk')), false, 'the directory is gone');
+    assert.deepEqual((await listCache(root)).map((r) => r.pkg), ['zod']);
+  } finally {
+    cleanup();
+  }
+});
+
 test('pruning a package that is not cached removes nothing and says so', async () => {
   // Same reason the store reports its counts: a typo must not read as a clear.
   const { root, cleanup } = cacheWith({ zod: ['4.4.3'] });
@@ -127,6 +145,61 @@ test('a prune with no target refuses rather than guessing', async () => {
   const { root, cleanup } = cacheWith({ zod: ['4.4.3'] });
   try {
     await assert.rejects(() => pruneCache({}, root), /nothing to prune|specify/i);
+    assert.equal(existsSync(path.join(root, 'zod')), true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a package and an age narrow together, rather than one silently winning', async () => {
+  // `--pkg zod --older-than 30` names two constraints and means both. Deciding
+  // it by precedence deleted zod at any age, which is the operator typing a flag
+  // and the code declining to read it — and the direction that errs toward
+  // deleting something still in use.
+  const { root, cleanup } = cacheWith({ zod: ['4.4.3'], recharts: ['3.10.1'] });
+  try {
+    const fresh = await pruneCache({ pkg: 'zod', olderThanDays: 30 }, root);
+    assert.equal(fresh.packages, 0, 'zod is named, but it is not old');
+    assert.equal(existsSync(path.join(root, 'zod')), true);
+
+    const old = ago(90);
+    utimesSync(path.join(root, 'zod', '4.4.3'), old, old);
+    utimesSync(path.join(root, 'zod'), old, old);
+
+    const aged = await pruneCache({ pkg: 'zod', olderThanDays: 30 }, root);
+    assert.equal(aged.packages, 1, 'named and old, so both constraints hold');
+    assert.equal(existsSync(path.join(root, 'recharts')), true, 'the age alone was never enough');
+  } finally {
+    cleanup();
+  }
+});
+
+test('an age that is not a number is refused, not treated as an age', async () => {
+  // `Number('abc')` is NaN and every comparison against NaN is false, so an
+  // unparseable age turns whichever predicate it reaches into its own opposite —
+  // "delete nothing" or "delete all of it" depending on which way the test is
+  // written. Neither is what was typed, so it is refused at the boundary.
+  const { root, cleanup } = cacheWith({ zod: ['4.4.3'] });
+  try {
+    await assert.rejects(() => pruneCache({ olderThanDays: Number('abc') }, root), /number of days/i);
+    assert.equal(existsSync(path.join(root, 'zod')), true, 'and nothing was deleted on the way');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a package whose age cannot be read is not old enough to delete', async () => {
+  // Unknown is not a value here, it is the absence of one. A cache entry with no
+  // readable timestamp has an unknown age, and the one operation that cannot be
+  // undone does not proceed on a measurement that failed.
+  const { root, cleanup } = cacheWith({ zod: ['4.4.3'] });
+  try {
+    rmSync(path.join(root, 'zod', '4.4.3'), { recursive: true, force: true });
+    const [entry] = await listCache(root);
+    assert.equal(entry?.lastUsed, '', 'no versions left to date it by');
+
+    const removed = await pruneCache({ olderThanDays: 1 }, root);
+    assert.equal(removed.packages, 0);
     assert.equal(existsSync(path.join(root, 'zod')), true);
   } finally {
     cleanup();

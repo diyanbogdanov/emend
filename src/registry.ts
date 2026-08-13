@@ -549,6 +549,13 @@ export interface CachePruneOptions {
  *
  * Age is taken per package from its *newest* version, so a package still in
  * daily use is never dropped because one stale version of it is sitting there.
+ *
+ * `pkg` and `olderThanDays` narrow together rather than one winning: every
+ * constraint given has to hold. `--all` is the one that ignores the others,
+ * because it is not a filter — it is the statement that there is nothing to
+ * filter by. Deciding it by precedence instead meant `--pkg zod --older-than 30`
+ * silently deleted zod at any age, which is a flag the operator typed and the
+ * code declined to read.
  */
 export async function pruneCache(
   options: CachePruneOptions,
@@ -556,6 +563,14 @@ export async function pruneCache(
 ): Promise<{ packages: number; bytes: number }> {
   if (!options.all && !options.pkg && options.olderThanDays === undefined) {
     throw new Error('nothing to prune: name a package, an age, or --all');
+  }
+  // Rejected here rather than allowed to become a `NaN` cutoff. Every
+  // comparison against `NaN` is false, so an unparseable age turns whichever
+  // predicate it lands in into its own opposite — `emend store cache prune
+  // --older-than abc` is either "delete nothing" or "delete all 13GB" depending
+  // on which way the test happens to be written, and neither is what was typed.
+  if (options.olderThanDays !== undefined && !Number.isFinite(options.olderThanDays)) {
+    throw new Error('an age must be a number of days');
   }
 
   const cached = await listCache(root);
@@ -566,14 +581,24 @@ export async function pruneCache(
 
   const doomed = cached.filter((entry) => {
     if (options.all) return true;
-    if (options.pkg) return entry.pkg === options.pkg;
-    if (cutoff === undefined) return false;
-    return entry.lastUsed ? new Date(entry.lastUsed).getTime() < cutoff : false;
+    if (options.pkg !== undefined && entry.pkg !== options.pkg) return false;
+    if (cutoff !== undefined) {
+      // Stated as "provably older", not as "not newer". A package whose
+      // timestamp could not be read has an unknown age, and unknown is not old
+      // enough to delete on — the cardinal rule, pointed at the one operation
+      // here that cannot be undone.
+      const lastUsed = entry.lastUsed ? new Date(entry.lastUsed).getTime() : Number.NaN;
+      if (!(lastUsed < cutoff)) return false;
+    }
+    return true;
   });
 
   let bytes = 0;
   for (const entry of doomed) {
-    await rm(path.join(root, entry.pkg.replace('/', '+')), { recursive: true, force: true });
+    // `cacheKey`, not a second copy of it: the directory name is that function's
+    // output, and re-deriving it here is how the two drift into deleting the
+    // wrong path.
+    await rm(path.join(root, cacheKey(entry.pkg)), { recursive: true, force: true });
     bytes += entry.bytes;
   }
   return { packages: doomed.length, bytes };
