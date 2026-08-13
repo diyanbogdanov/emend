@@ -167,7 +167,7 @@ first page as the whole answer.
                               │                                 │
                               ▼                                 │
               tighten · finish deprecations · review            │
-              (structured edits, re-verified)                   │
+              (harness sessions, each re-verified)              │
                               │                                 │
                               ▼                                 │
                     behaviour review (read-only)                │
@@ -272,11 +272,17 @@ wrong answer gets:
 | `ask(system, user)` | Messages in, text out. **Never touches the checkout.** | The caller interprets the answer. Used for PR summaries and read-only reviews — work that is reported, not applied. |
 | `run(dir, task)` | A subprocess with tools, working in a directory. **The only thing that changes a file.** | It writes first and is judged after — by a read-only reviewer for whether the change was needed, and by verification for whether it works. `gate.ts` bounds where those later passes may write, not whether the repair was warranted. |
 
-That split is why the structured path was not folded into the harness when the
-two were unified. Byam's 27% is the case for keeping a constrained strategy;
-BigBag's is the case for it returning a *validated edit set* rather than a
-freeform patch, which is precisely what a harness produces. Both papers are
-implemented in `llm/propose.ts`, and its header derives the design from them.
+That split is what survived consolidation. It used to also justify a second
+model-driven route — a proposer emitting `find`/`replace` pairs that Emend
+located and applied, which failed closed because an invented `find` matched
+nothing. Spec §11 removed it: one thing changes code, and it is the harness.
+Byam's 27% end-to-end was the case for the constrained form; BigBag's 78.6%,
+driving an agent through a harness, is the case that won.
+
+What replaced fail-closed is not another gate. Spec §14 removed that too, once
+its record could be read — nothing correctly withheld, three correct repairs
+wrongly reverted. What stands now is the read-only reviewer, for whether a
+change was needed, and verification, for whether it works.
 
 What *was* shared and duplicated is the boundary: at one point six modules
 resolved a provider and three built requests. Provider, key, retry policy and

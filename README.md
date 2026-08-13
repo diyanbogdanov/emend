@@ -95,7 +95,7 @@ what to do when something looks wrong.
                                   │
              ┌────────────────────┼────────────────────┐
              ▼                    ▼                    ▼
-     deterministic plan     LLM agent (default)    dashboard / PR
+     deterministic plan    harness (opencode+MCP)  dashboard / PR
              └──────────► isolated git worktree ◄──────┘
                                   │
                     baseline → apply → verify → compare
@@ -346,7 +346,12 @@ better verifier anyway: it runs them in the environment they were written for.
 
 ---
 
-## The LLM agent
+## The harness
+
+One thing changes code: a harness session — `opencode`, driving an open-weight
+model with MCP and tools, in an isolated worktree. There is no second
+model-driven route and no fallback to one; a run that cannot reach a harness
+repairs nothing and says so.
 
 The deterministic core handles detection, localisation, rename-class migrations,
 and verification with **no model involved** — those are the parts whose answers
