@@ -194,6 +194,48 @@ export function verificationPassed(outcome: VerifyOutcome): boolean {
   return outcome === 'verified' || outcome === 'typecheck-only';
 }
 
+/** `src/schema.ts(28,15): error TS2554: ...` — tsc's own format. */
+const TSC_DIAGNOSTIC = /^\s*(\S+?)\((\d+),(\d+)\):\s*error\b/gm;
+
+/** `src/schema.ts:28:15: error ...` — most other tools. */
+const COLON_DIAGNOSTIC = /^\s*(\S+?):(\d+):(\d+):\s*error\b/gm;
+
+/**
+ * How many distinct places the compiler complained about.
+ *
+ * Deduplicated by file, line and column, which is what makes this a count of
+ * *problems* rather than of lines printed. Both formats are tried against the
+ * same output and a location seen twice is one diagnostic: tsc's pretty
+ * printer repeats a location in its own error frame, and a monorepo runner
+ * prefixes each line with the workspace, so the naive count of matches is
+ * roughly double on exactly the repositories where the number matters.
+ *
+ * Only the typecheck is asked. A failing test prints whatever its author chose
+ * to print, and counting that would compare two engines on how verbose their
+ * assertion library is.
+ *
+ * Two formats and no more, which bounds what this can claim. `runTypecheck`
+ * spawns through a pipe, so tsc leaves its pretty printer off and emits the
+ * first of them; a repository whose own `typecheck` script forces `--pretty`,
+ * or runs a checker that invents a third format, produces nothing either
+ * pattern matches. That degrades to zero — and zero is exactly what the one
+ * caller reads as *not measured*, so an unrecognised format costs the row its
+ * error-reduction cell rather than filling it with a number nobody counted.
+ */
+export function countDiagnostics(result: CommandResult): number {
+  if (result.skipped) return 0;
+  const seen = new Set<string>();
+  for (const pattern of [TSC_DIAGNOSTIC, COLON_DIAGNOSTIC]) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(`${result.stdout}\n${result.stderr}`)) !== null) {
+      const [, file, line, column] = match;
+      if (file) seen.add(`${file}:${line}:${column}`);
+    }
+  }
+  return seen.size;
+}
+
 export function compare(baseline: VerifyPhase, post: VerifyPhase): VerificationReport {
   const baselineOk = phasePassed(baseline);
   const postOk = phasePassed(post);

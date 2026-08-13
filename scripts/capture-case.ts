@@ -35,6 +35,10 @@ console.log(`# ${findings.length} finding(s)`);
 
 const result = await fixPackage(dir, findings, {
   keepWorkspace: true,
+  // Both of these are what `runCase` asks for, and a capture that asked for less
+  // would print a different score for the same run — which is the whole failure
+  // this script was rewritten to stop having.
+  countUpgradeErrors: true,
   harness: openCodeHarness({ model }),
   onProgress: (m) => console.log(`  ${m}`),
 });

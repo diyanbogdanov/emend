@@ -30,7 +30,7 @@ import {
   workspaceDiff,
   type Workspace,
 } from './apply.ts';
-import { runPhase, compare, verificationPassed } from './verify.ts';
+import { runPhase, runTypecheck, compare, countDiagnostics, verificationPassed } from './verify.ts';
 
 import {
   revertHunks,
@@ -89,6 +89,22 @@ async function unavailableWriter(
 export interface FixOptions {
   /** Leave the workspace on disk for inspection. */
   keepWorkspace?: boolean;
+  /**
+   * Typecheck once more, straight after the bump, to record what the upgrade
+   * broke before anything tried to repair it.
+   *
+   * Off by default because it is a whole extra `tsc` on a repository that is
+   * about to be typechecked twice anyway, and no repair decision reads it. The
+   * benchmark does: `Err. reduced` is the question "how far did the engine get",
+   * and that has no denominator unless the damage is counted while it is still
+   * undamaged by repair. Taking it after the deterministic edits instead would
+   * have made `emend eval --no-agent` — which measures the deterministic path
+   * alone — report a reduction of zero by construction.
+   *
+   * Same shape and same reason as `keepWorkspace`: something only a caller
+   * measuring the run wants, priced so that nobody else pays for it.
+   */
+  countUpgradeErrors?: boolean;
   /**
    * Whether model-driven work is wanted at all. Callers resolve the harness
    * itself separately; in this module the flag decides one thing — `fixLint`
@@ -682,6 +698,17 @@ export async function fixPackage(
       ignoreScripts: untrusted,
     });
 
+    // Here and nowhere later: this is the only moment the workspace holds the
+    // new version and none of the repair, which is what "what the upgrade broke"
+    // means. One line further on, the deterministic edits have already started
+    // fixing it.
+    const errorsFromUpgrade = options.countUpgradeErrors
+      ? countDiagnostics(await runTypecheck(ws.dir))
+      : null;
+    if (errorsFromUpgrade !== null) {
+      progress(`  the upgrade breaks ${errorsFromUpgrade} location(s) before repair`);
+    }
+
     let appliedCount = 0;
     const failedEdits: Array<{ file: string; line: number; reason: string }> = [];
 
@@ -872,6 +899,17 @@ export async function fixPackage(
       workspaceMode: ws.mode,
       ...(harnessRecord ? { harness: harnessRecord } : {}),
       ...(reviewNotes ? { reviewNotes } : {}),
+      ...(errorsFromUpgrade !== null
+        ? {
+            upgradeErrors: {
+              afterBump: errorsFromUpgrade,
+              // The end of the line, whichever pass got it there — deterministic
+              // edits, the harness, tightening, the review. All of them are
+              // repair, and the question is how much of the damage is left.
+              afterRepair: countDiagnostics(verification.post.typecheck),
+            },
+          }
+        : {}),
     };
 
     if (!options.keepWorkspace) {
@@ -968,6 +1006,19 @@ export async function fixPins(
   }
 }
 
+/**
+ * Compiler diagnostics either side of the repair.
+ *
+ * A pair rather than two loose numbers, because neither means anything alone: a
+ * run that ends with two errors did well from fourteen and badly from two.
+ */
+export interface UpgradeErrors {
+  /** Locations the compiler objected to after the bump, before any repair. */
+  afterBump: number;
+  /** Locations still objected to when every pass had finished. */
+  afterRepair: number;
+}
+
 export interface PackageFixResult {
   pkg: string;
   fromVersion: string;
@@ -985,6 +1036,15 @@ export interface PackageFixResult {
   workspaceMode: string | null;
   /** Present only when a harness was configured and the build was still red. */
   harness?: HarnessEscalation;
+  /**
+   * What the upgrade broke, and how much of it survived the repair.
+   *
+   * Present only when `countUpgradeErrors` asked for it, and absent rather than
+   * zeroed when it did not — the two are different claims, and "the upgrade
+   * broke nothing" is the one nobody measured. Every consumer has to decide
+   * which it is looking at, which is the point.
+   */
+  upgradeErrors?: UpgradeErrors;
   /**
    * Advisory notes from the read-only repo-wide pass, when one ran.
    *

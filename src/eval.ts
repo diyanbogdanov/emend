@@ -131,8 +131,23 @@ export interface CaseOutcome {
    * different claims, and only one of them is about the migration.
    */
   uncheckable?: string[];
-  errorsBefore: number;
-  errorsAfter: number;
+  /**
+   * Compiler diagnostics after the bump and after the repair.
+   *
+   * Optional, and absent means *not measured* — never "the upgrade broke
+   * nothing". They were required numbers defaulting to zero until the column
+   * they feed was read: nothing had ever filled them, every run reported a
+   * reduction of zero, and `Err. reduced` had been a column of zeroes for the
+   * whole life of the benchmark while looking like a result.
+   *
+   * The two runs that legitimately cannot have them are the reason this is
+   * optional rather than fixed. A case whose scan found no findings and a case
+   * that threw never reached a bump, so there is no damage to have reduced —
+   * and scoring those as zero reduction averaged the corpus down for cases
+   * nobody ran.
+   */
+  errorsBefore?: number;
+  errorsAfter?: number;
   /** Added lines trading a type check for a compile. */
   typeEscapes: number;
   /** Deprecations the migration claimed and left in place. */
@@ -149,8 +164,15 @@ export interface CaseScore {
   clean: boolean;
   /** Applied edits over the minimum the migration required. 1 is ideal. */
   editRatio: number;
-  /** Proportion of the starting errors that are gone. 0 when none were. */
-  errorReduction: number;
+  /**
+   * Proportion of the upgrade's errors the repair cleared.
+   *
+   * `null` where it was not measured, which is not zero: zero is an engine that
+   * had fourteen errors to work with and cleared none, and null is a run nobody
+   * counted. Averaging the second in as the first is what made this metric
+   * report every engine as having reduced nothing.
+   */
+  errorReduction: number | null;
   /** Why it was not clean, in the order a reader should care. */
   penalties: string[];
   /** The engine never produced anything, so this run scores nothing either way. */
@@ -174,10 +196,15 @@ export function scoreCase(evalCase: EvalCase, outcome: CaseOutcome): CaseScore {
 
   const minimal = Math.max(1, evalCase.minimalEdits);
   const editRatio = outcome.editsApplied / minimal;
+  // Three states, not two. Unmeasured is null and stays out of every average;
+  // measured-at-zero-damage is also null, because "cleared none of nothing" is
+  // not a score an engine earned and a run with nothing to repair should not
+  // drag down the column for the runs that had something.
+  const { errorsBefore, errorsAfter } = outcome;
   const errorReduction =
-    outcome.errorsBefore > 0
-      ? Math.max(0, (outcome.errorsBefore - outcome.errorsAfter) / outcome.errorsBefore)
-      : 0;
+    errorsBefore === undefined || errorsAfter === undefined || errorsBefore === 0
+      ? null
+      : Math.max(0, (errorsBefore - errorsAfter) / errorsBefore);
 
   const penalties: string[] = [];
   if (outcome.inconclusive) penalties.push(`INCONCLUSIVE — ${outcome.inconclusive}`);
@@ -252,8 +279,14 @@ export interface ModelSummary {
   inconclusive: number;
   passRate: number;
   cleanRate: number;
-  /** Mean over runs that failed, so partial progress on hard cases stays visible. */
-  meanErrorReduction: number;
+  /**
+   * Mean over runs that failed, so partial progress on hard cases stays visible.
+   *
+   * `null` when no failed run was measured. A benchmark that prints 0% for a
+   * column it never filled is making a claim about the engine; this makes the
+   * absence say so instead, and `renderSummary` shows it as a dash.
+   */
+  meanErrorReduction: number | null;
   meanEditRatio: number;
   totalTypeEscapes: number;
   totalDeprecationGaps: number;
@@ -293,6 +326,18 @@ function engineKey(outcome: { model: string; harness?: string }): string {
 
 const mean = (values: number[]): number =>
   values.length === 0 ? 0 : values.reduce((a, b) => a + b, 0) / values.length;
+
+/**
+ * The mean of what was measured, or null if nothing was.
+ *
+ * Separate from `mean` because the two disagree about an empty list, and the
+ * disagreement is the point: a rate over no runs is 0 because no runs passed,
+ * while a reduction over no measurements is not a reduction of zero.
+ */
+const meanOrNull = (values: Array<number | null>): number | null => {
+  const measured = values.filter((v): v is number => v !== null);
+  return measured.length === 0 ? null : mean(measured);
+};
 
 /**
  * One row per model.
@@ -359,7 +404,9 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
         cleanRate: ran.filter((s) => s.clean).length / denominator,
         // Over the failures only: a pass has nothing left to reduce, and
         // averaging its 100% in would hide how far the failures actually got.
-        meanErrorReduction: mean(failed.map((s) => s.errorReduction)),
+        // Over the *measured* failures only, for the stronger version of the
+        // same argument: a run nobody counted is not a run that reduced nothing.
+        meanErrorReduction: meanOrNull(failed.map((s) => s.errorReduction)),
         meanEditRatio: mean(ran.filter((s) => s.passed).map((s) => s.editRatio)),
         totalTypeEscapes: m.escapes,
         totalDeprecationGaps: m.gaps,
@@ -466,15 +513,15 @@ export async function measureCase(
     ...(uncheckable.length > 0 ? { uncheckable } : {}),
     typeEscapes: countTypeEscapes(result.diff),
     deprecationGaps: gaps.length,
-    // **Not measured.** Nothing counts compiler errors any more — the parser
-    // that did was deleted with the proposer's edit gate — so these stay zero
-    // and `scoreCase` reads a reduction of zero for every engine. The `Err.
-    // reduced` column of `renderSummary` is therefore a column of zeroes rather
-    // than a result. Recorded here, in the one place that fills them, so that
-    // the next person to read that column finds out from the code instead of
-    // from the table: either a counter comes back, or the column goes.
-    errorsBefore: 0,
-    errorsAfter: 0,
+    // Carried across only when the run actually counted them, so that a caller
+    // who did not ask for `countUpgradeErrors` produces an outcome that says it
+    // does not know rather than one claiming the upgrade broke nothing.
+    ...(result.upgradeErrors
+      ? {
+          errorsBefore: result.upgradeErrors.afterBump,
+          errorsAfter: result.upgradeErrors.afterRepair,
+        }
+      : {}),
     // Recorded from the run rather than from the request: a harness that was
     // asked for and declined — an untrusted repository, an unavailable binary
     // — did not produce these edits and must not be credited with them.
@@ -508,14 +555,16 @@ export async function runCase(
   options: { useAgent?: boolean; harness?: Harness; onProgress?: (m: string) => void } = {},
 ): Promise<CaseOutcome> {
   const startedAt = Number(process.hrtime.bigint() / 1_000_000n);
+  // No error counts, deliberately. This is the outcome for a case that never
+  // reached a bump — nothing found, or a throw — so there is no damage it could
+  // have reduced, and a zero here would have been counted as an engine that
+  // cleared none of it.
   const base: CaseOutcome = {
     caseId: evalCase.id,
     model,
     verdict: 'unverified',
     editsApplied: 0,
     editsWithheld: 0,
-    errorsBefore: 0,
-    errorsAfter: 0,
     typeEscapes: 0,
     deprecationGaps: 0,
     durationMs: 0,
@@ -531,6 +580,10 @@ export async function runCase(
 
     const result = await fixPackage(repoDir, findings, {
       keepWorkspace: true,
+      // The extra typecheck a sweep is here to pay for: without it there is no
+      // denominator for `Err. reduced`, which is the column that says how far a
+      // failing engine got.
+      countUpgradeErrors: true,
       ...(options.useAgent === undefined ? {} : { useAgent: options.useAgent }),
       ...(options.harness ? { harness: options.harness } : {}),
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
@@ -783,6 +836,10 @@ export function renderSummary(rows: ModelSummary[]): string {
     `| --- | --- | --- | --- | --- | --- | --- | --- | --- |${escalated ? ' --- | --- |' : ''} --- | --- | --- |`,
   ];
   const pct = (n: number): string => `${Math.round(n * 100)}%`;
+  // A dash, never `0%`. The reader of this table cannot tell a measurement from
+  // its absence, so the table has to — and this column spent its whole life
+  // printing `0%` for a number nothing filled in.
+  const pctOrDash = (n: number | null): string => (n === null ? '—' : pct(n));
   for (const r of rows) {
     // Model and harness together, because together is what produced the edits.
     const engine = r.harness ? `\`${r.model}\` + \`${r.harness}\`` : `\`${r.model}\``;
@@ -791,7 +848,7 @@ export function renderSummary(rows: ModelSummary[]): string {
         `${r.totalUnresolved > 0 ? `**${r.totalUnresolved}**` : '0'} | ` +
         `${r.meanEditRatio.toFixed(1)}x | ${r.totalEditsWithheld} |` +
         (escalated ? ` ${r.totalHunksKept} | ${r.totalHunksReverted} |` : '') +
-        ` ${pct(r.meanErrorReduction)} | ${r.totalTypeEscapes} | ${r.totalDeprecationGaps} |`,
+        ` ${pctOrDash(r.meanErrorReduction)} | ${r.totalTypeEscapes} | ${r.totalDeprecationGaps} |`,
     );
   }
   return lines.join('\n');

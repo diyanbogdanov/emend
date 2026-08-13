@@ -6,6 +6,7 @@ import path from 'node:path';
 import { checkFires } from '../src/quality.ts';
 import {
   measureCase,
+  renderSummary,
   scoreCase,
   summarise,
   scanOptionsFor,
@@ -254,10 +255,50 @@ test('a failed run still records how far it got', () => {
   assert.equal(partial.passed, false);
   assert.equal(stuck.passed, false);
   assert.ok(
-    partial.errorReduction > stuck.errorReduction,
+    (partial.errorReduction ?? 0) > (stuck.errorReduction ?? 0),
     'progress must be visible even when the build is still red',
   );
-  assert.equal(stuck.errorReduction, 0);
+  assert.equal(stuck.errorReduction, 0, 'measured, and it cleared none of them');
+});
+
+test('a run nobody counted reduced nothing, which is not a reduction of nothing', () => {
+  // The distinction the whole column turns on. `errorsBefore` was a required
+  // number defaulting to 0, nothing ever assigned it, and so every engine
+  // reported 0% error reduction for the life of the benchmark — a fabricated
+  // measurement that read exactly like a real bad one.
+  const unmeasured = scoreCase(zodCase, outcome({ verdict: 'regression', errorsBefore: undefined, errorsAfter: undefined }));
+  assert.equal(unmeasured.errorReduction, null, 'absent, not zero');
+
+  const cleared = scoreCase(zodCase, outcome({ verdict: 'regression', errorsBefore: 8, errorsAfter: 0 }));
+  assert.equal(cleared.errorReduction, 1);
+
+  // And an unmeasured run must not drag the column down for the runs that were
+  // measured — the averaging bug the null exists to make impossible.
+  const rows = summarise(
+    [zodCase],
+    [
+      { ...outcome({ verdict: 'regression', errorsBefore: 8, errorsAfter: 0 }), model: 'm' },
+      { ...outcome({ verdict: 'regression', errorsBefore: undefined, errorsAfter: undefined }), model: 'm' },
+    ],
+  );
+  assert.equal(rows[0]?.meanErrorReduction, 1, 'the mean is over what was measured');
+});
+
+test('a column nothing measured renders as a dash, never as a score', () => {
+  // A table cannot be read for what it does not say, so it has to say it. `0%`
+  // in this column is a claim about the engine; `—` is a claim about the sweep.
+  const unmeasured = summarise(
+    [zodCase],
+    [{ ...outcome({ verdict: 'regression', errorsBefore: undefined, errorsAfter: undefined }), model: 'm' }],
+  );
+  assert.equal(unmeasured[0]?.meanErrorReduction, null);
+  assert.match(renderSummary(unmeasured), /\| — \|/);
+
+  const measured = summarise(
+    [zodCase],
+    [{ ...outcome({ verdict: 'regression', errorsBefore: 4, errorsAfter: 1 }), model: 'm' }],
+  );
+  assert.match(renderSummary(measured), /\| 75% \|/);
 });
 
 test('an unverified run is never counted as passing', () => {
