@@ -515,7 +515,24 @@ export const OPENAI_CASE: EvalCase = {
   // The same caveat the recharts case carries applies: a model that rewrites the
   // whole module in one region reports fewer edits than one making the same
   // change in four, with an identical diff.
-  minimalEdits: 4,
+  //
+  // Five. Four are the code edits above; the fifth is the client's doc comment,
+  // which reads "`Configuration` and `OpenAIApi` are both gone in openai 4 — so
+  // this import is the first thing an upgrade breaks". After the migration that
+  // describes code the file no longer contains, and this corpus already settled
+  // what that is worth: `DEMO_CASE` went from five to six for the same reason,
+  // in the same words — a migration that leaves a false comment behind has not
+  // finished.
+  //
+  // Said four until the diff was read rather than reasoned about. §15 pinned the
+  // target and predicted this would fall to 1.0x on its own; it fell to 1.3x, so
+  // the diff was captured. It holds exactly these five hunks and nothing else —
+  // four from the migration, one from the review — and no over-editing at all.
+  //
+  // The order mattered. Recounting *before* the pin would have raised this to
+  // six and encoded three unrequested major versions of openai as the standard.
+  // Five is the count against 4.104.0, which is the migration the case names.
+  minimalEdits: 5,
   mustResolve: ['Configuration', 'OpenAIApi'],
 };
 
