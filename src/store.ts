@@ -807,7 +807,7 @@ export class Store {
    * a scan reports skipped call sites rather than counting them clean.
    */
   pruneRepo(repoDir: string): PrunedCounts {
-    return this.#pruneWhere('repo_dir = ?', [repoDir]);
+    return this.#atomically(() => this.#pruneWhere('repo_dir = ?', [repoDir]));
   }
 
   /**
@@ -821,13 +821,40 @@ export class Store {
    * tidying a dropdown is asking for. So it is opt-in.
    */
   pruneAll(options: { includeApp?: boolean } = {}): PrunedCounts {
-    const counts = this.#pruneWhere('1 = 1', []);
-    if (options.includeApp) {
-      for (const table of ['pull_requests', 'jobs', 'repos', 'installations']) {
-        this.#db.prepare(`DELETE FROM ${table}`).run();
+    return this.#atomically(() => {
+      const counts = this.#pruneWhere('1 = 1', []);
+      if (options.includeApp) {
+        for (const table of ['pull_requests', 'jobs', 'repos', 'installations']) {
+          this.#db.prepare(`DELETE FROM ${table}`).run();
+        }
       }
+      return counts;
+    });
+  }
+
+  /**
+   * All of `work`'s writes, or none of them.
+   *
+   * A prune is several `DELETE`s that only mean anything together. Ordering them
+   * children-first decides *which* half survives an interruption; it cannot make
+   * a half impossible, and a findings row whose scan is gone is exactly the state
+   * the ordering was chosen to avoid. Interruption is not hypothetical here: this
+   * is the one path a person runs when they want the rows gone, and it is
+   * followed immediately by `store.close()`.
+   *
+   * Not nested — `pruneAll` wraps the whole job including the App tables, so
+   * `#pruneWhere` stays a plain sequence of deletes and never opens one itself.
+   */
+  #atomically<T>(work: () => T): T {
+    this.#db.exec('BEGIN');
+    try {
+      const result = work();
+      this.#db.exec('COMMIT');
+      return result;
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
     }
-    return counts;
   }
 
   /** The scan-side tables, deleted together so no orphan rows are left behind. */
