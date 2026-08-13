@@ -142,18 +142,17 @@ export interface ReviewContext {
 /**
  * Carry a codebase onto the new version of a dependency.
  *
- * **Nothing calls this.** `d4a0da9` deleted the loop that drove it, on the
- * argument that repair belongs to an agent driving the MCP tools, and recorded
- * what that costs: `emend fix --agent` no longer repairs a breaking upgrade from
- * the CLI — FIXED to NOT FIXED on the axios bait repo. The task, its evidence
- * gate (`classifyEdits`, `selectEvidencedEdits`) and its tests are all intact and
- * dormant, waiting on a caller.
+ * The escalation's job: `fixPackage` hands this to `runTask` when deterministic
+ * work left the build red. It sat dormant for a stretch — the loop that drove
+ * it was deleted on the argument that repair belongs to an agent driving the
+ * MCP tools, and the cost was recorded: `emend fix --agent` stopped repairing a
+ * breaking upgrade from the CLI, FIXED to NOT FIXED on the axios bait repo. The
+ * harness becoming the one writer gave it a caller again.
  *
- * Kept rather than deleted because it is the grounded strategy both papers
- * argue for — Byam's 27% improves markedly when the model is given the API diff,
- * the failing lines and compiler feedback, which is exactly what `AgentContext`
- * carries — and because deleting it would make the gap invisible instead of
- * open.
+ * Kept through the dormancy because it is the grounded strategy both papers
+ * argue for — Byam's 27% improves markedly when the model is given the API
+ * diff, the failing lines and compiler feedback, which is exactly what
+ * `AgentContext` carries.
  */
 export const MIGRATION_TASK: Task<AgentContext> = {
   name: 'migration',
@@ -190,9 +189,8 @@ You are given the API changes in a dependency upgrade, the exact lines in a code
  *    caused and left the deprecated API in place.
  *  - The migration repeated the same coercion at nine call sites. The reviewer
  *    extracted one module and the diff got smaller.
- */
-/**
- * The review, composed from two skills rather than a fixed block of prose.
+ *
+ * Composed from two skills rather than a fixed block of prose.
  *
  * **Completeness under quality, in that order.** They answer different
  * questions and only one of them is a matter of taste. `migration-completeness`

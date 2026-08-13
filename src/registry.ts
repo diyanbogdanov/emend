@@ -8,14 +8,14 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, rm, writeFile, readdir, readFile, access, symlink, rename } from 'node:fs/promises';
+import { mkdir, rm, writeFile, readdir, readFile, access, symlink, rename, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
 const REGISTRY = process.env.EMEND_REGISTRY ?? 'https://registry.npmjs.org';
-const CACHE_ROOT =
+export const CACHE_ROOT =
   process.env.EMEND_CACHE ?? path.join(homedir(), '.emend', 'cache');
 
 export interface PackumentVersion {
@@ -321,10 +321,12 @@ async function declarationImports(dir: string, fileCap: number): Promise<Set<str
  * plainly does. Chasing the full closure instead would download an unbounded
  * dependency tree for every package on every scan.
  *
- * Depth 2 covers the common shape — a facade package over a core package, which
- * may itself reference one shared types package — without opening the door to
- * transitively downloading half the registry. Raise it if you see hollow
- * surfaces; the cost is roughly linear in packages fetched.
+ * The common shape is shallow — a facade package over a core package, which may
+ * itself reference one shared types package — but real chains run deeper, and a
+ * depth that stops short reports a hollow surface as "ships no type
+ * declarations". The file and total caps below are what actually bound the
+ * work. Raise the depth if you see hollow surfaces; the cost is roughly linear
+ * in packages fetched.
  */
 const TYPE_DEP_DEPTH = 6;
 const TYPE_DEP_FILE_CAP = 4000;
@@ -417,9 +419,9 @@ export async function materializeTypeDeps(pkgDir: string): Promise<string[]> {
 /**
  * Expose an already-extracted cache directory at a second path.
  *
- * A symlink would be enough for TypeScript, but the same cached tarball is
- * referenced from many packages' node_modules, and a real copy would multiply
- * disk use by the number of dependents.
+ * A symlink is enough for TypeScript, and the same cached tarball is referenced
+ * from many packages' node_modules — a real copy would multiply disk use by the
+ * number of dependents.
  */
 async function linkTree(from: string, to: string): Promise<void> {
   if (await exists(to)) return;
@@ -431,4 +433,173 @@ async function mkdtempDir(root: string = tmpdir()): Promise<string> {
   const dir = path.join(root, `emend-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   await mkdir(dir, { recursive: true });
   return dir;
+}
+
+// ---------------------------------------------------------------------------
+// Looking at the cache, and getting rid of it
+// ---------------------------------------------------------------------------
+
+/**
+ * One cached package.
+ *
+ * Note what is *not* here: any notion of which repository wanted it. The cache
+ * is keyed by package and version — one `zod/4.4.3` entry serves every
+ * repository that ever resolved that version — so it cannot be pruned per
+ * repository, and pretending otherwise would delete another project's warm
+ * cache. Scan history is repo-scoped and lives in the store; this is not.
+ */
+export interface CachedPackage {
+  /** The real package name, decoded from its on-disk form. */
+  pkg: string;
+  versions: string[];
+  bytes: number;
+  /** Most recently touched version, which is what "in use" means here. */
+  lastUsed: string;
+}
+
+/** Bytes under a directory, following the tree rather than trusting its own size. */
+async function dirBytes(dir: string): Promise<number> {
+  let total = 0;
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) total += await dirBytes(full);
+    else if (entry.isFile()) {
+      try {
+        total += (await stat(full)).size;
+      } catch {
+        /* vanished mid-walk, which costs a few bytes of accuracy and nothing else */
+      }
+    }
+  }
+  return total;
+}
+
+/**
+ * What is in the cache, largest first.
+ *
+ * A missing root is an empty cache rather than an error: a fresh install has
+ * never fetched anything, and asking what is cached is a reasonable first thing
+ * to do.
+ */
+export async function listCache(root: string = CACHE_ROOT): Promise<CachedPackage[]> {
+  let dirs;
+  try {
+    dirs = await readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const packages: CachedPackage[] = [];
+  for (const entry of dirs) {
+    if (!entry.isDirectory()) continue;
+    // `.staging` is where `fetchPackageDirUncached` unpacks a tarball before
+    // renaming it into place, so it is scratch rather than a package — and a
+    // prune that treated it as one would delete a download that is still in
+    // flight. npm forbids a package name beginning with a dot, so this excludes
+    // exactly the scratch and nothing real.
+    if (entry.name.startsWith('.')) continue;
+    const dir = path.join(root, entry.name);
+    const versions = (await readdir(dir, { withFileTypes: true }).catch(() => []))
+      .filter((v) => v.isDirectory())
+      .map((v) => v.name)
+      .sort();
+
+    let newest = 0;
+    for (const version of versions) {
+      const when = await stat(path.join(dir, version))
+        .then((s) => s.mtimeMs)
+        .catch(() => 0);
+      if (when > newest) newest = when;
+    }
+
+    packages.push({
+      // `cacheKey` replaces the first `/` only, and a package name has at most
+      // one, so this is exact rather than a best guess.
+      pkg: entry.name.replace('+', '/'),
+      versions,
+      bytes: await dirBytes(dir),
+      lastUsed: newest ? new Date(newest).toISOString() : '',
+    });
+  }
+
+  return packages.sort((a, b) => b.bytes - a.bytes);
+}
+
+export interface CachePruneOptions {
+  /** A single package, by its real name. */
+  pkg?: string;
+  /** Packages whose newest version has not been touched in this many days. */
+  olderThanDays?: number;
+  all?: boolean;
+}
+
+/**
+ * Delete cached packages, and report what went.
+ *
+ * Throws when given no target. `--all` deletes gigabytes, and an options object
+ * that arrived empty by mistake must not be read as the one instruction that
+ * cannot be undone — the same reason a scan with nothing to do says so rather
+ * than reporting success.
+ *
+ * Age is taken per package from its *newest* version, so a package still in
+ * daily use is never dropped because one stale version of it is sitting there.
+ *
+ * `pkg` and `olderThanDays` narrow together rather than one winning: every
+ * constraint given has to hold. `--all` is the one that ignores the others,
+ * because it is not a filter — it is the statement that there is nothing to
+ * filter by. Deciding it by precedence instead meant `--pkg zod --older-than 30`
+ * silently deleted zod at any age, which is a flag the operator typed and the
+ * code declined to read.
+ */
+export async function pruneCache(
+  options: CachePruneOptions,
+  root: string = CACHE_ROOT,
+): Promise<{ packages: number; bytes: number }> {
+  if (!options.all && !options.pkg && options.olderThanDays === undefined) {
+    throw new Error('nothing to prune: name a package, an age, or --all');
+  }
+  // Rejected here rather than allowed to become a `NaN` cutoff. Every
+  // comparison against `NaN` is false, so an unparseable age turns whichever
+  // predicate it lands in into its own opposite — `emend store cache prune
+  // --older-than abc` is either "delete nothing" or "delete all 13GB" depending
+  // on which way the test happens to be written, and neither is what was typed.
+  if (options.olderThanDays !== undefined && !Number.isFinite(options.olderThanDays)) {
+    throw new Error('an age must be a number of days');
+  }
+
+  const cached = await listCache(root);
+  const cutoff =
+    options.olderThanDays === undefined
+      ? undefined
+      : Date.now() - options.olderThanDays * 24 * 60 * 60 * 1000;
+
+  const doomed = cached.filter((entry) => {
+    if (options.all) return true;
+    if (options.pkg !== undefined && entry.pkg !== options.pkg) return false;
+    if (cutoff !== undefined) {
+      // Stated as "provably older", not as "not newer". A package whose
+      // timestamp could not be read has an unknown age, and unknown is not old
+      // enough to delete on — the cardinal rule, pointed at the one operation
+      // here that cannot be undone.
+      const lastUsed = entry.lastUsed ? new Date(entry.lastUsed).getTime() : Number.NaN;
+      if (!(lastUsed < cutoff)) return false;
+    }
+    return true;
+  });
+
+  let bytes = 0;
+  for (const entry of doomed) {
+    // `cacheKey`, not a second copy of it: the directory name is that function's
+    // output, and re-deriving it here is how the two drift into deleting the
+    // wrong path.
+    await rm(path.join(root, cacheKey(entry.pkg)), { recursive: true, force: true });
+    bytes += entry.bytes;
+  }
+  return { packages: doomed.length, bytes };
 }

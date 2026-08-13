@@ -26,15 +26,13 @@ import {
   prepareWorkspace,
   applyEdits,
   applyTextEdits,
-  restoreSnapshots,
   bumpDependency,
   workspaceDiff,
   type Workspace,
 } from './apply.ts';
-import { runPhase, compare, verificationPassed } from './verify.ts';
+import { runPhase, runTypecheck, compare, countDiagnostics, verificationPassed } from './verify.ts';
 
 import {
-  escalate,
   revertHunks,
   harnessPermitted,
   runTask,
@@ -43,7 +41,6 @@ import {
   reviewTask,
   LINT_TASK,
   nearbySymbols,
-  NARROWING,
   type Harness,
 } from './harness.ts';
 import {
@@ -54,11 +51,7 @@ import {
   type HunkClassification,
 } from './gate.ts';
 import { reviewSession, type ReviewFinding } from './reviewharness.ts';
-import {
-  remainingDeprecations,
-  describeDeprecationGaps,
-  deprecationStillPresent,
-} from './quality.ts';
+import { remainingDeprecations, describeDeprecationGaps } from './quality.ts';
 import type {
   ApiSymbol,
   CommandResult,
@@ -74,7 +67,7 @@ const execFileAsync = promisify(execFile);
  * Said when the harness was wanted and cannot run.
  *
  * Named rather than inlined at three call sites, because the wording is the
- * point. §11 made the harness the only thing that changes code, so its absence
+ * point. The harness is the only thing that changes code, so its absence
  * is not a reduced service — it is the difference between "nothing needed
  * repairing" and "nothing could be repaired", and those are opposite claims. The
  * cardinal rule, applied to repair.
@@ -84,7 +77,7 @@ async function unavailableWriter(
   progress: (message: string) => void,
 ): Promise<Harness | undefined> {
   if (!harness) {
-    progress('  no harness: nothing can be repaired — this run was --no-agent');
+    progress('  no harness: nothing can be repaired — the model was switched off (--no-agent or --untrusted)');
     return undefined;
   }
   const status = await harness.available();
@@ -96,7 +89,28 @@ async function unavailableWriter(
 export interface FixOptions {
   /** Leave the workspace on disk for inspection. */
   keepWorkspace?: boolean;
-  /** Allow the LLM agent to attempt findings the deterministic planner declines. */
+  /**
+   * Typecheck once more, straight after the bump, to record what the upgrade
+   * broke before anything tried to repair it.
+   *
+   * Off by default because it is a whole extra `tsc` on a repository that is
+   * about to be typechecked twice anyway, and no repair decision reads it. The
+   * benchmark does: `Err. reduced` is the question "how far did the engine get",
+   * and that has no denominator unless the damage is counted while it is still
+   * undamaged by repair. Taking it after the deterministic edits instead would
+   * have made `emend eval --no-agent` — which measures the deterministic path
+   * alone — report a reduction of zero by construction.
+   *
+   * Same shape and same reason as `keepWorkspace`: something only a caller
+   * measuring the run wants, priced so that nobody else pays for it.
+   */
+  countUpgradeErrors?: boolean;
+  /**
+   * Whether model-driven work is wanted at all. Callers resolve the harness
+   * itself separately; in this module the flag decides one thing — `fixLint`
+   * still prepares a workspace when the linters' own autofixes have nothing to
+   * do, because a harness may repair what they could not.
+   */
   useAgent?: boolean;
   /**
    * Treat the repository as untrusted: execute nothing from it or its
@@ -467,22 +481,12 @@ async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol
 
 
 /**
- * Symbols from the new version that the compiler's own error text mentions.
- *
- * A type error names the types it is about — `Formatter`, `ValueType`,
- * `TooltipPayloadEntry` — and those are usually exported, sometimes under a
- * different name (`ValueType` ships as `TooltipValueType`). Matching them here
- * puts the vocabulary of the error into the model's list of usable symbols,
- * which is the difference between annotating the real constraint and reaching
- * for `any`.
- */
-/**
  * Symbols the compiler says are gone, as opposed to symbols it merely names.
  *
  * The candidate list is ranked by similarity to whatever broke. Drift findings
  * supply that; a vulnerability repair has none, so the compiler output is the
- * only source — and `symbolsNamedInErrors` cannot help, because it matches names
- * against the *new* version's symbols and a removed one matches nothing.
+ * only source — and matching error text against the *new* version's symbols
+ * cannot help, because a removed symbol matches nothing there.
  *
  * Measured live: axios 0.33.0 removes `AxiosTransformer`, tsc says so and
  * suggests only a default import, and `AxiosResponseTransformer` — which axios
@@ -566,8 +570,8 @@ async function loadSources(
 /**
  * Most files pulled in because a failure named them.
  *
- * A wide upgrade breaks many files at once — recharts 2 to 3 produces fourteen
- * errors across ten files in a private monorepo — and a model shown two of them
+ * A wide upgrade breaks many files at once — recharts 2 to 3 produced fourteen
+ * errors across ten files in one real monorepo — and a model shown two of them
  * cannot produce a coherent migration.
  */
 const MAX_COLLATERAL_FILES = 16;
@@ -575,12 +579,13 @@ const MAX_COLLATERAL_FILES = 16;
 /**
  * Repository files named by compiler or test output.
  *
- * An upgrade can break a file that contains no call site at all. a scanned repository
- * asserts its Dockerfile's Playwright image tag matches package.json, so bumping
- * the dependency fails a test in a file the call-site walk never visits — and
- * the agent, shown only call-site files, correctly declined because it could not
- * see what was wrong. Feeding it the files the failure actually names closes
- * that gap without guessing at what else might be relevant.
+ * An upgrade can break a file that contains no call site at all. One scanned
+ * repository asserts its Dockerfile's Playwright image tag matches package.json,
+ * so bumping the dependency fails a test in a file the call-site walk never
+ * visits — and the agent, shown only call-site files, correctly declined
+ * because it could not see what was wrong. Feeding it the files the failure
+ * actually names closes that gap without guessing at what else might be
+ * relevant.
  */
 async function filesNamedInOutput(output: string, repoDir: string): Promise<string[]> {
   const found = new Set<string>();
@@ -693,6 +698,17 @@ export async function fixPackage(
       ignoreScripts: untrusted,
     });
 
+    // Here and nowhere later: this is the only moment the workspace holds the
+    // new version and none of the repair, which is what "what the upgrade broke"
+    // means. One line further on, the deterministic edits have already started
+    // fixing it.
+    const errorsFromUpgrade = options.countUpgradeErrors
+      ? countDiagnostics(await runTypecheck(ws.dir))
+      : null;
+    if (errorsFromUpgrade !== null) {
+      progress(`  the upgrade breaks ${errorsFromUpgrade} location(s) before repair`);
+    }
+
     let appliedCount = 0;
     const failedEdits: Array<{ file: string; line: number; reason: string }> = [];
 
@@ -716,19 +732,6 @@ export async function fixPackage(
     // version. A bump is atomic, so both the agent and the harness gate reason
     // about the whole of it rather than one finding at a time.
     const agentFinding = { ...first, sites: findings.flatMap((f) => f.sites) };
-
-    // Escalate to the agent only if deterministic work was not enough. The
-    // remaining errors are exactly the context the model needs.
-    // Polish, once the migration is green. Repair itself is no longer Emend's
-    // job — an agent driving the MCP tools has edit rights and a loop of its
-    // own, and `runAgentRepair` was 270 lines reimplementing that badly with a
-    // fixed three-attempt budget.
-    //
-    // What survived the deletion is the work that loop did *besides* retrying:
-    // finding which files a failure actually implicates, and grounding a
-    // replacement in symbols the target version really exports. Both are still
-    // needed here, so both now come from the workspace diff rather than being
-    // threaded out of a repair.
 
     // Hoisted out of the polish block: the escalation needs it too, and it is the
     // cheapest defence against an invented API — the model can still hallucinate,
@@ -775,22 +778,7 @@ export async function fixPackage(
         progress(`escalating to ${harness.id}`);
         const failureOutput = verificationErrors(verification);
 
-        // A deprecated call compiles, so it never produces a diagnostic and a
-        // hunk over it would be judged unrequested and reverted — cancelling
-        // exactly the repair the finding asked for. The carve-out the edit gate
-        // already has, applied to the same question in a different shape.
         const sources = await loadSources(ws.dir, agentFinding, []);
-        const stillDeprecated = new Set(
-          findings
-            .filter((f) => f.change.kind === 'deprecated')
-            .filter((f) =>
-              f.sites.some((s) => {
-                const source = sources.get(s.file);
-                return source ? deprecationStillPresent(f.change.path, pkg, source) : false;
-              }),
-            )
-            .map((f) => f.change.path),
-        );
 
         // MIGRATION_TASK, not an instruction written here. This was five
         // sentences that re-derived, badly, what the migration task already
@@ -824,8 +812,9 @@ export async function fixPackage(
         // Counted, for the same reason the review's hunks are: this is the work
         // that repaired the build, and leaving it out makes `appliedEdits` report
         // only what the deterministic planner managed. The first eval sweep after
-        // §11 scored a migration that verified as "1 of 6 required edits" for
-        // exactly this reason — the engine had changed and the counter had not.
+        // the harness became the writer scored a migration that verified as
+        // "1 of 6 required edits" for exactly this reason — the engine had
+        // changed and the counter had not.
         appliedCount += escalation.keptHunks;
 
         if (!escalation.ok) {
@@ -910,6 +899,17 @@ export async function fixPackage(
       workspaceMode: ws.mode,
       ...(harnessRecord ? { harness: harnessRecord } : {}),
       ...(reviewNotes ? { reviewNotes } : {}),
+      ...(errorsFromUpgrade !== null
+        ? {
+            upgradeErrors: {
+              afterBump: errorsFromUpgrade,
+              // The end of the line, whichever pass got it there — deterministic
+              // edits, the harness, tightening, the review. All of them are
+              // repair, and the question is how much of the damage is left.
+              afterRepair: countDiagnostics(verification.post.typecheck),
+            },
+          }
+        : {}),
     };
 
     if (!options.keepWorkspace) {
@@ -1006,6 +1006,19 @@ export async function fixPins(
   }
 }
 
+/**
+ * Compiler diagnostics either side of the repair.
+ *
+ * A pair rather than two loose numbers, because neither means anything alone: a
+ * run that ends with two errors did well from fourteen and badly from two.
+ */
+export interface UpgradeErrors {
+  /** Locations the compiler objected to after the bump, before any repair. */
+  afterBump: number;
+  /** Locations still objected to when every pass had finished. */
+  afterRepair: number;
+}
+
 export interface PackageFixResult {
   pkg: string;
   fromVersion: string;
@@ -1023,6 +1036,39 @@ export interface PackageFixResult {
   workspaceMode: string | null;
   /** Present only when a harness was configured and the build was still red. */
   harness?: HarnessEscalation;
+  /**
+   * What the upgrade broke, and how much of it survived the repair.
+   *
+   * Present only when `countUpgradeErrors` asked for it, and absent rather than
+   * zeroed when it did not — the two are different claims, and "the upgrade
+   * broke nothing" is the one nobody measured. Every consumer has to decide
+   * which it is looking at, which is the point.
+   */
+  upgradeErrors?: UpgradeErrors;
+  /**
+   * Advisory notes from the read-only repo-wide pass, when one ran.
+   *
+   * This was assigned through a spread for a while without being declared here,
+   * which TypeScript permits and every typed consumer therefore never saw — the
+   * most expensive step in the pipeline, computed and then invisible.
+   */
+  reviewNotes?: ReviewFinding[];
+}
+
+/**
+ * Whether a finding can only be repaired by editing source.
+ *
+ * `Finding.pkg` carries whatever its detector is about, and for `http-contract`
+ * that is a host — `api.github.com`. The package path took it for a package
+ * name and asked npm for it, which 404s; the same shape `version-pin` is
+ * already routed away from, because `npm install node@22` is nonsense too.
+ *
+ * There is no version to bump for a wire API. The description is the target and
+ * the repair is an edit at the call sites, so this belongs to the agent rather
+ * than to the registry.
+ */
+export function needsSourceRepair(finding: Finding): boolean {
+  return finding.detector === 'http-contract';
 }
 
 /**
@@ -1040,22 +1086,6 @@ export interface PackageFixResult {
  * will fail. This is only appropriate when the package has one finding, or for
  * rendering a single finding's evidence.
  */
-/**
- * Whether a finding can only be repaired by editing source.
- *
- * `Finding.pkg` carries whatever its detector is about, and for `http-contract`
- * that is a host — `api.github.com`. The package path took it for a package
- * name and asked npm for it, which 404s; the same shape `version-pin` is
- * already routed away from, because `npm install node@22` is nonsense too.
- *
- * There is no version to bump for a wire API. The description is the target and
- * the repair is an edit at the call sites, so this belongs to the agent rather
- * than to the registry.
- */
-export function needsSourceRepair(finding: Finding): boolean {
-  return finding.detector === 'http-contract';
-}
-
 export async function fixFinding(
   repoDir: string,
   finding: Finding,
@@ -1114,19 +1144,6 @@ export interface VulnFixResult {
 }
 
 /**
- * Get a vulnerable package out of the installed tree, and prove the build survives.
- *
- * Two questions, and both have to be answered. *Did the vulnerable version
- * leave?* is read back from the lockfile after installing — never predicted,
- * because predicting npm's resolution is a worse job than doing it and looking.
- * *Does the repository still work?* is the ordinary baseline comparison every
- * other repair here goes through.
- *
- * A bump that verifies green but leaves the vulnerable version installed is not
- * a fix, and reporting it as one would be the most expensive kind of false
- * certainty this product can produce.
- */
-/**
  * Whether a red build after a security bump is worth handing to the agent.
  *
  * Both halves matter, and the second is the dangerous one. Repairing a build
@@ -1142,6 +1159,19 @@ export function repairableAfterBump(state: {
   return state.resolved && !verificationPassed(state.outcome);
 }
 
+/**
+ * Get a vulnerable package out of the installed tree, and prove the build survives.
+ *
+ * Two questions, and both have to be answered. *Did the vulnerable version
+ * leave?* is read back from the lockfile after installing — never predicted,
+ * because predicting npm's resolution is a worse job than doing it and looking.
+ * *Does the repository still work?* is the ordinary baseline comparison every
+ * other repair here goes through.
+ *
+ * A bump that verifies green but leaves the vulnerable version installed is not
+ * a fix, and reporting it as one would be the most expensive kind of false
+ * certainty this product can produce.
+ */
 export async function fixVulnerability(
   repoDir: string,
   finding: Finding,
@@ -1282,11 +1312,10 @@ export async function fixVulnerability(
       const review = await reviewSession({
         harness: options.reviewHarness,
         dir: ws.dir,
-       
-          pkg: finding.pkg,
-          fromVersion: finding.fromVersion,
-          toVersion: worst ?? finding.toVersion,
-          diff: await workspaceDiff(ws),
+        pkg: finding.pkg,
+        fromVersion: finding.fromVersion,
+        toVersion: worst ?? finding.toVersion,
+        diff: await workspaceDiff(ws),
         progress,
       });
       if (review.findings.length > 0) reviewNotes = review.findings;

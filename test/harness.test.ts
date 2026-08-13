@@ -191,10 +191,10 @@ function fakeHarness(writes: Record<string, string>, over: Partial<Harness> = {}
 // Only line 2 is broken. Nothing points at line 25, so a hunk over it is
 // outside everything the evidence named.
 const FAILURE = 'a.txt(2,1): error TS2304: Cannot find name.';
-// Stated literally rather than through a policy function. §14 deleted the one
-// the repair used, and what these tests exercise is `escalate`'s revert
-// machinery — still live under `reviewGate` and `lintGate` — not any policy's
-// choice of anchors.
+// Stated literally rather than through a policy function. The reviewer-judges
+// decision deleted the one the repair used, and what these tests exercise is
+// `escalate`'s revert machinery — still live under `reviewGate` and `lintGate`
+// — not any policy's choice of anchors.
 const GATE: HunkGate = {
   anchors: [{ file: 'a.txt', line: 2 }],
   unanchored: 'revert',
@@ -212,7 +212,7 @@ test('a hunk the failure did not ask for is reverted before anyone sees the diff
     assert.equal(result.revertedHunks.length, 1);
     assert.equal(result.keptHunks, 1);
     // The reason names the rule that fired. `nothing outstanding` was the
-    // quiet-call-site rule, which §14 deleted along with the rest of the
+    // quiet-call-site rule, deleted along with the rest of the
     // repair's gate; what reverts now is a hunk outside every anchor.
     assert.match(result.revertedHunks[0]?.reason ?? '', /is not anywhere the failure pointed/);
 
@@ -311,8 +311,8 @@ test('changes a few lines apart are judged separately, not as one region', async
 });
 
 test('when nothing is evidenced the harness’s work stands, and verification judges it', async () => {
-  // The carve-out `selectEvidencedEdits` makes, for the same reason. If the gate
-  // can justify none of the hunks, reverting all of them turns a possible repair
+  // The carve-out the old proposer's edit gate made, for the same reason. If the
+  // gate can justify none of the hunks, reverting all of them turns a possible repair
   // into a guaranteed no-op — and the gate is not certain enough for that, since
   // it only knows about call sites Emend itself found. Verification is still
   // downstream and still has the final say.
@@ -351,6 +351,86 @@ test('a harness that changed nothing says so, rather than reporting success', as
   }
 });
 
+test('a clean session that wrote nothing is named as such, not as a generic refusal', async () => {
+  // The only reliability defect in a twelve-run sweep: opencode ran for $0.32
+  // with credits to spare, emitted no error, and wrote no files. `run.ok` was
+  // true — the engine finished believing it was done.
+  //
+  // That is the branch that needs the explanation most, and it was the branch
+  // carrying none: an engine that *failed* has already told us why, while one
+  // that succeeded and did nothing has not.
+  const f = await gitFixture({ 'a.txt': BASE });
+  try {
+    const harness = fakeHarness({}, {
+      run: async () => ({ ok: true, log: 'raw events', summary: 'Everything already looked migrated to me.' }),
+    });
+    const result = await escalate(harness, f.dir, { instruction: 'x', failureOutput: FAILURE }, GATE);
+
+    assert.equal(result.ok, false);
+    assert.match(result.reason ?? '', /reported success and changed nothing/);
+    assert.match(
+      result.reason ?? '',
+      /Everything already looked migrated/,
+      'the task asks the model to say why it changed nothing; that answer has to survive',
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('a session that failed keeps its error rather than being called a silent no-op', async () => {
+  // The other empty-diff case, and it must stay distinguishable: a real sweep's
+  // run stopped outright on exhausted credits, which is a fact about the account
+  // rather than about the migration, and reads nothing like a model that
+  // considered the work done.
+  const f = await gitFixture({ 'a.txt': BASE });
+  try {
+    const harness = fakeHarness({}, {
+      run: async () => ({ ok: false, log: '', summary: '', error: 'requires more credits' }),
+    });
+    const result = await escalate(harness, f.dir, { instruction: 'x', failureOutput: FAILURE }, GATE);
+
+    assert.equal(result.ok, false);
+    assert.match(result.reason ?? '', /requires more credits/);
+    assert.doesNotMatch(result.reason ?? '', /reported success/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('the engine\'s last word is clipped, since it is rendered in a table cell', async () => {
+  // `reason` reaches `CaseOutcome.inconclusive`, which `renderSummary` puts in a
+  // row. An unbounded model monologue there destroys the table it is supposed to
+  // explain, and a multi-line one breaks the markdown outright.
+  const f = await gitFixture({ 'a.txt': BASE });
+  try {
+    const harness = fakeHarness({}, {
+      run: async () => ({ ok: true, log: '', summary: `first line\n${'x'.repeat(400)}` }),
+    });
+    const result = await escalate(harness, f.dir, { instruction: 'x', failureOutput: FAILURE }, GATE);
+
+    const reason = result.reason ?? '';
+    assert.doesNotMatch(reason, /\n/, 'a newline would break the row it lands in');
+    assert.ok(reason.length < 260, `reason should stay row-sized; got ${reason.length}`);
+    assert.match(reason, /…/, 'and say that it was cut rather than appear complete');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('a no-op with nothing to say is still named, without inventing an explanation', async () => {
+  // A harness with no summarising step has no `summary`, and `log` is documented
+  // as lossless noise. Quoting the log into a table cell would contradict that
+  // field's own contract, so the reason says less rather than saying junk.
+  const f = await gitFixture({ 'a.txt': BASE });
+  try {
+    const result = await escalate(fakeHarness({}), f.dir, { instruction: 'x', failureOutput: FAILURE }, GATE);
+    assert.match(result.reason ?? '', /reported success and changed nothing$/);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('an unavailable harness is refused loudly, never skipped quietly', async () => {
   // Same rule `fixPackage` already applies to an unavailable LLM: asking for a
   // harness and silently not getting one makes the run look like the harness
@@ -373,7 +453,7 @@ test('an unavailable harness is refused loudly, never skipped quietly', async ()
 
 test('without git there is no gate, so there is no escalation', async () => {
   // The gate is the entire condition of adoption. A harness with write access
-  // that cannot be judged is exactly what the design spec forbids, so failing to
+  // that cannot be judged is exactly what the design forbids, so failing to
   // establish the baseline has to stop the escalation rather than waive it.
   const dir = mkdtempSync(path.join(tmpdir(), 'emend-nogit-'));
   try {
@@ -427,8 +507,8 @@ test('no model is configured rather than guessed', async () => {
 // ---------------------------------------------------------------------------
 // Version adaptation
 //
-// The design spec priced "the harness becomes a dependency whose changes land
-// in this product" as a cost of adoption. It arrived as a CLI contract change:
+// "The harness becomes a dependency whose changes land in this product" was
+// priced in as a cost of adoption. It arrived as a CLI contract change:
 // `--auto` exists on opencode's development branch and not in the released 1.x,
 // so hard-coding it made every real run die on a usage error instead of running.
 // Flags are therefore read off the binary in front of us.

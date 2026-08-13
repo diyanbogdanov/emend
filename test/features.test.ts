@@ -21,7 +21,7 @@ const REACT_QUERY = {
 };
 
 test('a new top-level export of a package you depend on is reported', () => {
-  // The half of the RFS that npm answered barely at all. `diffSurfaces` has
+  // The half of the problem statement that npm answered barely at all. `diffSurfaces` has
   // always emitted these — `kind: 'added'`, `severity: 'feature'` — and
   // `consumerImpacting` has always dropped them, correctly for its own purpose:
   // its output feeds call-site matching, and a symbol absent from your code has

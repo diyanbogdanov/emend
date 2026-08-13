@@ -13,7 +13,7 @@
  * prompt. All day the same lesson: the model does what the harness measures.
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { Finding } from './types.ts';
 
@@ -82,9 +82,9 @@ function usesMemberAccess(source: string, member: string): boolean {
  * Top-level exports keep the import check, because `.Cell` never appears even
  * when `Cell` is very much in use.
  */
-export function deprecationStillPresent(path: string, pkg: string, source: string): boolean {
-  const dot = path.lastIndexOf('.');
-  const leaf = dot === -1 ? path : path.slice(dot + 1);
+export function deprecationStillPresent(symbolPath: string, pkg: string, source: string): boolean {
+  const dot = symbolPath.lastIndexOf('.');
+  const leaf = dot === -1 ? symbolPath : symbolPath.slice(dot + 1);
   return dot === -1 ? importsSymbolFrom(source, leaf, pkg) : usesMemberAccess(source, leaf);
 }
 
@@ -132,4 +132,154 @@ export function describeDeprecationGaps(gaps: DeprecationGap[]): string {
         `- \`${g.symbol}\` is deprecated in ${g.pkg} and is still imported by: ${g.files.join(', ')}`,
     )
     .join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Did the migration finish?
+// ---------------------------------------------------------------------------
+
+/**
+ * What "finished" means for one symbol, expressed as something that can run.
+ *
+ * Not "the symbol is absent", which reports a *finished* migration as unfinished
+ * and the corpus holds the counter-example: `z.string().uuid()` becomes
+ * `z.uuid()`, so searching for `.uuid` finds the correct answer. `z.record` is
+ * the same from the other side — it still exists in zod 4 with a different arity,
+ * so its presence proves nothing — and `ZodError.errors` -> `.issues` is a member
+ * rename rather than a removal.
+ *
+ * Resolved means the *pre-migration form* is gone, which is checkable only if the
+ * old form is declared. Two kinds cover it:
+ *
+ *  - `import` for a top-level named import, which is what `importsSymbolFrom`
+ *    already answers and is already tested.
+ *  - `absent` for a call chain, which is never imported and is invisible to the
+ *    other kind — the blind spot `RECHARTS_CASE` records for zod.
+ */
+export type ResolutionCheck =
+  | { symbol: string; kind: 'import'; pkg: string }
+  | { symbol: string; kind: 'absent'; pattern: string };
+
+export interface Resolution {
+  check: ResolutionCheck;
+  /**
+   * `unknown` is its own state, never folded into either other one.
+   *
+   * The cardinal rule, turned on the thing that measures: a file that could not
+   * be read is not evidence that the migration finished, and scoring it as
+   * `resolved` is the same claim Emend refuses to make about a call site it
+   * could not parse.
+   */
+  state: 'resolved' | 'unresolved' | 'unknown';
+  /** Repo-relative files still holding the pre-migration form. */
+  files: string[];
+  /** Why the check could not run, when it could not. */
+  reason?: string;
+}
+
+/**
+ * Whether this source still holds the check's pre-migration form.
+ *
+ * The single primitive behind both the completeness measurement and the corpus's
+ * baseline-fires test. One function on purpose: if the test asked a different
+ * question than the measurement, it would prove nothing about it.
+ *
+ * Throws on a pattern that will not compile — an authoring error in the corpus,
+ * which should be loud rather than a check that quietly never matches.
+ */
+export function checkFires(check: ResolutionCheck, source: string): boolean {
+  if (check.kind === 'import') return importsSymbolFrom(source, check.symbol, check.pkg);
+  if (check.kind === 'absent') return new RegExp(check.pattern).test(source);
+  // `loadCases` casts parsed JSON straight to `EvalCase[]`, so an external corpus
+  // can hand this anything. Throwing makes it `unknown` a few lines down, where a
+  // fallthrough would have made it `resolved` — a check nobody can run reported as
+  // a migration that finished.
+  throw new Error(`unrecognised completeness check kind: ${JSON.stringify(check)}`);
+}
+
+const SOURCE_FILE = /\.(?:[cm]?[jt]sx?)$/;
+
+/** Every source file under `dir`, repo-relative. Vendored trees are not the migration. */
+async function sourceFiles(dir: string): Promise<string[]> {
+  const found: string[] = [];
+
+  const walk = async (relative: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(path.join(dir, relative), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist') continue;
+      const rel = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(rel);
+      else if (entry.isFile() && SOURCE_FILE.test(entry.name)) found.push(rel);
+    }
+  };
+  await walk('');
+
+  return found.sort();
+}
+
+/**
+ * Which of a case's completeness checks the migration actually resolved.
+ *
+ * Reads the whole source tree rather than a finding's own sites, because a case
+ * declares these against the migration and not against a finding — the work may
+ * legitimately land somewhere the scan never named.
+ *
+ * A tree with no readable source at all makes every check `unknown`. That is the
+ * state this distinguishes: the migration was not measured, which is not the same
+ * as measured and complete.
+ */
+export async function resolveChecks(
+  checks: readonly ResolutionCheck[],
+  dir: string,
+): Promise<Resolution[]> {
+  if (checks.length === 0) return [];
+
+  const files = await sourceFiles(dir);
+  const read = await Promise.all(
+    files.map(async (file): Promise<[string, string] | null> => {
+      try {
+        return [file, await readFile(path.join(dir, file), 'utf8')];
+      } catch {
+        // Unreadable: it contributes nothing either way, and an empty map below
+        // is what turns "nothing could be read" into `unknown`, not `resolved`.
+        return null;
+      }
+    }),
+  );
+  const sources = new Map(read.filter((entry) => entry !== null));
+
+  // Hoisted: whether anything could be read is a property of the tree, not of a
+  // check, and asking it once says so. Every check is `unknown` together or none
+  // is.
+  if (sources.size === 0) {
+    return checks.map((check) => ({
+      check,
+      state: 'unknown' as const,
+      files: [],
+      reason: 'no source files could be read',
+    }));
+  }
+
+  return checks.map((check): Resolution => {
+    try {
+      const files = [...sources]
+        .filter(([, source]) => checkFires(check, source))
+        .map(([file]) => file);
+      return files.length > 0
+        ? { check, state: 'unresolved', files }
+        : { check, state: 'resolved', files: [] };
+    } catch (err) {
+      return {
+        check,
+        state: 'unknown',
+        files: [],
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
 }

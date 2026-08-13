@@ -1,16 +1,11 @@
-import type { Harness } from './harness.ts';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
 /**
  * The repo-wide review: what a structured-edit pass structurally cannot see.
  *
  * There are now two reviews, and the split is not arbitrary — it follows from
  * what each one is able to say.
  *
- * `reviewMigration` proposes *edits*, and `selectReviewEdits` confines them to
- * lines the migration changed. That gate exists because an unanchored review
+ * `reviewMigration` proposes *edits*, and `reviewGate` in gate.ts confines them
+ * to lines the migration changed. That gate exists because an unanchored review
  * wanders: measured live, it rewrote a working `cancelToken` into an
  * `AbortSignal`, changing an exported signature to modernise an API carrying no
  * deprecation marker. So the structured review handles what is visible in the
@@ -34,6 +29,12 @@ const execFileAsync = promisify(execFile);
  * that wrote is a tool behaving differently from its contract, and the findings
  * of a process that ignored one instruction are not evidence.
  */
+
+import type { Harness } from './harness.ts';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Ordered by the priority `reviewPrompt` sets, because that is the order the

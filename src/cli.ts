@@ -18,6 +18,7 @@ import { reintroduced } from './remediate.ts';
 import { offersPagination } from './httpsites.ts';
 import { fixFinding, needsSourceRepair, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
 import { Store } from './store.ts';
+import { listCache, pruneCache, type CachedPackage } from './registry.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug, summarisePr } from './pr.ts';
 import {
   assistantText,
@@ -25,7 +26,6 @@ import {
   parseContractFindings,
   renderContractFindings,
   type ContractFinding,
-  renderReviewFindings,
   reviewSession,
 } from './reviewharness.ts';
 import { startServer } from './server.ts';
@@ -122,16 +122,16 @@ function parseArgs(argv: string[]): Args {
 /**
  * The harness that makes the changes. **On unless turned off.**
  *
- * Opt-in until §11, which is when it became the only thing that changes code —
- * and an opt-in flag for the only way anything gets repaired means the default
- * run is a scanner. The same argument §2 made for the other two passes: a
+ * Opt-in until the harness became the only thing that changes code — and an
+ * opt-in flag for the only way anything gets repaired means the default run is
+ * a scanner. The same argument that put the other two passes on by default: a
  * finding nobody repairs is a finding a person repairs by hand.
  *
  * `--no-agent` turns it off, sharing the switch with everything else that talks
  * to a model, because from an operator's side "do not use a model" is one
  * decision. `--harness=<provider/model>` pins one, which is the mitigation for
- * the reproducibility cost §7.1 prices: a regression that cannot be attributed
- * to a model is a regression nobody can chase.
+ * the reproducibility cost a harness brings: a regression that cannot be
+ * attributed to a model is a regression nobody can chase.
  *
  * Which model an unpinned run gets is `repairHarness`'s decision, not this
  * function's — and it used to be opencode's, which is how a sweep that pinned
@@ -141,6 +141,9 @@ function harnessFrom(args: Args): Harness | undefined {
   const flag = args.flags.get('harness');
   if (flag === false || args.flags.get('no-harness') === true) return undefined;
   if (!agentAllowed(args)) return undefined;
+  // `--untrusted` promises that no model session enters the checkout, so the
+  // writer is refused at construction rather than trusted to decline later.
+  if (args.flags.get('untrusted') === true) return undefined;
   return repairHarness(typeof flag === 'string' ? { pinned: flag } : {});
 }
 
@@ -182,6 +185,7 @@ function reviewHarnessFrom(args: Args): Harness | undefined {
   const flag = args.flags.get('review');
   if (args.flags.get('no-review') === true) return undefined;
   if (flag === false) return undefined;
+  if (args.flags.get('untrusted') === true) return undefined;
   // A separate session from any repair harness, deliberately. A model reviewing
   // its own work argues for it; one that never saw the reasoning has only the
   // code. `--review=<provider/model>` pins the reviewer independently.
@@ -196,20 +200,13 @@ function reviewHarnessFrom(args: Args): Harness | undefined {
     // comparing the workspace before and after and discarding the findings of a
     // session that changed anything — evidence rather than configuration. What
     // does widen is reach outside the checkout: `webfetch` is denied but bash
-    // could still curl, so this path stays blocked for untrusted repositories.
+    // could still curl — which is why `--untrusted` refuses this harness at
+    // construction above, and why the hosted runner never constructs one.
     allowBash: true,
     ...(typeof flag === 'string' ? { model: flag } : {}),
   });
 }
 
-/**
- * Contract checking, when it was asked for.
- *
- * Returns the resolver rather than a boolean, because handing over the thing
- * that makes outbound requests is what "yes, go and ask the vendors" means.
- * `--contracts=<dir>` puts the description cache somewhere durable; a hosted
- * scan wants that, a one-off does not care.
- */
 /**
  * The API version each pinned vendor publishes, where a description says so.
  *
@@ -257,6 +254,14 @@ async function publishedVersions(
   return found;
 }
 
+/**
+ * Contract checking, when it was asked for.
+ *
+ * Returns the resolver rather than a boolean, because handing over the thing
+ * that makes outbound requests is what "yes, go and ask the vendors" means.
+ * `--contracts=<dir>` puts the description cache somewhere durable; a hosted
+ * scan wants that, a one-off does not care.
+ */
 function contractsFrom(args: Args): {
   resolve: (v: { domain: string }) => Promise<SpecCandidate[]>;
   previous?: (c: SpecCandidate) => Promise<SpecCandidate | null>;
@@ -834,6 +839,7 @@ async function runLintFixes(repoDir: string, findings: Finding[], args: Args): P
   console.log(c.bold('  lint') + c.dim(`  (${findings.length} finding(s))`));
   const result = await fixLint(repoDir, findings, {
     keepWorkspace: args.flags.get('keep') === true,
+    untrusted: args.flags.get('untrusted') === true,
     useAgent: agentAllowed(args),
     onProgress: (m) => console.log(c.dim(`    ${m}`)),
   });
@@ -877,6 +883,7 @@ async function runFreshnessFixes(repoDir: string, findings: Finding[], args: Arg
     );
     const result = await fixFreshness(repoDir, finding, {
       keepWorkspace: args.flags.get('keep') === true,
+      untrusted: args.flags.get('untrusted') === true,
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
     const ok = result.verification !== null && verificationPassed(result.verification.outcome);
@@ -902,6 +909,7 @@ async function runPinFixes(repoDir: string, findings: Finding[], args: Args): Pr
   console.log(c.bold(`  version pins`) + c.dim(`  (${findings.length} drifted)`));
   const result = await fixPins(repoDir, {
     keepWorkspace: args.flags.get('keep') === true,
+    untrusted: args.flags.get('untrusted') === true,
     onProgress: (m) => console.log(c.dim(`    ${m}`)),
   });
   const ok = verificationPassed(result.verification.outcome);
@@ -959,6 +967,7 @@ async function runVulnerabilityFixes(
 
     const result = await fixVulnerability(repoDir, finding, {
       keepWorkspace: args.flags.get('keep') === true,
+      untrusted: args.flags.get('untrusted') === true,
       // Without this the repair loop is unreachable and a security bump that
       // breaks the build is reported as unfixable by the one tool here that
       // knows how to fix it.
@@ -1108,6 +1117,7 @@ async function runPackageFixes(
     const harness = harnessFrom(args);
     const result = await fixPackage(repoDir, findings, {
       keepWorkspace: args.flags.get('keep') === true,
+      untrusted: args.flags.get('untrusted') === true,
       useAgent: agentAllowed(args),
       ...(harness ? { harness } : {}),
       ...(ctx.reviewHarness ? { reviewHarness: ctx.reviewHarness } : {}),
@@ -1291,6 +1301,7 @@ async function cmdPr(args: Args): Promise<number> {
   console.log(c.dim('  re-running fix to produce a verified PR body...'));
   const prHarness = harnessFrom(args);
   const result = await fixFinding(repoDir, stored.finding, {
+    untrusted: args.flags.get('untrusted') === true,
     // Without this, `emend pr --agent` silently re-ran deterministic-only and
     // rendered "unverified / needs a human" for a migration that had just
     // verified under `emend fix --agent`.
@@ -1425,7 +1436,8 @@ async function cmdModels(args: Args): Promise<number> {
 
 async function cmdServe(args: Args): Promise<number> {
   const port = Number(args.flags.get('port') ?? 4000);
-  await startServer(port);
+  const host = args.flags.get('host');
+  await startServer(port, typeof host === 'string' ? host : undefined);
   return 0;
 }
 
@@ -1435,6 +1447,184 @@ async function exists(p: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Bytes, at the precision a human deciding what to delete actually needs. */
+function humanBytes(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)}${units[unit]}`;
+}
+
+/** Cache rows printed before the tail is summarised. A 2,640-package cache is a scroll, not a list. */
+const CACHE_ROWS = 40;
+
+const cacheBytes = (cache: ReadonlyArray<CachedPackage>): number =>
+  cache.reduce((n, entry) => n + entry.bytes, 0);
+
+/** Repositories the database holds scans for, and one line summarising the cache. */
+async function storeList(store: Store): Promise<number> {
+  const repos = store.listStoredRepos();
+  console.log('');
+  if (repos.length === 0) {
+    console.log(c.dim('  No scan data stored.'));
+  } else {
+    console.log(c.bold(`  ${repos.length} repositor${repos.length === 1 ? 'y' : 'ies'} with stored data`));
+    console.log('');
+    let missing = 0;
+    for (const repo of repos) {
+      // Whether the directory is still there is what separates a project from a
+      // temp directory left by a sweep, and it is the single most useful thing
+      // when deciding what to delete.
+      const here = await exists(repo.repoDir);
+      if (!here) missing++;
+      console.log(
+        `  ${here ? c.dim('   ') : c.yellow('gone')}  ${String(repo.scans).padStart(3)} scan(s)  ` +
+          `${String(repo.findings).padStart(4)} finding(s)  ${repo.repoDir}`,
+      );
+    }
+    if (missing > 0) {
+      console.log('');
+      console.log(
+        c.dim(`  ${missing} path(s) no longer exist. Forget one with: emend store prune <path>`),
+      );
+    }
+  }
+
+  const cache = await listCache();
+  console.log('');
+  console.log(
+    c.bold(`  Cache: ${cache.length} package(s), ${humanBytes(cacheBytes(cache))}`) +
+      c.dim('  (shared across repositories — see `emend store cache`)'),
+  );
+  console.log('');
+  return 0;
+}
+
+/** Forget one repository's scans, or all of them. */
+function storePrune(args: Args, store: Store): number {
+  const all = args.flags.get('all') === true;
+  const includeApp = args.flags.get('include-app') === true;
+  const target = args.positional[1];
+  if (!all && !target) {
+    console.log(c.red('  Name a repository path, or pass --all.'));
+    return 1;
+  }
+
+  const removed = all
+    ? store.pruneAll({ includeApp })
+    : store.pruneRepo(path.resolve(target!));
+
+  console.log('');
+  // Zero is reported rather than swallowed: a mistyped path must not read like
+  // a successful clear.
+  if (removed.scans === 0 && removed.findings === 0 && removed.runs === 0) {
+    console.log(c.yellow('  Nothing stored for that path — nothing deleted.'));
+    console.log(c.dim('  `emend store list` shows the paths that are stored.'));
+  } else {
+    console.log(
+      c.green(
+        `  Removed ${removed.scans} scan(s), ${removed.findings} finding(s), ${removed.runs} run(s).`,
+      ),
+    );
+    if (all && includeApp) {
+      console.log(c.yellow('  GitHub App state cleared too — installations must be re-added.'));
+    }
+  }
+  console.log('');
+  return 0;
+}
+
+/** How many packages are cached, largest first. */
+async function storeCacheList(): Promise<number> {
+  const cache = await listCache();
+  console.log('');
+  if (cache.length === 0) {
+    console.log(c.dim('  Cache is empty.'));
+    console.log('');
+    return 0;
+  }
+  console.log(c.bold(`  ${cache.length} package(s), ${humanBytes(cacheBytes(cache))} total`));
+  console.log('');
+  for (const entry of cache.slice(0, CACHE_ROWS)) {
+    console.log(
+      `  ${humanBytes(entry.bytes).padStart(7)}  ${entry.pkg} ` +
+        c.dim(`(${entry.versions.length} version${entry.versions.length === 1 ? '' : 's'}, last used ${entry.lastUsed.slice(0, 10)})`),
+    );
+  }
+  if (cache.length > CACHE_ROWS) console.log(c.dim(`  … and ${cache.length - CACHE_ROWS} more`));
+  console.log('');
+  return 0;
+}
+
+/**
+ * Delete cached packages.
+ *
+ * `--older-than` is only read when it carries a value: bare `--older-than`
+ * parses to `1` through `Number(true)`, and silently deleting everything
+ * untouched for a day is not what an operator who forgot the number asked for.
+ * Everything else `pruneCache` refuses — an unparseable age, no target at all —
+ * arrives here as a message to print.
+ */
+async function storeCachePrune(args: Args): Promise<number> {
+  const older = args.flags.get('older-than');
+  try {
+    const removed = await pruneCache({
+      ...(args.positional[2] ? { pkg: args.positional[2] } : {}),
+      ...(typeof older === 'string' ? { olderThanDays: Number(older) } : {}),
+      ...(args.flags.get('all') === true ? { all: true } : {}),
+    });
+    console.log('');
+    console.log(
+      removed.packages === 0
+        ? c.yellow('  Nothing matched — nothing deleted.')
+        : c.green(`  Removed ${removed.packages} package(s), freeing ${humanBytes(removed.bytes)}.`),
+    );
+    console.log('');
+    return 0;
+  } catch (err) {
+    console.log(c.red(`  ${(err as Error).message}`));
+    return 1;
+  }
+}
+
+/**
+ * What is on this machine, and how to get rid of it.
+ *
+ * Two stores with different shapes, deliberately not unified. The database is
+ * keyed by repository and grows one row per scan — a machine used for
+ * development accumulates eval workspaces and debugging fixtures that outlive
+ * the directories they describe. The cache is keyed by *package and version*,
+ * shared across every repository that ever resolved it, so it cannot be pruned
+ * per repository and this command does not offer to.
+ *
+ * That split is why `cache` returns before the database is opened rather than
+ * inside the `try` with everything else: `new Store()` creates the SQLite file
+ * if it is not there, and a question about a directory of tarballs should not
+ * leave a database behind as a side effect of being asked.
+ */
+async function cmdStore(args: Args): Promise<number> {
+  const sub = args.positional[0] ?? 'list';
+
+  if (sub === 'cache') {
+    return args.positional[1] === 'prune' ? storeCachePrune(args) : storeCacheList();
+  }
+
+  const store = new Store();
+  try {
+    if (sub === 'list') return await storeList(store);
+    if (sub === 'prune') return storePrune(args, store);
+    console.log(c.red(`  Unknown subcommand: ${sub}`));
+    console.log(c.dim('  Try: emend store list | prune | cache'));
+    return 1;
+  } finally {
+    store.close();
   }
 }
 
@@ -1450,6 +1640,7 @@ async function cmdPins(args: Args): Promise<number> {
   const repoDir = path.resolve(args.positional[0] ?? '.');
   const result = await fixPins(repoDir, {
     keepWorkspace: args.flags.get('keep') === true,
+    untrusted: args.flags.get('untrusted') === true,
     onProgress: (m) => console.log(c.dim(`  ${m}`)),
   });
 
@@ -1543,7 +1734,7 @@ async function cmdEval(args: Args): Promise<number> {
   console.log('');
 
   // Resolved once for the sweep, so every run is the same engine and the table
-  // can attribute results to it. §8's condition on adopting a harness is exactly
+  // can attribute results to it. The condition on adopting a harness is exactly
   // this: it swaps the editing engine, so it has to be measured as one.
   const evalHarness = harnessFrom(args);
   const outcomes: CaseOutcome[] = [];
@@ -1745,6 +1936,14 @@ ${c.bold('COMMANDS')}
                     the elegance of a migration that never finished.
     --no-review     Skip that pass. It is the only one that reads what a change
                     means rather than what it says, so skipping it is a choice.
+    --no-harness    Turn the harness off without touching the rest of the model
+                    config. Same effect as --harness=false.
+    --untrusted     Treat the repository as hostile: lifecycle scripts are
+                    skipped, its test script never runs (verification is
+                    typecheck-only, and says so), and no model session enters
+                    the checkout — the writer and the reviewer are both refused.
+                    This is what the hosted service sets for every repository.
+                    Also accepted by 'pr' and 'pins'.
     --keep          Leave the workspace on disk for inspection
 
   models          List models your configured LLM provider serves.
@@ -1760,6 +1959,8 @@ ${c.bold('COMMANDS')}
 
   serve           Local dashboard for browsing findings.
     --port <n>      Default 4000
+    --host <addr>   Default 127.0.0.1. The dashboard is unauthenticated, so
+                    binding a reachable address is an explicit decision
 
   demo [dir]      Scaffold a demo repository with real dependency drift.
 
@@ -1767,6 +1968,13 @@ ${c.bold('COMMANDS')}
                   .nvmrc, engines and CI node versions — and verify the build.
                   Deterministic: no model is involved.
     --keep          Leave the workspace on disk for inspection.
+
+  mcp             Serve Emend's tools over MCP on stdio, so a coding agent can
+                  drive it: scan, plan_remediation, fix_vulnerability,
+                  fix_package, verify, advisory_status, impact. Every tool
+                  returns what was measured, never a judgement — an agent
+                  claiming a fix must call advisory_status and read the
+                  lockfile's answer.
 
   eval            Measure the agent against a corpus. Reports pass rate, clean
                   rate, edit ratio and error reduction per model, so an agent
@@ -1779,6 +1987,22 @@ ${c.bold('COMMANDS')}
                     is what does the editing, so the table reports the hunks its
                     gate kept and reverted. --no-agent measures the
                     deterministic path alone.
+
+  store           Inspect and prune what Emend has stored on this machine.
+    list            Repositories with stored scan data, and a cache summary.
+                    Paths that no longer exist are marked, since most of what
+                    accumulates is temporary directories from earlier runs.
+    prune <path>    Forget one repository's scans, findings and runs.
+    prune --all     Forget all scan history. The GitHub App's own state —
+                    installations, tracked repos, jobs, pull requests — is left
+                    alone unless --include-app is passed, because clearing it
+                    unregisters the App rather than tidying a list.
+    cache           Cached package surfaces, largest first. Keyed by package and
+                    version and shared across repositories, so it cannot be
+                    pruned per repository.
+    cache prune <pkg> | --older-than <days> | --all
+                    Delete cached packages. Age is per package, from its most
+                    recently used version.
 
 ${c.bold('EXAMPLE')}
   emend demo ./emend-demo
@@ -1833,6 +2057,9 @@ async function main(): Promise<void> {
         break;
       case 'pins':
         process.exitCode = await cmdPins(args);
+        break;
+      case 'store':
+        process.exitCode = await cmdStore(args);
         break;
       default:
         usage();

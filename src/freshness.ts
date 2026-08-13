@@ -8,7 +8,7 @@
  * actually means is *there is a free upgrade here and Emend has already proved
  * it is safe for you*.
  *
- * Kept deliberately weak. Spec §6: these are unbounded, every repository has
+ * Kept deliberately weak: these are unbounded, every repository has
  * some, and producing one requires no analysis at all. Pouring them in beside
  * proven findings inverts the signal-to-noise ratio that makes a scan worth
  * sharing, which the alert-fatigue literature names as the main reason people

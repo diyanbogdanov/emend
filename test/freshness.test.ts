@@ -84,7 +84,7 @@ test('breaking changes this repository does not call are the point, not a disqua
 // ---------------------------------------------------------------------------
 
 test('freshness never reaches the headline count', () => {
-  // Spec §6, and its acceptance criterion 4. These are unbounded — every
+  // The freshness tier's founding rule. These are unbounded — every
   // repository has some, and producing them requires no analysis — so counting
   // them beside proven findings inverts the signal-to-noise ratio that makes the
   // scan worth reading at all.

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compare, verificationPassed } from '../src/verify.ts';
+import { compare, countDiagnostics, verificationPassed } from '../src/verify.ts';
 import type { CommandResult } from '../src/types.ts';
 
 const pass = (command: string): CommandResult => ({
@@ -78,4 +78,60 @@ test('only a verified or typecheck-only migration may open a pull request', () =
   assert.equal(verificationPassed('regression'), false);
   assert.equal(verificationPassed('pre-existing-failure'), false);
   assert.equal(verificationPassed('unverified'), false);
+});
+
+// ---------------------------------------------------------------------------
+// Counting what the compiler objected to.
+// ---------------------------------------------------------------------------
+
+const withOutput = (stdout: string, stderr = ''): CommandResult => ({
+  command: 'tsc --noEmit', ok: false, exitCode: 1, stdout, stderr,
+});
+
+test('tsc diagnostics are counted by location, in either format', () => {
+  // The denominator for `Err. reduced`. It went uncounted for the life of the
+  // benchmark and every engine reported reducing 0% of the errors as a result,
+  // so the number this produces is the difference between that column being a
+  // measurement and being a decoration.
+  assert.equal(
+    countDiagnostics(
+      withOutput(
+        [
+          "src/schema.ts(28,15): error TS2554: Expected 1 arguments, but got 2.",
+          "src/schema.ts(41,23): error TS2339: Property 'errors' does not exist.",
+        ].join('\n'),
+      ),
+    ),
+    2,
+  );
+
+  // The format everything that is not tsc emits.
+  assert.equal(
+    countDiagnostics(withOutput('src/client.ts:7:1: error: cannot find module')),
+    1,
+  );
+});
+
+test('one location complained about twice is one problem', () => {
+  // Both patterns run over the same text, and a monorepo runner repeats a line
+  // under its workspace prefix. Counting matches rather than locations roughly
+  // doubles the number on exactly the repositories where it matters, and a
+  // doubled denominator makes an engine look like it cleared half of what it did.
+  const repeated = [
+    'src/schema.ts(28,15): error TS2554: Expected 1 arguments, but got 2.',
+    'src/schema.ts(28,15): error TS2554: Expected 1 arguments, but got 2.',
+  ].join('\n');
+  assert.equal(countDiagnostics(withOutput(repeated)), 1);
+});
+
+test('errors on stderr are counted too, since that is where some tools put them', () => {
+  assert.equal(countDiagnostics(withOutput('', 'src/a.ts(1,1): error TS1005: expected')), 1);
+});
+
+test('a clean or skipped typecheck counts nothing', () => {
+  assert.equal(countDiagnostics(pass('tsc')), 0);
+  assert.equal(countDiagnostics(skip('tsc', 'no tsconfig.json')), 0);
+  // Warnings are not errors. A count that swept them in would report a
+  // repository as damaged by an upgrade that only made it noisier.
+  assert.equal(countDiagnostics(withOutput('src/a.ts(1,1): warning TS6133: unused')), 0);
 });

@@ -1,11 +1,37 @@
 {
-  "name": "emend",
+  "name": "emend-cli",
   "version": "0.1.0",
   "description": "Detects API drift between installed and target dependency versions, locates affected call sites, and produces verified migration PRs.",
+  "author": "Diyan Bogdanov",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/diyanbogdanov/emend.git"
+  },
+  "homepage": "https://github.com/diyanbogdanov/emend#readme",
+  "bugs": {
+    "url": "https://github.com/diyanbogdanov/emend/issues"
+  },
+  "keywords": [
+    "dependencies",
+    "migration",
+    "breaking-changes",
+    "api-drift",
+    "dependabot",
+    "typescript",
+    "openapi",
+    "security"
+  ],
   "type": "module",
   "bin": {
     "emend": "./bin/emend.mjs"
   },
+  "files": [
+    "bin",
+    "src",
+    "skills",
+    "THIRD-PARTY-NOTICES.md"
+  ],
   "engines": {
     "node": ">=22.6"
   },
@@ -23,6 +49,5 @@
   "devDependencies": {
     "@types/node": "^22.0.0"
   },
-  "license": "AGPL-3.0-only",
   "private": true
 }

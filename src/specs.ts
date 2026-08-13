@@ -158,10 +158,11 @@ const SERVED_LIVE: ReadonlySet<SpecProvenance> = new Set(['official-domain']);
  * Emend resolved for real vendors, every maintained one had changed within 95
  * days — Twilio 95, Webflow 74, Box and Asana 9, GitHub, Discord, Deepgram and
  * Runway inside three — and the one abandoned description, Slack's, had not
- * changed in 2,132. There is a factor of twenty-two between the two groups, so
- * the threshold sits an order of magnitude clear of both: loose enough that a
- * quiet quarter is not an accusation, tight enough that five dead years cannot
- * pass as the provider's current word.
+ * changed in 2,132. There is a factor of twenty-two between the two groups, and
+ * a year sits between them with margin both ways — nearly four times the
+ * slowest maintained cadence, less than a fifth of the abandoned gap: loose
+ * enough that a quiet quarter is not an accusation, tight enough that five dead
+ * years cannot pass as the provider's current word.
  */
 export const CURRENCY_WINDOW_MS = 365 * 24 * 60 * 60 * 1000;
 

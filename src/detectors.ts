@@ -370,8 +370,6 @@ export function httpContractDetector(options: HttpContractOptions): Detector {
   };
 }
 
-export const DETECTORS: Detector[] = [versionPinDetector];
-
 export interface DetectorSelection {
   /** Enable the external linters by handing over the adapters to run. */
   lint?: ExternalLintOptions;

@@ -31,7 +31,7 @@ function outcome(over: Partial<CaseOutcome> = {}): CaseOutcome {
 // ---------------------------------------------------------------------------
 
 test('a harness run is a different engine, and gets its own row', () => {
-  // The condition §8 puts on adopting a harness: it swaps the editing engine
+  // The condition adopting a harness carries: it swaps the editing engine
   // itself, and folding its runs into the model's own row makes every subsequent
   // result unattributable. Two runs of `glm-5.2` that produced different work
   // for different reasons must not average into one number.

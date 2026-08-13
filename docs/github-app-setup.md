@@ -46,10 +46,10 @@ setup; use a stable hostname before onboarding anyone.
 
 ## 3. Create the App
 
-For an organization (use this for a private organisation):
+For an organization:
 
 ```
-https://github.com/organizations/a private organisation/settings/apps/new
+https://github.com/organizations/<your-org>/settings/apps/new
 ```
 
 For your personal account: <https://github.com/settings/apps/new>
@@ -58,8 +58,8 @@ Fill in:
 
 | Field | Value |
 | --- | --- |
-| **GitHub App name** | `Emend` — must be globally unique, so try `Emend Dev` or `Emend a private organisation` if taken |
-| **Homepage URL** | Anything. `https://github.com/a private organisation/a scanned repository` is fine |
+| **GitHub App name** | `Emend` — must be globally unique, so try `Emend Dev` or `Emend <YourOrg>` if taken |
+| **Homepage URL** | Anything. This repository's URL is fine |
 | **Webhook** | Leave **Active** checked |
 | **Webhook URL** | Your tunnel URL + `/webhook` |
 | **Webhook secret** | The value from step 1 |
@@ -134,7 +134,8 @@ can act as Emend on every repository it is installed on.
 ## 7. Install it on a repository
 
 On the App settings page, click **Install App** in the left sidebar, choose the
-account, and select **Only select repositories** → `a scanned repository`.
+account, and select **Only select repositories** → the repository you want
+scanned.
 
 Installing fires an `installation` webhook, which tracks the repo and queues its
 first scan immediately.
@@ -152,7 +153,12 @@ You should see:
 ```
   Emend dashboard → http://localhost:8080
   GitHub App active → POST http://localhost:8080/webhook
+  Bound to loopback: GitHub reaches the webhook only through a tunnel, or bind with --host 0.0.0.0.
 ```
+
+The loopback note is expected here — the tunnel from step 2 is what carries
+deliveries in. Bind `--host 0.0.0.0` only when the server itself must be
+reachable, as in [docs/deployment.md](./deployment.md).
 
 If it says `Local mode — GitHub App not configured. Missing: …`, the named
 variables did not reach the process. Emend loads `.env` from the current working
@@ -198,7 +204,8 @@ mean executing repository code, which the hosted path deliberately does not do.
 
 ## Making the App public
 
-The App you registered is private: only a private organisation can install it. Going public
+The App you registered is private: only the account that owns it can install
+it. Going public
 lets any account install it, which is what you need before design partners
 outside your own org can try it.
 
@@ -246,8 +253,8 @@ the day after.
 
 **Deliveries retry.** GitHub retries a failed webhook, so a restart mid-delivery
 is recoverable — but a permanently failing endpoint gets deliveries disabled
-after enough failures. The `installation created` 502s in your delivery log
-happened for exactly this reason: nothing was listening yet.
+after enough failures. A 502 on `installation created` in the delivery log
+means exactly this: nothing was listening when the install fired.
 
 ### The uninstall path matters
 

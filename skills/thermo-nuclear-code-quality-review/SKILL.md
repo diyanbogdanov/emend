@@ -2,6 +2,7 @@
 name: thermo-nuclear-code-quality-review
 description: An extremely strict maintainability review for abstraction quality, giant files, and spaghetti-condition growth. Emend's default review skill.
 source: https://github.com/cursor/plugins/blob/main/cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md
+license: MIT, Copyright (c) 2026 Cursor — full notice in /THIRD-PARTY-NOTICES.md
 ---
 
 # Thermo-Nuclear Code Quality Review

@@ -1,5 +1,7 @@
 # Emend
 
+[![CI](https://github.com/diyanbogdanov/emend/actions/workflows/ci.yml/badge.svg)](https://github.com/diyanbogdanov/emend/actions/workflows/ci.yml)
+
 **Dependabot tells you a version changed. Emend tells you which of your lines break, fixes them, and proves the fix compiles and passes your tests.**
 
 Emend diffs the published TypeScript declarations of the dependency version you
@@ -210,6 +212,15 @@ answer. Measured across two vendors, 5 of 11 offered parameters were that.
 | `emend eval` | Measure the agent against a corpus |
 | `emend serve` | Local dashboard |
 | `emend models` | List models your LLM provider serves |
+| `emend store list` | What is stored locally: repositories, and cache size |
+| `emend store prune <path>` | Forget one repository's scans, findings and runs |
+| `emend store cache` | Cached package surfaces, largest first |
+| `emend mcp` | Serve Emend's tools over MCP stdio, so a coding agent can drive it |
+
+`emend mcp` exposes seven tools — `scan`, `plan_remediation`, `fix_vulnerability`,
+`fix_package`, `verify`, `advisory_status`, `impact` — and every one returns what
+was *measured*, never a judgement: an agent claiming a vulnerability is fixed has
+to call `advisory_status` and read the lockfile's answer.
 
 `emend scan --features` answers the other half of the question: not what broke,
 but what *arrived*. It lists new top-level exports in packages you already
@@ -220,8 +231,11 @@ in your repository is affected either way.
 
 Useful flags: `--only pkg,pkg`, `--all`, `--json`, `--no-dev`, `--contracts`,
 `--features`, `--freshness`, `--vulns`, `--lint` (scan);
-`--finding <id>`, `--no-agent`, `--no-review`, `--drive`, `--keep` (fix);
-`--create` (pr); `--model a,b`, `--repeat n`, `--cases <file>` (eval).
+`--finding <id>`, `--no-agent`, `--no-review`, `--drive`, `--untrusted`,
+`--keep` (fix); `--create` (pr); `--model a,b`, `--repeat n`, `--cases <file>`
+(eval). `--untrusted` treats the repository as hostile — no lifecycle scripts,
+no test script, no model session in the checkout; it is what the hosted service
+sets for every repository, and `emend --help` has the full list.
 
 ---
 
@@ -276,7 +290,7 @@ real migrations and scores them:
 ```
 $ emend eval --model z-ai/glm-5.2,qwen/qwen3-coder --repeat 3
 
-| Model | Cases | Runs | Pass | Clean | Edit ratio | Withheld | ... |
+| Model | Cases | Runs | Pass | Clean | Unresolved | Edit ratio | Withheld | ... |
 ```
 
 **`Pass` and `Clean` are deliberately different columns.** A green build says the
@@ -284,6 +298,16 @@ migration compiles and the tests pass. It says nothing about whether the model
 changed things nobody asked about, bought the green with `any`, or shipped a
 commit titled *"migrate `Cell`"* without removing a single use of `Cell`. Every
 failure this project has actually hit lived in that gap.
+
+**`Unresolved` is whether the migration finished. `Edit ratio` is reported and
+never scored.** Each case declares the pre-migration forms a finished migration
+removes, and `Unresolved` counts the ones still there — that is the completeness
+signal. The ratio divides diff hunks by logical edits, and hunks merge when
+changes land near each other, so a *complete* zod migration reads "4 of 6" and did
+so for an entire sweep before anyone noticed. It is a signal about scope, read
+alongside the other columns rather than on its own, and nothing is judged against
+it in either direction: the review pass exists to edit, so charging it for editing
+would measure the design rather than the model.
 
 Migrations vary between runs, so `--repeat` is how you tell a real change from
 noise.
@@ -300,7 +324,7 @@ export EMEND_GITHUB_APP_ID=...
 export EMEND_GITHUB_PRIVATE_KEY="$(cat emend.private-key.pem)"   # or base64
 export EMEND_GITHUB_WEBHOOK_SECRET=...
 
-emend serve --port 8080     # POST /webhook is now live
+emend serve --port 8080 --host 0.0.0.0     # POST /webhook is now live
 ```
 
 Register the App with these repository permissions:
@@ -496,15 +520,15 @@ src/
   apply.ts        isolated workspace, edit application, rollback
   verify.ts       baseline/post command running and comparison
   fix.ts          the fix pipeline (per-package)
-  harness.ts      THE boundary: `ask` and `run` — nothing else reaches a model
-  gate.ts         is this change one the failure asked for? no model involved
+  harness.ts      THE boundary: `ask` reports, `run` writes, `runTask` drives a job
+  gate.ts         is this change one the evidence asked for? no model involved
   reviewharness.ts read-only repo-wide and behaviour reviews
   pr.ts           evidence-rich PR rendering + gh integration
   mcp.ts          MCP server, so a coding agent can drive Emend
   cli.ts          command surface
-  github/         App auth, webhook intake, job runner, API pull requests
-  harness.ts      THE boundary: `ask` reports, `run` writes, `runTask` drives a job
-  gate.ts         is this change one the evidence asked for? no model involved
+  github.ts       vendor OpenAPI discovery in the vendor's own GitHub org
+  github/         the App: auth, webhook intake, job runner, API pull requests
+  server.ts       dashboard + webhook endpoint · store.ts  SQLite persistence
   llm/tasks.ts    the four jobs, each as skills + instructions + a renderer
   llm/skills.ts   instruction fragments, named once and shared by reference
   llm/symbols.ts  symbols the new version really exports, to ground a replacement
@@ -513,7 +537,6 @@ docs/
   architecture.md             how it fits together, and why
   deployment.md               running it as a service
   github-app-setup.md         the App, step by step
-  specs/                      dated design specs; the authority over this file
 fixtures/demo-repo/           demo template with real drift
 ```
 
@@ -543,7 +566,10 @@ deliberately out of scope is listed under Known limitations below.
 
 ## Licence
 
-**AGPL-3.0-only** — see [LICENSE](./LICENSE).
+Copyright © 2026 Diyan Bogdanov.
+
+**AGPL-3.0-only** — see [LICENSE](./LICENSE). Third-party material is listed in
+[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
 
 The clause that matters here is §13, Remote Network Interaction: run a modified
 Emend as a service for other people and you owe them its source. Run it privately

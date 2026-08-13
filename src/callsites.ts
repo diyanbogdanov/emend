@@ -17,7 +17,7 @@ import type { ApiSurface, CallSite } from './types.ts';
  * Source files admitted to the TypeScript program.
  *
  * Bounded only so a runaway directory walk cannot exhaust memory. The largest
- * repository scanned so far has 562 TypeScript files, so this is far from
+ * repository scanned so far (n8n) walks about 19,000 files, so this is far from
  * binding; a repository that trips it gets a warning saying results are partial.
  */
 const MAX_FILES = 100_000;
@@ -369,7 +369,7 @@ export function findCallSites(
             }
           }
         } catch {
-          /* checker could not resolve — nothing to record, and we say so via warnings only if global */
+          /* checker could not resolve this node — nothing to record for it */
         }
       }
 

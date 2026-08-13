@@ -100,6 +100,10 @@ WantedBy=multi-user.target
 `EnvironmentFile` rather than baking secrets into the unit: the unit file is
 world-readable, `.env` should be `chmod 600` and owned by the service user.
 
+The server binds `127.0.0.1` by default — exactly where the Caddy proxy below
+expects it. `--host 0.0.0.0` exists for setups that terminate TLS elsewhere,
+and is a deliberate step because the dashboard has no authentication.
+
 ### TLS
 
 GitHub will not deliver webhooks to plain HTTP. Caddy gets a certificate and

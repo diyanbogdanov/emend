@@ -21,6 +21,15 @@ function json(res: http.ServerResponse, body: unknown, status = 200): void {
   res.end(payload);
 }
 
+/** The host of an Origin header, or null where it does not parse as a URL. */
+function originHost(origin: string): string | null {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return null;
+  }
+}
+
 /** Read the raw request body. Signature verification needs the exact bytes. */
 function readBody(req: http.IncomingMessage, limit = 8 * 1024 * 1024): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -40,7 +49,12 @@ function readBody(req: http.IncomingMessage, limit = 8 * 1024 * 1024): Promise<B
   });
 }
 
-export function startServer(port: number): Promise<void> {
+// Loopback unless asked otherwise. The dashboard hands out absolute local
+// paths, private repository names and full migration diffs to anyone who can
+// reach it, and it has no authentication — so reachable is a decision
+// (`--host 0.0.0.0`), never a default. The hosted deployment makes that
+// decision in its unit file; see docs/deployment.md.
+export function startServer(port: number, host = '127.0.0.1'): Promise<void> {
   // The GitHub App is optional: `emend serve` stays a local dashboard when no
   // App credentials are present, and only becomes a hosted service when they are.
   const app = resolveAppConfig();
@@ -82,6 +96,15 @@ export function startServer(port: number): Promise<void> {
       // corrects that; on a quiet repository it never does, and the dashboard
       // keeps showing conclusions the current code would not draw.
       if (url.pathname === '/api/rescan' && req.method === 'POST') {
+        // A browser will POST here from any page the operator happens to have
+        // open; same-origin is the difference between the dashboard's own
+        // button and a drive-by. No Origin header means a non-browser client,
+        // which the loopback default already vets.
+        const origin = req.headers.origin;
+        if (typeof origin === 'string' && originHost(origin) !== req.headers.host) {
+          json(res, { error: 'cross-origin rescan refused' }, 403);
+          return;
+        }
         const repoKey = url.searchParams.get('repo');
         if (!repoKey) {
           json(res, { error: 'repo is required' }, 400);
@@ -129,10 +152,14 @@ export function startServer(port: number): Promise<void> {
   });
 
   return new Promise((resolve) => {
-    server.listen(port, () => {
-      console.log(`\n  Emend dashboard → http://localhost:${port}`);
+    server.listen(port, host, () => {
+      const shown = host === '127.0.0.1' ? 'localhost' : host;
+      console.log(`\n  Emend dashboard → http://${shown}:${port}`);
       if (app.ok) {
-        console.log(`  GitHub App active → POST http://localhost:${port}/webhook`);
+        console.log(`  GitHub App active → POST http://${shown}:${port}/webhook`);
+        if (host === '127.0.0.1') {
+          console.log('  Bound to loopback: GitHub reaches the webhook only through a tunnel, or bind with --host 0.0.0.0.');
+        }
       } else {
         console.log(`  Local mode — ${app.reason}`);
       }

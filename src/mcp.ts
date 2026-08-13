@@ -347,6 +347,8 @@ export async function handle(request: Request): Promise<Record<string, unknown> 
       return reply({
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
+        // Keep in step with package.json's version; there is no build step to
+        // stamp it in, and a JSON import here would cost an experimental flag.
         serverInfo: { name: 'emend', version: '0.1.0' },
       });
     // A notification carries no id and must draw no response at all; replying to

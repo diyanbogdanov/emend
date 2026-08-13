@@ -3,22 +3,15 @@
  *
  * All that survives of what was `llm/agent.ts` and then `llm/propose.ts`. Both
  * names described a strategy — a model proposing `find`/`replace` pairs for
- * Emend to locate and apply — and §11 removed it: one thing changes code now,
- * and it is the harness. What that strategy needed *besides* a model was this,
- * and the need did not leave with it.
+ * Emend to locate and apply — and the one-writer decision removed it: one
+ * thing changes code now, and it is the harness. What that strategy needed
+ * *besides* a model was this, and the need did not leave with it.
  *
  * The cheapest defence available against an invented API. A model can still
  * hallucinate a symbol; it has no excuse to.
  */
 
-import type { ApiSymbol } from '../types.ts';
-
-/**
- * Symbols in the target version that share a container with the changed symbol.
- *
- * Giving the model the real candidate list is the cheapest available defence
- * against invented APIs — it can still hallucinate, but it has no excuse to.
- */
+/** Symbols in the target version that share a container with the changed symbol. */
 export function nearbySymbols(
   changedPath: string,
   toSymbols: Record<string, { path: string; deprecated: boolean }>,
@@ -101,12 +94,3 @@ export function nearbySymbols(
     return diff !== 0 ? diff : a.localeCompare(b);
   });
 }
-
-// ---------------------------------------------------------------------------
-// Evidence: deciding which proposed edits the upgrade actually asked for.
-// ---------------------------------------------------------------------------
-
-/** A compiler or test diagnostic, reduced to the location it points at. */
-
-/** `src/schema.ts(28,15): error TS2554: ...` — tsc's own format. */
-/** `src/schema.ts:28:15: error ...` — most other tools. */

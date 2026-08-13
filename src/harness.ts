@@ -8,8 +8,8 @@
  * unless its `find` string matches uniquely, so a hallucinated one is rejected
  * by construction, and an agent with write access has no such constraint.
  *
- * The design spec's condition of adoption is therefore that the evidence gate
- * moves from proposed edits to diff hunks — same rule, different input. That is
+ * The condition of adopting one is therefore that the evidence gate moves from
+ * proposed edits to diff hunks — same rule, different input. That is
  * what this module is: `classifyHunks` already answers the question, and here it
  * is given something to act on. Anything the current failure does not ask for is
  * reverted where it stands, before the result is verified or reported.
@@ -294,6 +294,30 @@ function refused(reason: string, log = ''): EscalationResult {
 }
 
 /**
+ * What the engine said about doing nothing, if it said anything.
+ *
+ * The migration task already ends "If you changed nothing, say that plainly and
+ * why", so the answer exists — it arrives as `text` events and `summariseEvents`
+ * collects them into `summary`. It was then handed to `refused` as the *log*,
+ * and `runCase` records only the reason, so the one field written to answer this
+ * question was dropped exactly when it was asked.
+ *
+ * Only `summary` is quoted. `log` is documented as lossless and `summary` as the
+ * readable one "for the PR body, where the log is noise", so putting a log into a
+ * table cell would contradict that field's own contract — better to say less than
+ * to say junk.
+ *
+ * Single-lined and clipped because this reaches `CaseOutcome.inconclusive`, which
+ * `renderSummary` renders inside a markdown row: a newline breaks the table and
+ * an unbounded monologue destroys the thing it was meant to explain.
+ */
+function lastWord(summary: string | undefined): string {
+  const said = summary?.split('\n').map((line) => line.trim()).filter(Boolean).at(-1);
+  if (!said) return '';
+  return ` — it said: "${said.length > 160 ? `${said.slice(0, 159)}…` : said}"`;
+}
+
+/**
  * Run a harness and hold its output to the same evidence rule as a proposed edit.
  *
  * The index is borrowed to establish a baseline: staging everything before the
@@ -344,14 +368,22 @@ export async function escalate(
     if (diff.trim() === '') {
       // An empty diff after an escalation is not a repair, and reporting it as
       // one is how a run that did nothing gets recorded as a run that worked.
-      const why = run.ok ? `${harness.id} changed nothing` : `${harness.id} changed nothing — ${run.error ?? 'no reason given'}`;
+      //
+      // The two cases are named apart because they are different failures. An
+      // engine that errored has already said why; one that reported *success*
+      // and wrote nothing has not, and it is the harder of the two — it finished
+      // believing the work was done, so nothing downstream has a reason to look
+      // again. Measured: one run in twelve, no error, credits to spare.
+      const why = run.ok
+        ? `${harness.id} reported success and changed nothing${lastWord(run.summary)}`
+        : `${harness.id} changed nothing — ${run.error ?? 'no reason given'}`;
       return refused(why, (run.summary ?? run.log));
     }
 
     const classified = classifyHunks(parseDiffHunks(diff), gate);
     const unrequested = classified.filter((c) => c.evidence === 'unrequested');
 
-    // The carve-out `selectEvidencedEdits` makes, for the same reason: if
+    // The carve-out the old edit gate made, kept for the same reason: if
     // nothing is evidenced then the harness's work is all there is, and
     // reverting all of it turns a possible repair into a guaranteed no-op.
     // Verification remains the judge.
@@ -401,7 +433,8 @@ export interface OpenCodeOptions {
    * diff, so the write capability buys nothing and costs the whole gate problem:
    * every other harness run is judged by `classifyHunks` reading what it changed,
    * and a run that changes nothing has nothing to judge. Not trusted on its own —
-   * `harnessReview` verifies the workspace is unchanged afterwards.
+   * `reviewSession` in reviewharness.ts verifies the workspace is unchanged
+   * afterwards.
    */
   readOnly?: boolean;
   /**
@@ -532,10 +565,10 @@ function spawnWithoutStdin(
 /**
  * OpenCode as the escalation harness.
  *
- * Chosen because `llm-harness.md` named a Tier 3 sandboxed harness as the
- * escalation path and declined to build one on the grounds that OpenHands is
- * Python and Docker-bound. OpenCode is TypeScript and MIT, so that objection
- * does not apply.
+ * Chosen after a build-vs-adopt evaluation that named a sandboxed harness as
+ * the escalation path and declined to build one on the grounds that OpenHands
+ * is Python and Docker-bound. OpenCode is TypeScript and MIT, so that
+ * objection does not apply.
  */
 export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness {
   const bin = options.bin ?? 'opencode';
@@ -544,8 +577,8 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
   /**
    * Flags the binary in front of us actually accepts, learned in `available()`.
    *
-   * The design spec priced "the harness becomes a dependency whose changes land
-   * in this product" as a cost of adoption. It arrived as a CLI contract change:
+   * "The harness becomes a dependency whose changes land in this product" was
+   * priced in as a cost of adoption. It arrived as a CLI contract change:
    * `--auto` is on opencode's development branch and absent from the released
    * 1.x, so hard-coding it made every real run die on a usage error rather than
    * run. Empty until probed, and the command stays conservative until then.
@@ -739,23 +772,9 @@ export function summariseEvents(stdout: string): string {
 }
 
 /**
- * An opencode session that drives Emend's own tools.
- *
- * The loop `runAgentRepair` used to be, moved to something built for it. Emend
- * still owns everything deterministic — which version clears the advisory, did
- * the build survive, did the vulnerable version actually leave the tree — and
- * those arrive as tools the session cannot fake. What it brings that the deleted
- * loop could not is the ability to read a file nobody thought to load, change
- * its mind about which rung to try, and stop when it is done rather than after
- * a fixed three attempts.
- *
- * `emendCommand` is how this process was started, so the child runs the same
- * build rather than whatever `emend` happens to be on PATH.
- */
-/**
  * The harness that repairs a finding, with its model resolved.
  *
- * §11 made this the only thing that changes code, which raises the stakes on a
+ * This is the only thing that changes code, which raises the stakes on a
  * question that had been left open: *which* model. The answer was "whichever
  * one opencode resolves", and opencode resolves from its own config — so a
  * repository whose operator had authenticated opencode against something else
@@ -779,6 +798,20 @@ export function repairHarness(options: { pinned?: string } = {}): OpenCodeHarnes
   return openCodeHarness({ model: `${resolved.config.providerId}/${resolved.config.model}` });
 }
 
+/**
+ * An opencode session that drives Emend's own tools.
+ *
+ * The loop `runAgentRepair` used to be, moved to something built for it. Emend
+ * still owns everything deterministic — which version clears the advisory, did
+ * the build survive, did the vulnerable version actually leave the tree — and
+ * those arrive as tools the session cannot fake. What it brings that the deleted
+ * loop could not is the ability to read a file nobody thought to load, change
+ * its mind about which rung to try, and stop when it is done rather than after
+ * a fixed three attempts.
+ *
+ * `emendCommand` is how this process was started, so the child runs the same
+ * build rather than whatever `emend` happens to be on PATH.
+ */
 export function drivingHarness(options: {
   model?: string;
   emendCommand: string[];
@@ -902,14 +935,14 @@ export function systemPrompt<Ctx>(task: Task<Ctx>): string {
 /**
  * Run one job in a checkout. **The only way anything in Emend changes code.**
  *
- * §11 of the model-boundary spec: one writer. Before it there were two — a
- * proposer whose `find` strings Emend located and applied, and a harness that
- * wrote directly — and keeping both meant two gates, two failure vocabularies
- * and two things to improve whenever repair got better.
+ * The one-writer rule. There used to be two writers — a proposer whose `find`
+ * strings Emend located and applied, and a harness that wrote directly — and
+ * keeping both meant two gates, two failure vocabularies and two things to
+ * improve whenever repair got better.
  *
- * What that traded is stated in §11.1 and is not small: the proposer failed
- * closed, because an invented `find` matches nothing and is rejected before a
- * byte is written. A harness writes first. Standing in its place are `gate`,
+ * What collapsing them traded is not small: the proposer failed closed, because
+ * an invented `find` matches nothing and is rejected before a byte is written.
+ * A harness writes first. Standing in its place are `gate`,
  * which reverts every changed region the evidence did not ask for, and the
  * verification that follows in a throwaway worktree — which is the real
  * backstop, and does not care who wrote the bytes.
@@ -934,10 +967,10 @@ export async function runTask<Ctx>(
  * here and nowhere else.
  *
  * What used to be re-exported alongside it was the whole structured strategy —
- * a proposer, its parser and its edit gate. §11 removed it: `run` is the only
- * verb that changes a file, and `ask` survives for work that never touches the
- * checkout. `nearbySymbols` is neither; it reads a surface Emend already
- * extracted, and it is here because the tasks it grounds are.
+ * a proposer, its parser and its edit gate. The one-writer decision removed it:
+ * `run` is the only verb that changes a file, and `ask` survives for work that
+ * never touches the checkout. `nearbySymbols` is neither; it reads a surface
+ * Emend already extracted, and it is here because the tasks it grounds are.
  */
 export { nearbySymbols } from './llm/symbols.ts';
 export {

@@ -50,8 +50,8 @@ reasoning and settled the other way by reading a diff.
 
 ## What the code expects of you
 
-`CLAUDE.md` describes the design, and the module headers carry the reasoning for
-the decisions they implement. Two conventions matter more than the rest:
+[docs/architecture.md](./docs/architecture.md) describes the design, and the
+module headers carry the reasoning for the decisions they implement. Two conventions matter more than the rest:
 
 **Never report something unverified as safe.** A package with no type
 declarations is `unanalyzable`, not `clean`. A verification that did not run is
