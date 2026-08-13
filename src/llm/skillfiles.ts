@@ -15,12 +15,12 @@
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { emendPath } from '../paths.ts';
 import type { Skill } from './skills.ts';
 
-/** Where the shipped skills live: `<repo>/skills/<name>/SKILL.md`. */
+/** Where the shipped skills live: `<package>/skills/<name>/SKILL.md`. */
 function builtInRoot(): string {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills');
+  return emendPath('skills');
 }
 
 /**
