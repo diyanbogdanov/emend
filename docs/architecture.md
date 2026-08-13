@@ -4,12 +4,10 @@ How Emend is put together, and why it is put together that way. If you are
 looking for how to *use* it, start with the [README](../README.md); this is for
 people changing the code.
 
-**This describes; it does not decide.** The specs under
-[`specs/`](./specs/) are authoritative, and the code is meant to be their image
-— design first, then conform. The current pair is
-[`2026-08-06-self-maintaining-mvp.md`](./specs/2026-08-06-self-maintaining-mvp.md)
-and [`2026-08-12-model-boundary.md`](./specs/2026-08-12-model-boundary.md). If
-this file and a spec disagree, the spec is right and this file is stale.
+**This describes; it does not decide.** The decisions live with the code: each
+module's header carries the reasoning — and usually the measured failure —
+behind what it does. If this file and a module header disagree, the header is
+right and this file is stale.
 
 ---
 
@@ -180,7 +178,7 @@ first page as the whole answer.
 `find`/`replace` pairs Emend located and applied, and a harness that wrote
 directly — and the first *failed closed*: an invented `find` matched nothing, so
 a hallucination was rejected before a byte was written. That was traded
-deliberately (spec §11), and what stands in its place is the gate, the
+deliberately, and what stands in its place is the gate, the
 verification below it, and the behaviour review.
 
 The consequence to know about: `opencode` is now required for any model-driven
@@ -195,7 +193,8 @@ introduced. The gate reverted nothing across fourteen hunks, which is not yet
 evidence that it never needs to — six runs on two cases cannot tell a model
 staying in scope from anchors too loose to fire. The completeness columns of `emend eval` are not yet valid
 for this engine — the corpus counts `find`/`replace` pairs and a harness produces
-hunks — and spec §11.6 says why that is not a thing to estimate.
+hunks, and converting one into the other would be estimation, which is exactly
+what the eval exists to avoid.
 
 ### Detect
 
@@ -275,13 +274,14 @@ wrong answer gets:
 That split is what survived consolidation. It used to also justify a second
 model-driven route — a proposer emitting `find`/`replace` pairs that Emend
 located and applied, which failed closed because an invented `find` matched
-nothing. Spec §11 removed it: one thing changes code, and it is the harness.
+nothing. The one-writer decision removed it: one thing changes code, and it is
+the harness.
 Byam's 27% end-to-end was the case for the constrained form; BigBag's 78.6%,
 driving an agent through a harness, is the case that won.
 
-What replaced fail-closed is not another gate. Spec §14 removed that too, once
-its record could be read — nothing correctly withheld, three correct repairs
-wrongly reverted. What stands now is the read-only reviewer, for whether a
+What replaced fail-closed is not another gate. The deterministic repair gate
+went too, once its record could be read — nothing correctly withheld, three
+correct repairs wrongly reverted. What stands now is the read-only reviewer, for whether a
 change was needed, and verification, for whether it works.
 
 What *was* shared and duplicated is the boundary: at one point six modules
@@ -351,11 +351,12 @@ runs it in the worktree, `gate.ts` reverts what the evidence did not ask for, an
 verification decides whether any of it stays. They differ in what they say and
 what anchors them, which is exactly what a task is.
 
-**The migration job was dormant until §11.** `d4a0da9` deleted the loop that
-drove it and recorded the cost — `emend fix --agent` stopped repairing breaking
-upgrades from the CLI, FIXED to NOT FIXED on the axios bait repo. It has a caller
-again, and it is a harness run: the escalation used to hand opencode five
-sentences that re-derived, badly, what this task already says at length.
+**The migration job was dormant for a stretch.** An earlier change deleted the
+loop that drove it and recorded the cost — `emend fix --agent` stopped repairing
+breaking upgrades from the CLI, FIXED to NOT FIXED on the axios bait repo. It
+has a caller again, and it is a harness run: the escalation used to hand
+opencode five sentences that re-derived, badly, what this task already says at
+length.
 
 The rest is **on by default**. `--no-agent` and `--no-review` turn it off for runs
 that must stay offline or byte-for-byte reproducible. A finding the planner

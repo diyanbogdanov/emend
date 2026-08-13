@@ -4,9 +4,9 @@
  * Reading only the root `package.json` is right for a single-package repo and
  * badly wrong for a monorepo, where the root typically declares a handful of
  * tooling devDependencies and every real dependency lives in `packages/*`.
- * Emend reported a private monorepo as having zero findings across 865 resolved
- * packages for exactly this reason — not because the repository was clean, but
- * because it never looked at the six manifests that matter.
+ * Emend reported a six-workspace monorepo as having zero findings across 865
+ * resolved packages for exactly this reason — not because the repository was
+ * clean, but because it never looked at the six manifests that matter.
  *
  * That failure mode is the expensive one. A missed feature is visible; a
  * confident "no findings" is trusted.

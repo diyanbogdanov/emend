@@ -46,25 +46,22 @@ async function gitHead(repoDir: string): Promise<string | null> {
 }
 
 /**
- * Copy node_modules into the workspace.
- *
- * On macOS/APFS `cp -c` uses clonefile, so this is near-instant and costs no disk
- * even for a large tree. Reinstalling from scratch instead would add minutes per
- * run for no benefit — we bump only the one package under migration afterwards.
- */
-/**
  * Copy an installed dependency tree into the workspace.
  *
  * A workspace repository does not keep one `node_modules` — it keeps one per
- * package. a private monorepo has two entries at the root and fifteen, twenty-six,
- * five, four, four and six across its six workspaces, so copying only the root
- * produced a workspace whose baseline failed to typecheck for want of almost
- * every dependency. Emend then correctly reported "pre-existing failure" about a
- * repository that was perfectly healthy.
+ * package. A real six-workspace monorepo had two entries at the root and
+ * fifteen, twenty-six, five, four, four and six across its workspaces, so
+ * copying only the root produced a workspace whose baseline failed to typecheck
+ * for want of almost every dependency. Emend then correctly reported
+ * "pre-existing failure" about a repository that was perfectly healthy.
  *
- * `cp -R` preserves symlinks rather than following them, which matters: bun and
- * pnpm fill per-workspace directories with links into a shared store, and
- * dereferencing them would multiply the copy by the number of workspaces.
+ * On macOS/APFS `cp -c` uses clonefile, so the copy is near-instant and costs
+ * no disk even for a large tree; everywhere else plain `cp -R` is the fallback.
+ * Reinstalling from scratch instead would add minutes per run for no benefit —
+ * we bump only the one package under migration afterwards. `-R` preserves
+ * symlinks rather than following them, which matters: bun and pnpm fill
+ * per-workspace directories with links into a shared store, and dereferencing
+ * them would multiply the copy by the number of workspaces.
  */
 async function copyNodeModules(from: string, to: string): Promise<boolean> {
   const roots = await findWorkspaces(from);
@@ -215,7 +212,8 @@ export async function applyEdits(dir: string, edits: PlannedEdit[]): Promise<Edi
  *
  * Deterministic edits only, now. An identical shape called `TextEdit` lived in
  * the model layer, where `find` matching nothing was the fail-closed property
- * that made a proposer safe. §11 removed the proposer; what still produces these
+ * that made a proposer safe. The one-writer decision removed the proposer;
+ * what still produces these
  * is the rename planner and the manifest rewriter, neither of which consults a
  * model. Two names for four fields was already one too many.
  */
@@ -361,8 +359,8 @@ async function declaringWorkspace(dir: string, pkg: string): Promise<string> {
  *  - Running at the root of a workspace repository edits the root manifest,
  *    which does not declare the package.
  *  - Every manager defaults to a caret range, so an exact pin silently widens.
- *    a scanned repository pins `playwright` exactly and has a test asserting the pin
- *    matches its Docker base image; that test failed on `^1.62.1` alone.
+ *    One scanned repository pins `playwright` exactly and has a test asserting
+ *    the pin matches its Docker base image; that test failed on `^1.62.1` alone.
  */
 export async function bumpDependency(
   dir: string,

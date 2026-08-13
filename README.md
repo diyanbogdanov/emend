@@ -300,7 +300,7 @@ export EMEND_GITHUB_APP_ID=...
 export EMEND_GITHUB_PRIVATE_KEY="$(cat emend.private-key.pem)"   # or base64
 export EMEND_GITHUB_WEBHOOK_SECRET=...
 
-emend serve --port 8080     # POST /webhook is now live
+emend serve --port 8080 --host 0.0.0.0     # POST /webhook is now live
 ```
 
 Register the App with these repository permissions:
@@ -496,15 +496,15 @@ src/
   apply.ts        isolated workspace, edit application, rollback
   verify.ts       baseline/post command running and comparison
   fix.ts          the fix pipeline (per-package)
-  harness.ts      THE boundary: `ask` and `run` — nothing else reaches a model
-  gate.ts         is this change one the failure asked for? no model involved
+  harness.ts      THE boundary: `ask` reports, `run` writes, `runTask` drives a job
+  gate.ts         is this change one the evidence asked for? no model involved
   reviewharness.ts read-only repo-wide and behaviour reviews
   pr.ts           evidence-rich PR rendering + gh integration
   mcp.ts          MCP server, so a coding agent can drive Emend
   cli.ts          command surface
-  github/         App auth, webhook intake, job runner, API pull requests
-  harness.ts      THE boundary: `ask` reports, `run` writes, `runTask` drives a job
-  gate.ts         is this change one the evidence asked for? no model involved
+  github.ts       vendor OpenAPI discovery in the vendor's own GitHub org
+  github/         the App: auth, webhook intake, job runner, API pull requests
+  server.ts       dashboard + webhook endpoint · store.ts  SQLite persistence
   llm/tasks.ts    the four jobs, each as skills + instructions + a renderer
   llm/skills.ts   instruction fragments, named once and shared by reference
   llm/symbols.ts  symbols the new version really exports, to ground a replacement
@@ -513,7 +513,6 @@ docs/
   architecture.md             how it fits together, and why
   deployment.md               running it as a service
   github-app-setup.md         the App, step by step
-  specs/                      dated design specs; the authority over this file
 fixtures/demo-repo/           demo template with real drift
 ```
 
@@ -543,7 +542,10 @@ deliberately out of scope is listed under Known limitations below.
 
 ## Licence
 
-**AGPL-3.0-only** — see [LICENSE](./LICENSE).
+Copyright © 2026 Diyan Bogdanov.
+
+**AGPL-3.0-only** — see [LICENSE](./LICENSE). Third-party material is listed in
+[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
 
 The clause that matters here is §13, Remote Network Interaction: run a modified
 Emend as a service for other people and you owe them its source. Run it privately

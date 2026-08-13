@@ -65,7 +65,7 @@ export interface CaseOutcome {
   /**
    * The harness that produced the edits, when one did.
    *
-   * Part of the engine's identity, not a detail of the run. §8's condition on
+   * Part of the engine's identity, not a detail of the run. The condition on
    * adopting a harness is that it swaps the editing engine itself, so folding
    * its runs into the model's own row would make every subsequent result
    * unattributable — two runs of the same model that produced different work for
@@ -332,7 +332,7 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
  * every case, and read by nothing, so each run migrated to whatever npm's
  * `latest` was that morning. `openai-3.3.0-to-4.104.0` was performing 3.3.0 ->
  * 7.4.0 and being scored against `minimalEdits: 4`, a number counted by
- * performing the 3 -> 4 migration. See spec §15.
+ * performing the 3 -> 4 migration.
  */
 export function scanOptionsFor(evalCase: EvalCase): ScanOptions {
   return { only: [evalCase.pkg], targets: { [evalCase.pkg]: evalCase.toVersion } };
@@ -434,30 +434,30 @@ export const DEMO_CASE: EvalCase = {
   pkg: 'zod',
   toVersion: '4.4.3',
   repo: { kind: 'fixture', name: 'demo-repo' },
-  // Five: `ZodError.errors` -> `.issues` and the `z.record` arity change, which
-  // are the compile errors, plus the three deprecations — `z.string().uuid()`
-  // becomes `z.uuid()`, `.email()` becomes `z.email()`, `.datetime()` becomes
-  // `z.iso.datetime()`.
+  // Six. Five are code: `ZodError.errors` -> `.issues` and the `z.record`
+  // arity change, which are the compile errors, plus the three deprecations —
+  // `z.string().uuid()` becomes `z.uuid()`, `.email()` becomes `z.email()`,
+  // `.datetime()` becomes `z.iso.datetime()`. The sixth is the file's doc
+  // comment, which says "Written against zod 3.x. Several of the APIs used
+  // here changed in zod 4" — false once the migration lands, and a migration
+  // that leaves a false comment behind has not finished.
   //
-  // This said two until a live run showed why that was wrong. Two was
-  // `llm-harness.md`'s standard, where fixing a deprecation counted as editing
-  // what the upgrade did not require. #2 established the opposite: a migration
-  // that reports "X is deprecated", titles its commit after X and ships without
+  // This said two until a live run showed why that was wrong. Under the
+  // earlier standard, fixing a deprecation counted as editing what the upgrade
+  // did not require. Measurement established the opposite: a migration that
+  // reports "X is deprecated", titles its commit after X and ships without
   // removing X has not done what it said. Under that standard the deprecations
-  // are required, and a case that scores their absence as ideal would train the
-  // agent to skip them.
-  // Six. Five are code — the two compile errors and the three deprecations —
-  // and the sixth is the file's doc comment, which says "Written against zod
-  // 3.x. Several of the APIs used here changed in zod 4". After the migration
-  // that sentence is false, and a migration that leaves a false comment behind
-  // has not finished. Every run makes exactly six edits; scoring the sixth as
-  // over-editing was the harness mismeasuring, not the model over-reaching.
+  // are required, and a case that scores their absence as ideal would train
+  // the agent to skip them. It then said five until every run made exactly six
+  // edits; scoring the sixth as over-editing was the harness mismeasuring, not
+  // the model over-reaching.
   minimalEdits: 6,
   mustResolve: ['ZodError.errors', 'record', 'ZodString.uuid', 'ZodString.email', 'ZodString.datetime'],
 };
 
 /**
- * recharts 2.15.4 -> 3.10.1, the migration #1 and #2 were both written against.
+ * recharts 2.15.4 -> 3.10.1, the migration the first prompt experiments were
+ * written against.
  *
  * It exercises what the zod case cannot. `Cell` is a *named import*, so
  * `remainingDeprecations` can see whether the migration finished — zod's
@@ -487,7 +487,7 @@ export const RECHARTS_CASE: EvalCase = {
 };
 
 /**
- * The migration the RFS is literally about: a provider changing its own client.
+ * The migration this project was started for: a provider changing its own client.
  *
  * openai 3 -> 4 is not a rename. `Configuration` and `OpenAIApi` both stop
  * existing, the package starts default-exporting a class, the method moves from
@@ -505,7 +505,8 @@ export const OPENAI_CASE: EvalCase = {
   pkg: 'openai',
   toVersion: '4.104.0',
   repo: { kind: 'fixture', name: 'openai-repo' },
-  // Four, counted by performing the migration rather than by estimating it:
+  // Five, counted by performing the migration rather than by estimating it.
+  // Four are code:
   //   1. `{ Configuration, OpenAIApi }` -> a default import
   //   2. the two-step `new Configuration(...)` / `new OpenAIApi(...)` collapses
   //      into one `new OpenAI(...)`
@@ -516,18 +517,18 @@ export const OPENAI_CASE: EvalCase = {
   // whole module in one region reports fewer edits than one making the same
   // change in four, with an identical diff.
   //
-  // Five. Four are the code edits above; the fifth is the client's doc comment,
-  // which reads "`Configuration` and `OpenAIApi` are both gone in openai 4 — so
-  // this import is the first thing an upgrade breaks". After the migration that
-  // describes code the file no longer contains, and this corpus already settled
-  // what that is worth: `DEMO_CASE` went from five to six for the same reason,
-  // in the same words — a migration that leaves a false comment behind has not
-  // finished.
+  // The fifth is the client's doc comment, which reads "`Configuration` and
+  // `OpenAIApi` are both gone in openai 4 — so this import is the first thing
+  // an upgrade breaks". After the migration that describes code the file no
+  // longer contains, and this corpus already settled what that is worth:
+  // `DEMO_CASE` went from five to six for the same reason, in the same words —
+  // a migration that leaves a false comment behind has not finished.
   //
-  // Said four until the diff was read rather than reasoned about. §15 pinned the
-  // target and predicted this would fall to 1.0x on its own; it fell to 1.3x, so
-  // the diff was captured. It holds exactly these five hunks and nothing else —
-  // four from the migration, one from the review — and no over-editing at all.
+  // Said four until the diff was read rather than reasoned about. Pinning the
+  // target version predicted this would fall to 1.0x on its own; it fell to
+  // 1.3x, so the diff was captured. It holds exactly these five hunks and
+  // nothing else — four from the migration, one from the review — and no
+  // over-editing at all.
   //
   // The order mattered. Recounting *before* the pin would have raised this to
   // six and encoded three unrequested major versions of openai as the standard.

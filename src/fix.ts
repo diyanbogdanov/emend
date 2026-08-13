@@ -74,7 +74,7 @@ const execFileAsync = promisify(execFile);
  * Said when the harness was wanted and cannot run.
  *
  * Named rather than inlined at three call sites, because the wording is the
- * point. §11 made the harness the only thing that changes code, so its absence
+ * point. The harness is the only thing that changes code, so its absence
  * is not a reduced service — it is the difference between "nothing needed
  * repairing" and "nothing could be repaired", and those are opposite claims. The
  * cardinal rule, applied to repair.
@@ -566,8 +566,8 @@ async function loadSources(
 /**
  * Most files pulled in because a failure named them.
  *
- * A wide upgrade breaks many files at once — recharts 2 to 3 produces fourteen
- * errors across ten files in a private monorepo — and a model shown two of them
+ * A wide upgrade breaks many files at once — recharts 2 to 3 produced fourteen
+ * errors across ten files in one real monorepo — and a model shown two of them
  * cannot produce a coherent migration.
  */
 const MAX_COLLATERAL_FILES = 16;
@@ -575,9 +575,10 @@ const MAX_COLLATERAL_FILES = 16;
 /**
  * Repository files named by compiler or test output.
  *
- * An upgrade can break a file that contains no call site at all. a scanned repository
- * asserts its Dockerfile's Playwright image tag matches package.json, so bumping
- * the dependency fails a test in a file the call-site walk never visits — and
+ * An upgrade can break a file that contains no call site at all. One scanned
+ * repository asserts its Dockerfile's Playwright image tag matches package.json,
+ * so bumping the dependency fails a test in a file the call-site walk never
+ * visits — and
  * the agent, shown only call-site files, correctly declined because it could not
  * see what was wrong. Feeding it the files the failure actually names closes
  * that gap without guessing at what else might be relevant.
@@ -824,8 +825,9 @@ export async function fixPackage(
         // Counted, for the same reason the review's hunks are: this is the work
         // that repaired the build, and leaving it out makes `appliedEdits` report
         // only what the deterministic planner managed. The first eval sweep after
-        // §11 scored a migration that verified as "1 of 6 required edits" for
-        // exactly this reason — the engine had changed and the counter had not.
+        // the harness became the writer scored a migration that verified as
+        // "1 of 6 required edits" for exactly this reason — the engine had
+        // changed and the counter had not.
         appliedCount += escalation.keptHunks;
 
         if (!escalation.ok) {

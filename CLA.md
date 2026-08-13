@@ -6,7 +6,8 @@ submit.
 **1. Definitions.** "You" means the individual or legal entity making the
 contribution. "Contribution" means any work of authorship you intentionally
 submit to this project, in any form and through any channel — including code,
-documentation, and issue or pull-request content.
+documentation, and issue or pull-request content. "The project owner" means
+Diyan Bogdanov, the copyright holder of Emend.
 
 **2. Copyright licence.** You grant the project owner a perpetual, worldwide,
 non-exclusive, royalty-free, irrevocable copyright licence to reproduce, prepare

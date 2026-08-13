@@ -191,10 +191,10 @@ function fakeHarness(writes: Record<string, string>, over: Partial<Harness> = {}
 // Only line 2 is broken. Nothing points at line 25, so a hunk over it is
 // outside everything the evidence named.
 const FAILURE = 'a.txt(2,1): error TS2304: Cannot find name.';
-// Stated literally rather than through a policy function. §14 deleted the one
-// the repair used, and what these tests exercise is `escalate`'s revert
-// machinery — still live under `reviewGate` and `lintGate` — not any policy's
-// choice of anchors.
+// Stated literally rather than through a policy function. The reviewer-judges
+// decision deleted the one the repair used, and what these tests exercise is
+// `escalate`'s revert machinery — still live under `reviewGate` and `lintGate`
+// — not any policy's choice of anchors.
 const GATE: HunkGate = {
   anchors: [{ file: 'a.txt', line: 2 }],
   unanchored: 'revert',
@@ -212,7 +212,7 @@ test('a hunk the failure did not ask for is reverted before anyone sees the diff
     assert.equal(result.revertedHunks.length, 1);
     assert.equal(result.keptHunks, 1);
     // The reason names the rule that fired. `nothing outstanding` was the
-    // quiet-call-site rule, which §14 deleted along with the rest of the
+    // quiet-call-site rule, deleted along with the rest of the
     // repair's gate; what reverts now is a hunk outside every anchor.
     assert.match(result.revertedHunks[0]?.reason ?? '', /is not anywhere the failure pointed/);
 
@@ -373,7 +373,7 @@ test('an unavailable harness is refused loudly, never skipped quietly', async ()
 
 test('without git there is no gate, so there is no escalation', async () => {
   // The gate is the entire condition of adoption. A harness with write access
-  // that cannot be judged is exactly what the design spec forbids, so failing to
+  // that cannot be judged is exactly what the design forbids, so failing to
   // establish the baseline has to stop the escalation rather than waive it.
   const dir = mkdtempSync(path.join(tmpdir(), 'emend-nogit-'));
   try {
@@ -427,8 +427,8 @@ test('no model is configured rather than guessed', async () => {
 // ---------------------------------------------------------------------------
 // Version adaptation
 //
-// The design spec priced "the harness becomes a dependency whose changes land
-// in this product" as a cost of adoption. It arrived as a CLI contract change:
+// "The harness becomes a dependency whose changes land in this product" was
+// priced in as a cost of adoption. It arrived as a CLI contract change:
 // `--auto` exists on opencode's development branch and not in the released 1.x,
 // so hard-coding it made every real run die on a usage error instead of running.
 // Flags are therefore read off the binary in front of us.

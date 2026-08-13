@@ -43,8 +43,8 @@ function files(entries: Record<string, string>): Map<string, string> {
 // ---------------------------------------------------------------------------
 
 test('a Dockerfile base image pins the tool it ships', () => {
-  // The a scanned repository case: the image tag and the npm dependency must agree, and
-  // nothing in a normal build checks that they do.
+  // The case that motivated this: the image tag and the npm dependency must
+  // agree, and nothing in a normal build checks that they do.
   const pins = extractPins(files({ Dockerfile: DOCKERFILE }));
   const playwright = pins.find((p) => p.subject === 'playwright');
   assert.equal(playwright?.version, '1.62.1');

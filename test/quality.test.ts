@@ -192,8 +192,9 @@ test('the review prompt demands the deprecation be finished before anything else
   assert.match(REVIEW_SYSTEM_PROMPT, /copy-pasted logic|missing helper/i);
   assert.match(REVIEW_SYSTEM_PROMPT, /renders a real string as "0"/);
   // And the licence to decline, so the pass does not invent work to look busy.
-  // Worded as "change nothing" since §11: there is no edit array to return
-  // empty, and the licence is what mattered, not the shape it was expressed in.
+  // Worded as "change nothing" since the harness became the writer: there is no
+  // edit array to return empty, and the licence is what mattered, not the shape
+  // it was expressed in.
   assert.match(REVIEW_SYSTEM_PROMPT, /change nothing and say why/);
 });
 

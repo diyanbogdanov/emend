@@ -25,7 +25,6 @@ import {
   parseContractFindings,
   renderContractFindings,
   type ContractFinding,
-  renderReviewFindings,
   reviewSession,
 } from './reviewharness.ts';
 import { startServer } from './server.ts';
@@ -122,16 +121,16 @@ function parseArgs(argv: string[]): Args {
 /**
  * The harness that makes the changes. **On unless turned off.**
  *
- * Opt-in until §11, which is when it became the only thing that changes code —
- * and an opt-in flag for the only way anything gets repaired means the default
- * run is a scanner. The same argument §2 made for the other two passes: a
+ * Opt-in until the harness became the only thing that changes code — and an
+ * opt-in flag for the only way anything gets repaired means the default run is
+ * a scanner. The same argument that put the other two passes on by default: a
  * finding nobody repairs is a finding a person repairs by hand.
  *
  * `--no-agent` turns it off, sharing the switch with everything else that talks
  * to a model, because from an operator's side "do not use a model" is one
  * decision. `--harness=<provider/model>` pins one, which is the mitigation for
- * the reproducibility cost §7.1 prices: a regression that cannot be attributed
- * to a model is a regression nobody can chase.
+ * the reproducibility cost a harness brings: a regression that cannot be
+ * attributed to a model is a regression nobody can chase.
  *
  * Which model an unpinned run gets is `repairHarness`'s decision, not this
  * function's — and it used to be opencode's, which is how a sweep that pinned
@@ -1425,7 +1424,8 @@ async function cmdModels(args: Args): Promise<number> {
 
 async function cmdServe(args: Args): Promise<number> {
   const port = Number(args.flags.get('port') ?? 4000);
-  await startServer(port);
+  const host = args.flags.get('host');
+  await startServer(port, typeof host === 'string' ? host : undefined);
   return 0;
 }
 
@@ -1543,7 +1543,7 @@ async function cmdEval(args: Args): Promise<number> {
   console.log('');
 
   // Resolved once for the sweep, so every run is the same engine and the table
-  // can attribute results to it. §8's condition on adopting a harness is exactly
+  // can attribute results to it. The condition on adopting a harness is exactly
   // this: it swaps the editing engine, so it has to be measured as one.
   const evalHarness = harnessFrom(args);
   const outcomes: CaseOutcome[] = [];
@@ -1760,6 +1760,8 @@ ${c.bold('COMMANDS')}
 
   serve           Local dashboard for browsing findings.
     --port <n>      Default 4000
+    --host <addr>   Default 127.0.0.1. The dashboard is unauthenticated, so
+                    binding a reachable address is an explicit decision
 
   demo [dir]      Scaffold a demo repository with real dependency drift.
 

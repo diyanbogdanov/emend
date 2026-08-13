@@ -321,10 +321,12 @@ async function declarationImports(dir: string, fileCap: number): Promise<Set<str
  * plainly does. Chasing the full closure instead would download an unbounded
  * dependency tree for every package on every scan.
  *
- * Depth 2 covers the common shape — a facade package over a core package, which
- * may itself reference one shared types package — without opening the door to
- * transitively downloading half the registry. Raise it if you see hollow
- * surfaces; the cost is roughly linear in packages fetched.
+ * The common shape is shallow — a facade package over a core package, which may
+ * itself reference one shared types package — but real chains run deeper, and a
+ * depth that stops short reports a hollow surface as "ships no type
+ * declarations". The file and total caps below are what actually bound the
+ * work. Raise the depth if you see hollow surfaces; the cost is roughly linear
+ * in packages fetched.
  */
 const TYPE_DEP_DEPTH = 6;
 const TYPE_DEP_FILE_CAP = 4000;
@@ -417,9 +419,9 @@ export async function materializeTypeDeps(pkgDir: string): Promise<string[]> {
 /**
  * Expose an already-extracted cache directory at a second path.
  *
- * A symlink would be enough for TypeScript, but the same cached tarball is
- * referenced from many packages' node_modules, and a real copy would multiply
- * disk use by the number of dependents.
+ * A symlink is enough for TypeScript, and the same cached tarball is referenced
+ * from many packages' node_modules — a real copy would multiply disk use by the
+ * number of dependents.
  */
 async function linkTree(from: string, to: string): Promise<void> {
   if (await exists(to)) return;

@@ -103,8 +103,8 @@ export interface ApiSurface {
   typeDefaults?: Record<string, string[]>;
   /**
    * Resolved `.d.ts` entry point, or null when the package ships no types.
-   * Null is meaningful: it means "unanalyzable", never "clean". See honesty
-   * rules in the spec (§9).
+   * Null is meaningful: it means "unanalyzable", never "clean". See the
+   * honesty rules in the README.
    */
   entry: string | null;
   /**
@@ -161,7 +161,7 @@ export type Severity =
    * A dependency that is simply behind, with nothing in this repository that
    * the upgrade would break.
    *
-   * Excluded from the headline count by design (spec §6): these are unbounded —
+   * Excluded from the headline count by design: these are unbounded —
    * every repository has some, and producing them requires no analysis at all.
    * Pouring them in beside proven findings inverts the signal-to-noise ratio
    * that makes a scan worth reading, which the alert-fatigue literature names as
@@ -215,18 +215,24 @@ export interface CallSite {
   column: number;
   /** The source line, trimmed — shown as evidence in reports and PRs. */
   text: string;
-  /** How the symbol was resolved. See spec §6. */
+  /** How the symbol was resolved: through an import binding, or through the
+   * type checker on a receiver's type. `callsites.ts` explains the split. */
   via: 'import' | 'type';
 }
 
 export interface Finding {
-  /** Stable fingerprint; see spec §4.1. Excludes file/line by design. */
+  /**
+   * Stable fingerprint of (package, version pair, symbol path, change kind) —
+   * `findingId` in analyze.ts. Excludes file/line by design: the same drift
+   * must keep its identity when code moves, or every rebase would reopen what
+   * the last scan dismissed.
+   */
   id: string;
   /**
    * Which detector produced this, and the discriminator for everything
    * downstream.
    *
-   * The design spec proposed a `Subject` union instead. With the code in front
+   * An earlier design proposed a `Subject` union instead. With the code in front
    * of you all four of its variants are `{name, from, to}` plus a tag, which is
    * what the three fields below already carry — so the union would rename
    * fields across two dozen sites to express what this one field expresses.
@@ -397,7 +403,7 @@ export interface ScanReport {
     /**
      * Packages simply behind, where nothing this repository calls changed.
      *
-     * Never in the headline. Spec §6: unbounded, requiring no analysis to
+     * Never in the headline: unbounded, requiring no analysis to
      * produce, and counting them beside proven findings is what makes a scan
      * stop being read.
      */
@@ -406,7 +412,7 @@ export interface ScanReport {
      * Packages that gained a new top-level export.
      *
      * Never in the headline, and for a stronger reason than freshness: this
-     * class asserts nothing about the repository at all. Spec §13.
+     * class asserts nothing about the repository at all.
      */
     features: number;
   };

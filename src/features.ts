@@ -1,8 +1,8 @@
 /**
  * Capability that arrived while nobody was reading the changelog.
  *
- * The RFS names two halves. One is breakage, which is the rest of this
- * codebase. The other is that *useful features quietly launch and go
+ * The problem this project was built for has two halves. One is breakage,
+ * which is the rest of this codebase. The other is that *useful features quietly launch and go
  * unnoticed*, and until now npm answered it barely at all: `diffSurfaces` has
  * always emitted a change per new symbol — `kind: 'added'`, `severity:
  * 'feature'` — and `consumerImpacting` has always dropped every one of them.
@@ -15,7 +15,7 @@
  * header: additions are unbounded, every upgrade has some, and pouring them in
  * beside proven findings inverts the signal-to-noise ratio that makes a scan
  * worth sharing. So they carry their own severity, stay out of the headline,
- * and are capped rather than exhaustive. See spec §13.
+ * and are capped rather than exhaustive.
  */
 
 import { createHash } from 'node:crypto';
@@ -76,7 +76,7 @@ const CAPABILITY_KINDS = new Set(['function', 'class', 'variable', 'enum', 'unkn
  * `AnyDataTag, AnyUseBaseQueryOptions, AnyUseInfiniteQueryOptions,
  * AnyUseMutationOptions, AnyUseQueryOptions and 80 more` — five type-level
  * helpers for someone else's generics, alphabetically first, while the hook the
- * release was actually about sat unnamed in the remainder. See spec §13.4.
+ * release was actually about sat unnamed in the remainder.
  */
 function topLevel(change: SurfaceChange): boolean {
   return (

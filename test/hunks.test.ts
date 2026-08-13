@@ -8,7 +8,6 @@ import {
 } from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { CallSite, SurfaceChange } from '../src/types.ts';
 
 const DIFF = `diff --git a/src/schema.ts b/src/schema.ts
 index feccd3e..a6bef75 100644
@@ -27,21 +26,6 @@ index feccd3e..a6bef75 100644
    })
    .strict();
 `;
-
-function change(path: string, kind: SurfaceChange['kind']): SurfaceChange {
-  return {
-    path,
-    kind,
-    severity: kind === 'deprecated' ? 'deprecation' : 'breaking',
-    confidence: 'high',
-    before: 'before',
-    after: 'after',
-  };
-}
-
-function site(line: number): CallSite {
-  return { file: 'src/schema.ts', line, column: 3, text: '', via: 'import' };
-}
 
 // ---------------------------------------------------------------------------
 // parseDiffHunks — what a harness that writes files leaves behind
@@ -115,14 +99,6 @@ diff --git a/src/real.ts b/src/real.ts
 // artefact left is the diff, so the gate has to read that instead. Same
 // question, same evidence, different shape.
 // ---------------------------------------------------------------------------
-
-const CHANGES = [
-  { change: change('record', 'signature-changed'), sites: [site(25)] },
-  { change: change('ZodString.email', 'deprecated'), sites: [site(4)] },
-];
-
-// Only `record` breaks the build; the deprecation compiles.
-const FAILURE = 'src/schema.ts(25,15): error TS2554: Expected 2 arguments, but got 1.';
 
 // ---------------------------------------------------------------------------
 // The three policies
@@ -216,11 +192,11 @@ test('touchedLines counts added lines on the new side', () => {
 });
 
 // ---------------------------------------------------------------------------
-// §14: the reviewer judges the repair
+// The reviewer judges the repair
 // ---------------------------------------------------------------------------
 
 test('the repair gate keeps everything, because the reviewer is what judges it', () => {
-  // Spec §14. The deterministic gate never decided this well: its only rule on
+  // The deterministic gate never decided this well: its only rule on
   // the repair path was the quiet-call-site one, its only reverts in the whole
   // record were the openai regression, and `unanchored: 'allow'` made every
   // other hunk `evidenced` by construction. Nought caught, three wrongly
@@ -247,7 +223,7 @@ test('the repair gate keeps everything, because the reviewer is what judges it',
 });
 
 test('the reviewer is still held to where it may write, which is a different question', () => {
-  // §14.4. Scope is not judgement. A reviewer that may rewrite anything is not a
+  // Scope is not judgement. A reviewer that may rewrite anything is not a
   // reviewer, and it is now the component carrying all the trust — so the one
   // thing still worth bounding is its reach, not its opinion.
   //

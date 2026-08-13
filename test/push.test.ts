@@ -29,7 +29,7 @@ async function fixture(): Promise<{ root: string; repo: string; cleanup: () => v
 
 test('a branch checked out in another worktree does not block the push', async () => {
   // The real failure, verbatim:
-  //   fatal: 'emend/recharts-5f6f9004bebe' is already used by worktree at '…/the-monorepo'
+  //   fatal: 'emend/recharts-5f6f9004bebe' is already used by worktree at '…'
   // The holder was the developer's own checkout — reviewing a PR means checking
   // its branch out — so Emend could not update precisely the PRs someone was
   // looking at. Reclaiming that worktree is not an option; it may hold their work.

@@ -253,7 +253,7 @@ export function renderPrBody(result: FixResult, options: PrBodyOptions = {}): st
   } else if (result.harness) {
     // Model-written changes are labelled distinctly. A reviewer deserves to know
     // which lines a model wrote versus which a deterministic rule produced, and
-    // under §11 a model writing them is the only way they get written at all.
+    // a model writing them is now the only way they get written at all.
     lines.push(
       `**Kind:** 🤖 model-generated — written by \`${result.harness.id}\` in an isolated worktree, then gated and verified.`,
     );
@@ -451,7 +451,7 @@ export async function commitAndPush(
   // `git checkout -B <branch>` was the previous approach and it fails outright
   // when any other worktree in the repository has that branch checked out:
   //
-  //   fatal: 'emend/recharts-…' is already used by worktree at '…/the-monorepo'
+  //   fatal: 'emend/recharts-…' is already used by worktree at '…'
   //
   // The holder is normally the developer's own checkout, because reviewing a
   // pull request means checking its branch out. Reclaiming it is not an option

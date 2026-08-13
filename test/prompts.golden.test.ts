@@ -9,10 +9,11 @@
  *
  * They were first taken from the hand-written builders, and held byte-identical
  * across the tasks-and-skills restructuring — which is what made that a refactor
- * rather than an experiment. §11 then changed the engine underneath them: an
- * agent that writes files cannot be told to emit a JSON edit set, so the rules
- * that said so had to go. **That regeneration is the experiment §8 governs**, and
- * what is on trial is the engine, measured on the corpus.
+ * rather than an experiment. The one-writer decision then changed the engine
+ * underneath them: an agent that writes files cannot be told to emit a JSON
+ * edit set, so the rules that said so had to go. **That regeneration is the
+ * experiment the eval exists to judge**, and what is on trial is the engine,
+ * measured on the corpus.
  *
  * A diff here is therefore one of two things: a mistake, or a change that owes
  * an eval run. Refreshing them to get to green, without knowing which, is the
@@ -125,7 +126,8 @@ test('the review task deliberately excludes the narrowing rule', () => {
 test('all four tasks share one statement of how a writing job reports', () => {
   // Lint used to spell the same contract out inline, in its own words, because
   // the two were kept in step by hand and nobody had noticed they were the same
-  // requirement. There was a parser for them to disagree about; §11 removed it,
+  // requirement. There was a parser for them to disagree about; the one-writer
+  // decision removed it,
   // and with it the reason to have two.
   for (const closing of [
     MIGRATION_TASK.closing,

@@ -174,7 +174,7 @@ export function touchedLines(diff: string): Diagnostic[] {
 /**
  * The repair's own hunks: keep all of them, and let the reviewer judge.
  *
- * **Spec §14.** This replaced `migrationGate`, which decided this badly enough
+ * This replaced `migrationGate`, which decided this badly enough
  * that deleting it removed no protection. Its only rule on the repair path was
  * that a hunk landing on a call site the compiler was content with is
  * unrequested; `unanchored: 'allow'` made everything else `evidenced` by
@@ -244,7 +244,7 @@ export function lintGate(findings: ReadonlyArray<Diagnostic>): HunkGate {
  * A harness with filesystem access cannot be gated by inspecting proposed
  * `find`/`replace` pairs, because it never proposes any — it writes. The only
  * artefact it leaves behind is the diff, so the gate reads that instead. This is
- * the precondition the design spec puts on adopting one: the fail-closed
+ * the precondition on adopting one: the fail-closed
  * property is what an agent with write access costs, and it is only recoverable
  * if the gate can judge a diff.
  *

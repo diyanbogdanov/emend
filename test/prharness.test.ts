@@ -68,7 +68,7 @@ test('a harness escalation is named, so a reviewer knows what wrote the branch',
 });
 
 test('the PR says the change was written in a worktree and gated, not proposed', () => {
-  // Until §11 this section claimed the model "never had filesystem or shell
+  // This section once claimed the model "never had filesystem or shell
   // access", which was true of the proposer and is now false of everything.
   // Leaving it would be a false statement about how the change was made, in the
   // section that exists to explain how it was made.

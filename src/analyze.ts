@@ -82,7 +82,7 @@ export interface ScanOptions {
    * For callers that need the same migration twice. The benchmark is the one
    * that does: every case names a target in its id, and resolving `latest`
    * instead meant `openai-3.3.0-to-4.104.0` was running 3.3.0 -> 7.4.0 and being
-   * scored against a denominator counted for 3 -> 4. See spec §15.
+   * scored against a denominator counted for 3 -> 4.
    *
    * Not a general "downgrade" switch: an ordinary scan wants the latest, and
    * anything else is the caller declaring it has a reason.
@@ -93,7 +93,7 @@ export interface ScanOptions {
    *
    * Off by default for freshness's reason, which applies harder here: every
    * upgrade adds something, and nothing in the repository is affected either
-   * way. See spec §13.
+   * way.
    */
   features?: boolean;
   /** Run external linters over Dockerfiles and shell scripts. */
@@ -420,20 +420,18 @@ export async function scanRepo(
     '.sh', '.bash', 'Dockerfile', 'Containerfile',
   ]).map((f) => path.relative(repoDir, f));
 
-  // Partitioned before capping, because a flat cap drops by walk order and the
-  // walk order is arbitrary. Measured on n8n: a cap of 400 over 19,333 files
-  // hid 8 of 8 Dockerfiles and 7 of 9 shell scripts, so `--lint` reported almost
-  // nothing and read as clean. There are never many of these, so they are never
-  // the thing worth dropping.
-  const configFiles = walked.filter((f) => /(Dockerfile|Containerfile)|\.(sh|bash|go)$/.test(f));
-  const codeFiles = walked.filter((f) => !configFiles.includes(f));
-
   // No cap. It was four hundred, then ten thousand, and both were guesses at a
   // cost nobody had measured: reading all 19,333 files of n8n takes 3.5 seconds
   // and 109MB, and parsing them takes nine. A scan that already spends tens of
   // seconds on registry fetches can afford that — and the alternative was
   // asserting "not imported from this repository's source" after reading part
   // of it, which is the one kind of wrong answer this codebase exists to avoid.
+  //
+  // When there *was* a cap, it dropped by walk order: on n8n it hid 8 of 8
+  // Dockerfiles and 7 of 9 shell scripts, and `--lint` read as clean. The
+  // partition below survives from that era and now only orders the list.
+  const configFiles = walked.filter((f) => /(Dockerfile|Containerfile)|\.(sh|bash|go)$/.test(f));
+  const codeFiles = walked.filter((f) => !configFiles.includes(f));
   const sourceFiles = [...configFiles, ...codeFiles];
   const pinScan = await scanPins(
     resolvedVersions(repo.dependencies),
@@ -531,10 +529,10 @@ export async function scanRepo(
   // `breaking`, and counting only the packages would have left it out of the one
   // line of a scan anybody reads.
   //
-  // `inHeadline` is the single rule, rather than a filter per severity: every
-  // class added since — drift, vulnerability, lint, freshness — is real and is
-  // not an API break, and each new one must stay out by default rather than by
-  // somebody remembering to exclude it here.
+  // Every class is counted separately; which counts reach the `N breaking · M
+  // deprecated` headline is the renderer's decision, and `inHeadline` in
+  // freshness.ts writes that rule down. Keep the two in agreement when adding a
+  // severity — a new class stays out of the headline by default.
   const allFindings = packages.flatMap((p) => p.findings);
   const breaking = allFindings.filter((f) => f.change.severity === 'breaking').length;
   const deprecation = allFindings.filter((f) => f.change.severity === 'deprecation').length;

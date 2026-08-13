@@ -46,8 +46,9 @@ async function exists(p: string): Promise<boolean> {
 }
 
 /**
- * Best-effort concrete version from a semver range, used only when node_modules
- * is absent. Marked distinctly by the caller so we never imply we read it from disk.
+ * Best-effort concrete version from a semver range, the fallback when neither
+ * node_modules nor the lockfile answered. Marked distinctly by the caller so we
+ * never imply we read it from disk.
  */
 function versionFromRange(range: string): string | null {
   const m = range.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);

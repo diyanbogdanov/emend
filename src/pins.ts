@@ -3,7 +3,7 @@
  *
  * A dependency version lives in the lockfile, where the package manager keeps it
  * honest. The same version written into a Dockerfile tag, an `.nvmrc`, or a CI
- * matrix is a copy, and nothing keeps a copy honest. a scanned repository pins
+ * matrix is a copy, and nothing keeps a copy honest. One real repository pins
  * `playwright` exactly and asserts in a test that its Docker base image matches;
  * that test is the only thing in the repository that noticed, and most
  * repositories have no such test.
