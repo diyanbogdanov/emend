@@ -27,11 +27,11 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { scanRepo, type ScanOptions } from './analyze.ts';
-import { fixPackage } from './fix.ts';
+import { fixPackage, type PackageFixResult } from './fix.ts';
 import type { Harness } from './harness.ts';
 import { countTypeEscapes } from './pr.ts';
 import { remainingDeprecations, resolveChecks, type ResolutionCheck } from './quality.ts';
-import type { VerifyOutcome } from './types.ts';
+import type { Finding, VerifyOutcome } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -399,6 +399,97 @@ export function scanOptionsFor(evalCase: EvalCase): ScanOptions {
 }
 
 /**
+ * What one finished migration is worth, measured against the case that asked
+ * for it.
+ *
+ * Split out of `runCase` so that `scripts/capture-case.ts` can share it. That
+ * script runs a case and keeps the workspace to print the diff, which is the
+ * *only* way it differs — everything else it needs is this, and it had a second
+ * copy of it. The copy had already drifted: it scored against zeroes it filled
+ * in itself, so the number it printed was not the number a sweep would report
+ * for the same run. Two measurements of one thing is one measurement too many.
+ *
+ * Deliberately does not delete the workspace. Whoever passed the result in is
+ * the only one who knows whether anything still has to read it, and a measure
+ * function that deletes its own evidence is why the script could not use this
+ * in the first place.
+ *
+ * `durationMs` is left at zero and belongs to the caller: this measures a
+ * result, not a run, and only `runCase` was holding a clock.
+ */
+export async function measureCase(
+  evalCase: EvalCase,
+  findings: Finding[],
+  result: PackageFixResult,
+  model: string,
+): Promise<CaseOutcome> {
+  const gaps = result.workspaceDir
+    ? await remainingDeprecations(findings, result.workspaceDir)
+    : [];
+  // Measured against the migrated tree, for the same reason the deprecation
+  // gaps are: a case declares what a finished migration looks like, and only
+  // the files it produced can answer whether it got there. A case that declares
+  // nothing asks nothing, and a workspace that is gone could not be asked —
+  // which is `unknown`, not `resolved`.
+  const resolutions = evalCase.mustResolve?.length
+    ? result.workspaceDir
+      ? await resolveChecks(evalCase.mustResolve, result.workspaceDir)
+      : evalCase.mustResolve.map((check) => ({
+          check, state: 'unknown' as const, files: [], reason: 'no workspace was kept',
+        }))
+    : [];
+
+  const unresolved = resolutions.filter((r) => r.state === 'unresolved').map((r) => r.check.symbol);
+  const uncheckable = resolutions
+    .filter((r) => r.state === 'unknown')
+    .map((r) => `${r.check.symbol} — ${r.reason ?? 'unknown'}`);
+
+  // A refusal only makes the run inconclusive when it also failed: a harness
+  // that declined on a migration the deterministic phase already fixed has not
+  // invalidated anything.
+  const passed =
+    result.verification.outcome === 'verified' ||
+    result.verification.outcome === 'typecheck-only';
+  const refused = result.harness && !result.harness.ok ? result.harness.reason : undefined;
+
+  return {
+    caseId: evalCase.id,
+    model,
+    verdict: result.verification.outcome,
+    ...(refused && !passed ? { inconclusive: refused } : {}),
+    editsApplied: result.appliedEdits,
+    // From the harness, which is the only thing that writes now. It reports
+    // reverted hunks rather than withheld edits — same question, and the only
+    // shape there is left to ask it in.
+    editsWithheld: result.harness?.revertedHunks.length ?? 0,
+    ...(unresolved.length > 0 ? { unresolved } : {}),
+    ...(uncheckable.length > 0 ? { uncheckable } : {}),
+    typeEscapes: countTypeEscapes(result.diff),
+    deprecationGaps: gaps.length,
+    // **Not measured.** Nothing counts compiler errors any more — the parser
+    // that did was deleted with the proposer's edit gate — so these stay zero
+    // and `scoreCase` reads a reduction of zero for every engine. The `Err.
+    // reduced` column of `renderSummary` is therefore a column of zeroes rather
+    // than a result. Recorded here, in the one place that fills them, so that
+    // the next person to read that column finds out from the code instead of
+    // from the table: either a counter comes back, or the column goes.
+    errorsBefore: 0,
+    errorsAfter: 0,
+    // Recorded from the run rather than from the request: a harness that was
+    // asked for and declined — an untrusted repository, an unavailable binary
+    // — did not produce these edits and must not be credited with them.
+    ...(result.harness
+      ? {
+          harness: result.harness.id,
+          harnessKept: result.harness.keptHunks,
+          harnessReverted: result.harness.revertedHunks.length,
+        }
+      : {}),
+    durationMs: 0,
+  };
+}
+
+/**
  * Run one case and measure it.
  *
  * The workspace is kept until the metrics are read, because deprecation
@@ -445,61 +536,12 @@ export async function runCase(
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
     });
 
-    const gaps = result.workspaceDir
-      ? await remainingDeprecations(findings, result.workspaceDir)
-      : [];
-    // Measured against the migrated tree, for the same reason the deprecation
-    // gaps are: a case declares what a finished migration looks like, and only
-    // the files it produced can answer whether it got there. A case that declares
-    // nothing asks nothing, and a workspace that is gone could not be asked —
-    // which is `unknown`, not `resolved`.
-    const resolutions = evalCase.mustResolve?.length
-      ? result.workspaceDir
-        ? await resolveChecks(evalCase.mustResolve, result.workspaceDir)
-        : evalCase.mustResolve.map((check) => ({
-            check, state: 'unknown' as const, files: [], reason: 'no workspace was kept',
-          }))
-      : [];
+    // Measured before the workspace goes, then the workspace goes: completeness
+    // and the deprecation gaps can only be read off the migrated files.
+    const outcome = await measureCase(evalCase, findings, result, model);
     if (result.workspaceDir) await rm(result.workspaceDir, { recursive: true, force: true });
 
-    const unresolved = resolutions.filter((r) => r.state === 'unresolved').map((r) => r.check.symbol);
-    const uncheckable = resolutions
-      .filter((r) => r.state === 'unknown')
-      .map((r) => `${r.check.symbol} — ${r.reason ?? 'unknown'}`);
-
-    // A refusal only makes the run inconclusive when it also failed: a harness
-    // that declined on a migration the deterministic phase already fixed has not
-    // invalidated anything.
-    const passed =
-      result.verification.outcome === 'verified' ||
-      result.verification.outcome === 'typecheck-only';
-    const refused = result.harness && !result.harness.ok ? result.harness.reason : undefined;
-
-    return {
-      ...base,
-      verdict: result.verification.outcome,
-      ...(refused && !passed ? { inconclusive: refused } : {}),
-      editsApplied: result.appliedEdits,
-      // From the harness, which is the only thing that writes now. It reports
-      // reverted hunks rather than withheld edits — same question, and the only
-      // shape there is left to ask it in.
-      editsWithheld: result.harness?.revertedHunks.length ?? 0,
-      ...(unresolved.length > 0 ? { unresolved } : {}),
-      ...(uncheckable.length > 0 ? { uncheckable } : {}),
-      typeEscapes: countTypeEscapes(result.diff),
-      deprecationGaps: gaps.length,
-      // Recorded from the run rather than from the request: a harness that was
-      // asked for and declined — an untrusted repository, an unavailable binary
-      // — did not produce these edits and must not be credited with them.
-      ...(result.harness
-        ? {
-            harness: result.harness.id,
-            harnessKept: result.harness.keptHunks,
-            harnessReverted: result.harness.revertedHunks.length,
-          }
-        : {}),
-      durationMs: elapsed(),
-    };
+    return { ...outcome, durationMs: elapsed() };
   } catch {
     return { ...base, durationMs: elapsed() };
   }

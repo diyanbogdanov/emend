@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { checkFires } from '../src/quality.ts';
 import {
+  measureCase,
   scoreCase,
   summarise,
   scanOptionsFor,
@@ -13,6 +14,7 @@ import {
   type CaseOutcome,
   type EvalCase,
 } from '../src/eval.ts';
+import type { PackageFixResult } from '../src/fix.ts';
 
 const zodCase: EvalCase = {
   id: 'zod-3-to-4',
@@ -25,6 +27,52 @@ const zodCase: EvalCase = {
 
 /** The real corpus denominator, for the tests that are about the ceiling. */
 const zodSixCase: EvalCase = { ...zodCase, minimalEdits: 6 };
+
+const okCommand = { command: 'tsc --noEmit', ok: true, exitCode: 0, stdout: '', stderr: '' };
+
+/**
+ * A finished `fixPackage`, for the tests about what measuring one produces.
+ *
+ * `workspaceDir` is null by default because these tests are about the outcome's
+ * shape, not about reading a tree — and a null workspace is itself one of the
+ * states worth pinning.
+ */
+function fixResult(over: Partial<PackageFixResult> = {}): PackageFixResult {
+  return {
+    pkg: 'zod',
+    fromVersion: '3.22.4',
+    toVersion: '4.4.3',
+    findings: [],
+    plans: [],
+    unplanned: [],
+    verification: {
+      outcome: 'verified',
+      baseline: { typecheck: okCommand, test: okCommand },
+      post: { typecheck: okCommand, test: okCommand },
+      summary: 'verified',
+    },
+    diff: '',
+    appliedEdits: 3,
+    failedEdits: [],
+    bump: null,
+    workspaceDir: null,
+    workspaceMode: null,
+    harness: {
+      id: 'opencode',
+      ok: true,
+      log: '',
+      keptHunks: 3,
+      revertedHunks: [
+        {
+          hunk: { file: 'src/schema.ts', start: 1, end: 2 },
+          evidence: 'unrequested',
+          reason: 'no diagnostic on the lines it changed',
+        },
+      ],
+    },
+    ...over,
+  };
+}
 
 function outcome(over: Partial<CaseOutcome> = {}): CaseOutcome {
   return {
@@ -435,4 +483,33 @@ test('every built-in case pins its target, so the corpus is reproducible', () =>
       `${c.id} must migrate to the version its id names`,
     );
   }
+});
+
+test('the engine that did the work is on the outcome, whoever measured it', async () => {
+  // `scripts/capture-case.ts` assembled its own `CaseOutcome` for a while and
+  // left these three fields off it, so a captured run credited its edits to
+  // nobody while a sweep of the identical run credited them correctly. The
+  // attribution is the reason `CaseOutcome` carries a harness at all — a model
+  // and a model-plus-harness are different engines, and a table that cannot tell
+  // them apart cannot be read. One measurement is how the two stay one answer.
+  const outcome = await measureCase(zodCase, [], fixResult(), 'test/model');
+
+  assert.equal(outcome.harness, 'opencode');
+  assert.equal(outcome.harnessKept, 3);
+  assert.equal(outcome.harnessReverted, 1);
+  assert.equal(outcome.editsWithheld, 1, 'reverted hunks are what "withheld" means now');
+});
+
+test('a case that declares completeness and kept no workspace is unknown, never resolved', async () => {
+  // The cardinal rule turned on the thing that measures. There is no tree left
+  // to read, so the migration was not checked — and "not checked" scored as
+  // "finished" is the claim this whole corpus exists to refuse.
+  const outcome = await measureCase(zodCase, [], fixResult({ workspaceDir: null }), 'test/model');
+
+  assert.equal(outcome.unresolved, undefined, 'nothing was found outstanding, because nothing was read');
+  assert.deepEqual(outcome.uncheckable, ['ZodError.errors — no workspace was kept']);
+  assert.ok(
+    scoreCase(zodCase, outcome).penalties.some((p) => /could not check/.test(p)),
+    'and it is said out loud rather than passing quietly',
+  );
 });

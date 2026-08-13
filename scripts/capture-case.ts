@@ -4,20 +4,19 @@
  * `runCase` discards its workspace as soon as the metrics are read, which is
  * right for a sweep and wrong for verifying the scorer: the diff is the
  * evidence, and answering the last denominator question meant re-running a
- * case to get one. This mirrors `runCase`'s computation
- * exactly — same scan options, same `fixPackage` call, same `resolveChecks` and
- * `remainingDeprecations` against the migrated tree — and keeps the diff.
+ * case to get one. So this runs the same scan and the same `fixPackage`, hands
+ * the result to `measureCase` — the measurement `runCase` uses, not a copy of
+ * it — and keeps the workspace long enough to print the diff.
  *
  *   node --experimental-strip-types scripts/capture-case.ts <case-id>
  */
 
 import { rm } from 'node:fs/promises';
-import { BUILT_IN_CASES, materialiseCase, scanOptionsFor, scoreCase, type CaseOutcome } from '../src/eval.ts';
+import { BUILT_IN_CASES, materialiseCase, measureCase, scanOptionsFor, scoreCase } from '../src/eval.ts';
 import { scanRepo } from '../src/analyze.ts';
 import { fixPackage } from '../src/fix.ts';
 import { openCodeHarness } from '../src/harness.ts';
-import { remainingDeprecations, resolveChecks } from '../src/quality.ts';
-import { countTypeEscapes } from '../src/pr.ts';
+import { resolveChecks } from '../src/quality.ts';
 
 const id = process.argv[2];
 const evalCase = BUILT_IN_CASES.find((c) => c.id === id);
@@ -41,50 +40,28 @@ const result = await fixPackage(dir, findings, {
 });
 
 const ws = result.workspaceDir;
-const gaps = ws ? await remainingDeprecations(findings, ws) : [];
+
+// The measurement itself is `runCase`'s, called rather than reproduced. This
+// script held a second copy for a while and it drifted — it left the harness
+// off the outcome entirely and filled the error counts with zeroes of its own —
+// so the score printed here was not the score the sweep would report for the
+// same run, which is the one thing a capture is for.
+const outcome = await measureCase(evalCase, findings, result, model);
+
+// Re-read only for the per-file detail the outcome does not carry: `unresolved`
+// names the symbols, and when a check fires it is the file that says why.
 const resolutions = ws && evalCase.mustResolve?.length
   ? await resolveChecks(evalCase.mustResolve, ws)
   : [];
 
 console.log('\n--- diff ---');
 console.log(result.diff);
-
-console.log('--- hunks, at the two context widths ---');
-const hunksAt = (diff: string): number => (diff.match(/^@@/gm) ?? []).length;
-console.log(`  diff as reported: ${hunksAt(result.diff)} hunk(s)`);
+console.log(`--- ${(result.diff.match(/^@@/gm) ?? []).length} hunk(s), as the pipeline counts them ---`);
 
 console.log('\n--- completeness ---');
 for (const r of resolutions) {
   console.log(`  ${r.state.padEnd(10)} ${r.check.symbol}${r.files.length ? `  (${r.files.join(', ')})` : ''}${r.reason ? `  ${r.reason}` : ''}`);
 }
-
-// A refusal only makes the run inconclusive when it also failed — `runCase`'s
-// rule, copied rather than approximated. Leaving it out scored a run whose engine
-// produced nothing as a migration that failed, which is precisely the claim
-// `inconclusive` was added to stop the benchmark making.
-const passed =
-  result.verification.outcome === 'verified' || result.verification.outcome === 'typecheck-only';
-const refused = result.harness && !result.harness.ok ? result.harness.reason : undefined;
-
-const outcome: CaseOutcome = {
-  caseId: evalCase.id,
-  model,
-  verdict: result.verification.outcome,
-  ...(refused && !passed ? { inconclusive: refused } : {}),
-  editsApplied: result.appliedEdits,
-  editsWithheld: result.harness?.revertedHunks.length ?? 0,
-  ...(resolutions.some((r) => r.state === 'unresolved')
-    ? { unresolved: resolutions.filter((r) => r.state === 'unresolved').map((r) => r.check.symbol) }
-    : {}),
-  ...(resolutions.some((r) => r.state === 'unknown')
-    ? { uncheckable: resolutions.filter((r) => r.state === 'unknown').map((r) => `${r.check.symbol} — ${r.reason}`) }
-    : {}),
-  errorsBefore: 0,
-  errorsAfter: 0,
-  typeEscapes: countTypeEscapes(result.diff),
-  deprecationGaps: gaps.length,
-  durationMs: 0,
-};
 
 const score = scoreCase(evalCase, outcome);
 console.log('\n--- score ---');
