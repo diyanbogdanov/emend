@@ -403,19 +403,23 @@ Dockerfiles, CI config and build scripts that no list of call sites contains, an
 reading those is not an enhancement to the repair — for those findings it *is*
 the repair.
 
-Three things stand between it and your branch:
+Two things stand between it and your branch:
 
-1. **The evidence gate** (`gate.ts`), which consults no model on purpose. Every
-   region the harness changed is checked against what the evidence pointed at,
-   and anything unaccounted for is reverted before verification. What counts as
-   evidence differs per job — a compiler diagnostic for a migration, the
-   migration's own diff for a review, the flagged line for a lint fix — because
-   a review runs on a build that already passes and has no diagnostics to judge
-   against at all.
-2. **Verification**, unchanged: baseline before any edit, apply, re-run, compare.
-   Only `verified` is reported as success.
-3. **A read-only behaviour review**, which reads the result and reports what a
-   green build cannot — whether the change still *means* the same thing.
+1. **Verification**: baseline before any edit, apply, re-run, compare. Only
+   `verified` is reported as success, and it is the backstop that has actually
+   caught things — including a reviewer whose own suggestion broke a migration
+   that had already passed.
+2. **A read-only behaviour review**, which reads the result and answers what a
+   green build cannot: whether the change still *means* the same thing, and
+   whether it was needed at all. Its edits are re-verified, and reverted
+   wholesale if they do not hold.
+
+There used to be a third — a deterministic gate that reverted any region the
+compiler had not pointed at. It was removed once its record could be read: it
+never once withheld a bad change, and the only reverts it ever produced were
+three correct repairs it discarded. `gate.ts` survives to bound *where* the
+reviewer and the linter may write, which is a different question from whether
+an edit was warranted.
 
 Nothing ever touches your working tree. All of it happens in a worktree that is
 thrown away unless it verifies.

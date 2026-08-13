@@ -1716,9 +1716,9 @@ ${c.bold('COMMANDS')}
                     Works on both the drift and vulnerability paths.
     --harness[=m]   Pin the harness's provider/model. The harness is ON by
                     default and is the only thing that changes code: it works in
-                    an isolated worktree with tools, and every region it writes
-                    is held to the evidence rule — anything the failure did not
-                    ask for is reverted before the result is verified.
+                    an isolated worktree with tools, and what it writes is judged
+                    afterwards — by a read-only reviewer for whether the change
+                    was needed, and by verification for whether it works.
                     Requires the 'opencode' binary. Without it nothing is
                     repaired, and the run says so rather than reporting a clean
                     scan.

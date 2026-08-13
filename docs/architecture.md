@@ -270,7 +270,7 @@ wrong answer gets:
 | Verb | What it is | Why a wrong answer is contained |
 | --- | --- | --- |
 | `ask(system, user)` | Messages in, text out. **Never touches the checkout.** | The caller interprets the answer. Used for PR summaries and read-only reviews — work that is reported, not applied. |
-| `run(dir, task)` | A subprocess with tools, working in a directory. **The only thing that changes a file.** | It writes first and is judged after, by `gate.ts`: any changed region the evidence did not ask for is reverted before verification. |
+| `run(dir, task)` | A subprocess with tools, working in a directory. **The only thing that changes a file.** | It writes first and is judged after — by a read-only reviewer for whether the change was needed, and by verification for whether it works. `gate.ts` bounds where those later passes may write, not whether the repair was warranted. |
 
 That split is why the structured path was not folded into the harness when the
 two were unified. Byam's 27% is the case for keeping a constrained strategy;

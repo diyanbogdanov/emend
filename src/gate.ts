@@ -16,8 +16,6 @@
  * one.
  */
 
-import type { CallSite, SurfaceChange } from './types.ts';
-
 export interface Diagnostic {
   file: string;
   line: number;
