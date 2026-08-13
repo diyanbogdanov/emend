@@ -57,10 +57,19 @@ for (const r of resolutions) {
   console.log(`  ${r.state.padEnd(10)} ${r.check.symbol}${r.files.length ? `  (${r.files.join(', ')})` : ''}${r.reason ? `  ${r.reason}` : ''}`);
 }
 
+// A refusal only makes the run inconclusive when it also failed — `runCase`'s
+// rule, copied rather than approximated. Leaving it out scored a run whose engine
+// produced nothing as a migration that failed, which is precisely the claim
+// `inconclusive` was added to stop the benchmark making.
+const passed =
+  result.verification.outcome === 'verified' || result.verification.outcome === 'typecheck-only';
+const refused = result.harness && !result.harness.ok ? result.harness.reason : undefined;
+
 const outcome: CaseOutcome = {
   caseId: evalCase.id,
   model,
   verdict: result.verification.outcome,
+  ...(refused && !passed ? { inconclusive: refused } : {}),
   editsApplied: result.appliedEdits,
   editsWithheld: result.harness?.revertedHunks.length ?? 0,
   ...(resolutions.some((r) => r.state === 'unresolved')
