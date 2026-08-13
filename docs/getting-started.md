@@ -13,18 +13,18 @@ as a service, [deployment.md](deployment.md).
 | **Node 22.6+** | Required. Emend runs TypeScript directly via native type stripping — there is no build step. `node --version` to check. |
 | **git** | Migrations run in a throwaway `git worktree`. |
 | An LLM endpoint | Optional to start, on by default when configured. Any OpenAI-compatible endpoint, including a local Ollama or vLLM. |
-| `GITHUB_TOKEN` | Only for `--contracts`. Unauthenticated GitHub allows 60 requests an hour, which one scan can exhaust. |
-| `opencode` | Only for `--drive` and the behaviour review. Skipped with a message if absent. |
+| `GITHUB_TOKEN` | For `--contracts` and `emend pr --create`. Unauthenticated GitHub allows 60 requests an hour, which one scan can exhaust. |
+| `opencode` | Required for any model-driven repair — the harness is the only thing that changes code, and there is no fallback. Without it Emend scans, plans and verifies deterministically, and says what it could not attempt rather than reporting a clean run. |
 
 ---
 
 ## 2. Install
 
 ```bash
-git clone <this repo> emend && cd emend
+git clone https://github.com/diyanbogdanov/emend.git && cd emend
 npm install          # two runtime dependencies: typescript, yaml
 npm run typecheck    # should print nothing
-npm test             # 577 tests
+npm test             # the whole suite, ~35s; one test installs from the npm registry
 ```
 
 Then either invoke it directly:
@@ -60,8 +60,9 @@ emend scan /tmp/emend-demo --only zod
     + 1210 other breaking change(s) in this upgrade do not appear anywhere in your code
 ```
 
-The last line is the point. zod 4 ships roughly 1,215 breaking changes and five
-touch this repository.
+The last line is the point. zod 4 ships roughly 1,215 breaking changes; the two
+shown here break this repository, and the full output lists three deprecations
+beside them. Everything downstream operates on those five.
 
 Now migrate one and watch it get verified:
 

@@ -212,6 +212,12 @@ answer. Measured across two vendors, 5 of 11 offered parameters were that.
 | `emend eval` | Measure the agent against a corpus |
 | `emend serve` | Local dashboard |
 | `emend models` | List models your LLM provider serves |
+| `emend mcp` | Serve Emend's tools over MCP stdio, so a coding agent can drive it |
+
+`emend mcp` exposes seven tools — `scan`, `plan_remediation`, `fix_vulnerability`,
+`fix_package`, `verify`, `advisory_status`, `impact` — and every one returns what
+was *measured*, never a judgement: an agent claiming a vulnerability is fixed has
+to call `advisory_status` and read the lockfile's answer.
 
 `emend scan --features` answers the other half of the question: not what broke,
 but what *arrived*. It lists new top-level exports in packages you already
@@ -222,8 +228,11 @@ in your repository is affected either way.
 
 Useful flags: `--only pkg,pkg`, `--all`, `--json`, `--no-dev`, `--contracts`,
 `--features`, `--freshness`, `--vulns`, `--lint` (scan);
-`--finding <id>`, `--no-agent`, `--no-review`, `--drive`, `--keep` (fix);
-`--create` (pr); `--model a,b`, `--repeat n`, `--cases <file>` (eval).
+`--finding <id>`, `--no-agent`, `--no-review`, `--drive`, `--untrusted`,
+`--keep` (fix); `--create` (pr); `--model a,b`, `--repeat n`, `--cases <file>`
+(eval). `--untrusted` treats the repository as hostile — no lifecycle scripts,
+no test script, no model session in the checkout; it is what the hosted service
+sets for every repository, and `emend --help` has the full list.
 
 ---
 

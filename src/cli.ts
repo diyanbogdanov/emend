@@ -140,6 +140,9 @@ function harnessFrom(args: Args): Harness | undefined {
   const flag = args.flags.get('harness');
   if (flag === false || args.flags.get('no-harness') === true) return undefined;
   if (!agentAllowed(args)) return undefined;
+  // `--untrusted` promises that no model session enters the checkout, so the
+  // writer is refused at construction rather than trusted to decline later.
+  if (args.flags.get('untrusted') === true) return undefined;
   return repairHarness(typeof flag === 'string' ? { pinned: flag } : {});
 }
 
@@ -181,6 +184,7 @@ function reviewHarnessFrom(args: Args): Harness | undefined {
   const flag = args.flags.get('review');
   if (args.flags.get('no-review') === true) return undefined;
   if (flag === false) return undefined;
+  if (args.flags.get('untrusted') === true) return undefined;
   // A separate session from any repair harness, deliberately. A model reviewing
   // its own work argues for it; one that never saw the reasoning has only the
   // code. `--review=<provider/model>` pins the reviewer independently.
@@ -195,10 +199,8 @@ function reviewHarnessFrom(args: Args): Harness | undefined {
     // comparing the workspace before and after and discarding the findings of a
     // session that changed anything — evidence rather than configuration. What
     // does widen is reach outside the checkout: `webfetch` is denied but bash
-    // could still curl. Nothing here enforces that against an untrusted
-    // checkout — what keeps this path out of one today is that the hosted
-    // runner never constructs a review harness. If that changes, this is the
-    // sentence that must become a `harnessPermitted` check.
+    // could still curl — which is why `--untrusted` refuses this harness at
+    // construction above, and why the hosted runner never constructs one.
     allowBash: true,
     ...(typeof flag === 'string' ? { model: flag } : {}),
   });
@@ -836,6 +838,7 @@ async function runLintFixes(repoDir: string, findings: Finding[], args: Args): P
   console.log(c.bold('  lint') + c.dim(`  (${findings.length} finding(s))`));
   const result = await fixLint(repoDir, findings, {
     keepWorkspace: args.flags.get('keep') === true,
+    untrusted: args.flags.get('untrusted') === true,
     useAgent: agentAllowed(args),
     onProgress: (m) => console.log(c.dim(`    ${m}`)),
   });
@@ -879,6 +882,7 @@ async function runFreshnessFixes(repoDir: string, findings: Finding[], args: Arg
     );
     const result = await fixFreshness(repoDir, finding, {
       keepWorkspace: args.flags.get('keep') === true,
+      untrusted: args.flags.get('untrusted') === true,
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
     const ok = result.verification !== null && verificationPassed(result.verification.outcome);
@@ -904,6 +908,7 @@ async function runPinFixes(repoDir: string, findings: Finding[], args: Args): Pr
   console.log(c.bold(`  version pins`) + c.dim(`  (${findings.length} drifted)`));
   const result = await fixPins(repoDir, {
     keepWorkspace: args.flags.get('keep') === true,
+    untrusted: args.flags.get('untrusted') === true,
     onProgress: (m) => console.log(c.dim(`    ${m}`)),
   });
   const ok = verificationPassed(result.verification.outcome);
@@ -961,6 +966,7 @@ async function runVulnerabilityFixes(
 
     const result = await fixVulnerability(repoDir, finding, {
       keepWorkspace: args.flags.get('keep') === true,
+      untrusted: args.flags.get('untrusted') === true,
       // Without this the repair loop is unreachable and a security bump that
       // breaks the build is reported as unfixable by the one tool here that
       // knows how to fix it.
@@ -1110,6 +1116,7 @@ async function runPackageFixes(
     const harness = harnessFrom(args);
     const result = await fixPackage(repoDir, findings, {
       keepWorkspace: args.flags.get('keep') === true,
+      untrusted: args.flags.get('untrusted') === true,
       useAgent: agentAllowed(args),
       ...(harness ? { harness } : {}),
       ...(ctx.reviewHarness ? { reviewHarness: ctx.reviewHarness } : {}),
@@ -1293,6 +1300,7 @@ async function cmdPr(args: Args): Promise<number> {
   console.log(c.dim('  re-running fix to produce a verified PR body...'));
   const prHarness = harnessFrom(args);
   const result = await fixFinding(repoDir, stored.finding, {
+    untrusted: args.flags.get('untrusted') === true,
     // Without this, `emend pr --agent` silently re-ran deterministic-only and
     // rendered "unverified / needs a human" for a migration that had just
     // verified under `emend fix --agent`.
@@ -1453,6 +1461,7 @@ async function cmdPins(args: Args): Promise<number> {
   const repoDir = path.resolve(args.positional[0] ?? '.');
   const result = await fixPins(repoDir, {
     keepWorkspace: args.flags.get('keep') === true,
+    untrusted: args.flags.get('untrusted') === true,
     onProgress: (m) => console.log(c.dim(`  ${m}`)),
   });
 
@@ -1748,6 +1757,14 @@ ${c.bold('COMMANDS')}
                     the elegance of a migration that never finished.
     --no-review     Skip that pass. It is the only one that reads what a change
                     means rather than what it says, so skipping it is a choice.
+    --no-harness    Turn the harness off without touching the rest of the model
+                    config. Same effect as --harness=false.
+    --untrusted     Treat the repository as hostile: lifecycle scripts are
+                    skipped, its test script never runs (verification is
+                    typecheck-only, and says so), and no model session enters
+                    the checkout — the writer and the reviewer are both refused.
+                    This is what the hosted service sets for every repository.
+                    Also accepted by 'pr' and 'pins'.
     --keep          Leave the workspace on disk for inspection
 
   models          List models your configured LLM provider serves.
@@ -1772,6 +1789,13 @@ ${c.bold('COMMANDS')}
                   .nvmrc, engines and CI node versions — and verify the build.
                   Deterministic: no model is involved.
     --keep          Leave the workspace on disk for inspection.
+
+  mcp             Serve Emend's tools over MCP on stdio, so a coding agent can
+                  drive it: scan, plan_remediation, fix_vulnerability,
+                  fix_package, verify, advisory_status, impact. Every tool
+                  returns what was measured, never a judgement — an agent
+                  claiming a fix must call advisory_status and read the
+                  lockfile's answer.
 
   eval            Measure the agent against a corpus. Reports pass rate, clean
                   rate, edit ratio and error reduction per model, so an agent

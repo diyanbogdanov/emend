@@ -77,7 +77,7 @@ async function unavailableWriter(
   progress: (message: string) => void,
 ): Promise<Harness | undefined> {
   if (!harness) {
-    progress('  no harness: nothing can be repaired — this run was --no-agent');
+    progress('  no harness: nothing can be repaired — the model was switched off (--no-agent or --untrusted)');
     return undefined;
   }
   const status = await harness.available();

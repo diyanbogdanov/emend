@@ -377,15 +377,19 @@ Ollama or vLLM. The recommended defaults are open-weight.
 
 ```
 src/
+  types.ts        the plain-data vocabulary every stage consumes and produces
+
   ── detection ───────────────────────────────────────────────
   registry.ts     npm metadata, tarball download + cache
   lockfile.ts     package-lock.json -> resolved versions + install tree
   vendor.ts       reconstruct node_modules from the lockfile, no install
   inventory.ts    repo -> installed dependency versions
+  workspaces.ts   every manifest directory a monorepo declares
   surface.ts      .d.ts -> public API surface (breadth-first, canonical paths)
   diff.ts         surface x surface -> classified changes
   specs.ts        resolve a vendor's OpenAPI description, with provenance
   specfetch.ts    fetch and cache it
+  github.ts       find the description in the vendor's OWN GitHub organisation
   specdiff.ts     description x description -> route changes
   osv.ts          known vulnerabilities
   advisory.ts     advisory metadata and reachability
@@ -423,6 +427,7 @@ src/
   github/         App auth, webhook intake, job runner, API pull requests
   llm/tasks.ts    the four jobs, each as skills + instructions + a renderer
   llm/skills.ts   instruction fragments, named once and shared by reference
+  llm/skillfiles.ts  on-disk skills (SKILL.md + frontmatter) — what --review-skill loads
   llm/symbols.ts  symbols the new version really exports, to ground a replacement
   llm/client.ts   the HTTP transport
   llm/providers.ts provider presets
@@ -471,7 +476,7 @@ first.
 ## 7. Testing
 
 ```bash
-npm test            # 578 tests, node:test, no framework
+npm test            # the whole suite; node:test, no framework
 npm run typecheck   # tsc --noEmit; the real gate
 npm run audit:removals
 ```
