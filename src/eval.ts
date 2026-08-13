@@ -23,9 +23,9 @@
 import { rm, readFile, mkdtemp, cp } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { emendPath } from './paths.ts';
 import { scanRepo, type ScanOptions } from './analyze.ts';
 import { fixPackage, type PackageFixResult } from './fix.ts';
 import type { Harness } from './harness.ts';
@@ -804,8 +804,7 @@ export async function materialiseCase(evalCase: EvalCase): Promise<string> {
     await execFileAsync('git', ['clone', '--quiet', url, dir]);
     await execFileAsync('git', ['-C', dir, 'checkout', '--quiet', ref]);
   } else {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const template = path.resolve(here, '..', 'fixtures', evalCase.repo.name);
+    const template = emendPath('fixtures', evalCase.repo.name);
     for (const entry of ['package.json', 'tsconfig.json', '.gitignore', 'src', 'test']) {
       await cp(path.join(template, entry), path.join(dir, entry), { recursive: true }).catch(
         () => {},

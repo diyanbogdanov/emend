@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 import { mkdir, readdir, cp, access, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { emendPath } from './paths.ts';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
 import { reintroduced } from './remediate.ts';
@@ -65,6 +65,18 @@ import {
 import type { CallSite, Finding, ScanReport } from './types.ts';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * How a driving session re-enters Emend to reach its MCP tools.
+ *
+ * Through the launcher, not through this file. `bin/emend.mjs` is where the
+ * knowledge of how to start Emend lives — which runtime flags are needed, and
+ * whether it is the bundle or the sources being run — and naming
+ * `import.meta.url` here kept a second copy of that in the one module
+ * guaranteed to stop being the entry point the moment anything is bundled. It
+ * was already spelled out twice, identically, which is the usual sign.
+ */
+const MCP_COMMAND = [process.execPath, emendPath('bin', 'emend.mjs'), 'mcp'];
 
 // Credentials live in `.env` during development. Node loads it natively, so this
 // costs no dependency. Real environment variables already set are not
@@ -720,12 +732,7 @@ async function fixWireContracts(repoDir: string, findings: Finding[], args: Args
 
   const harness = drivingHarness({
     ...(typeof model === 'string' ? { model } : {}),
-    emendCommand: [
-      process.execPath,
-      '--experimental-strip-types',
-      fileURLToPath(import.meta.url),
-      'mcp',
-    ],
+    emendCommand: MCP_COMMAND,
   });
   const availability = await harness.available();
   if (!availability.ok) {
@@ -1048,12 +1055,7 @@ async function driveOneFinding(repoDir: string, finding: Finding, args: Args): P
   const model = args.flags.get('drive');
   const harness = drivingHarness({
     ...(typeof model === 'string' ? { model } : {}),
-    emendCommand: [
-      process.execPath,
-      '--experimental-strip-types',
-      fileURLToPath(import.meta.url),
-      'mcp',
-    ],
+    emendCommand: MCP_COMMAND,
   });
   const availability = await harness.available();
   if (!availability.ok) {
@@ -1803,8 +1805,7 @@ async function cmdEval(args: Args): Promise<number> {
 }
 
 async function cmdDemo(args: Args): Promise<number> {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const template = path.resolve(here, '..', 'fixtures', 'demo-repo');
+  const template = emendPath('fixtures', 'demo-repo');
   const dest = path.resolve(args.positional[0] ?? './emend-demo');
 
   if (await exists(dest)) {

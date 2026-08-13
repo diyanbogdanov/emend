@@ -41,3 +41,47 @@ jobs:
       # It skips honestly when the registry is unreachable, so an npm outage
       # degrades this lane rather than failing it.
       - run: npm test
+
+  # Everything above runs the sources from a checkout, which is the one place
+  # Emend is guaranteed to work: Node strips types outside `node_modules` and
+  # refuses to inside it. So a green suite says nothing whatsoever about whether
+  # the published package runs, and the first version very nearly went out
+  # failing `emend --help` on every machine that installed it.
+  #
+  # This lane is that missing claim. It installs the tarball the way a user
+  # would and runs the two commands the README opens with.
+  package:
+    name: installs and runs (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      # `prepack` bundles, so this is also the check that the build works.
+      - run: npm pack --pack-destination /tmp
+      - name: install the tarball into a bare project
+        run: |
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y > /dev/null
+          npm install /tmp/emend-cli-*.tgz
+      # Not `--version`: this has to load the module graph. `BUILT_IN_SKILLS`
+      # reads `skills/` at import time, so a package that shipped without them —
+      # or resolved them by counting `..` from a file the bundler moved — dies
+      # here rather than in front of somebody.
+      - name: emend --help
+        run: cd /tmp/consumer && ./node_modules/.bin/emend --help
+      # The other half of what ships beside the code: `fixtures/`, which this
+      # copies out. It was missing from `files` entirely until the packaging was
+      # tested, so the README's first command failed on a fresh install.
+      - name: emend demo
+        run: |
+          cd /tmp/consumer
+          ./node_modules/.bin/emend demo ./demo
+          test -f ./demo/package.json

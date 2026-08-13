@@ -28,14 +28,18 @@
   },
   "files": [
     "bin",
+    "dist",
     "src",
     "skills",
+    "fixtures",
     "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {
     "node": ">=22.6"
   },
   "scripts": {
+    "build": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/build.ts",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning test/*.test.ts",
     "emend": "node bin/emend.mjs",
@@ -47,7 +51,8 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0"
   },
   "private": false
 }
