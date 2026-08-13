@@ -45,13 +45,13 @@ emend eval --model <model> --repeat 3
 
 and put the before and after tables in the pull request. A prompt change without
 a measurement is a guess, and this repository has a documented history of guesses
-that turned out backwards. `docs/research/llm-harness.md` records the sweeps so
-far.
+that turned out backwards — including one this week that was argued from sound
+reasoning and settled the other way by reading a diff.
 
 ## What the code expects of you
 
-`CLAUDE.md` and the specs under `docs/specs/` describe the design. Two
-conventions matter more than the rest:
+`CLAUDE.md` describes the design, and the module headers carry the reasoning for
+the decisions they implement. Two conventions matter more than the rest:
 
 **Never report something unverified as safe.** A package with no type
 declarations is `unanalyzable`, not `clean`. A verification that did not run is

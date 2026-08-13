@@ -1,9 +1,9 @@
 /**
  * Measuring the agent, so that changing it is a decision rather than a hope.
  *
- * Two model comparisons have been run by hand — zod in `docs/research/llm-harness.md`
- * and recharts in the pull request that added model defaults — and neither can be
- * compared to the other or re-run to check that a later change did not regress it.
+ * Two model comparisons were run by hand — zod, and recharts in the pull request
+ * that added model defaults — and neither could be compared to the other or
+ * re-run to check that a later change did not regress it.
  * In between, the agent gained type-strength rules, partial-progress rollback, a
  * tightening pass, a review pass and an evidence gate, none of it under a gate.
  *

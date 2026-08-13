@@ -10,3 +10,11 @@ fixtures/demo-repo/node_modules/
 fixtures/demo-repo/package-lock.json
 fixtures/openai-repo/package-lock.json
 fixtures/react-query-repo/package-lock.json
+# Design records and measurement notes, kept local.
+# They are working documents rather than published ones; the decisions that
+# matter to a reader of this repository are in the code and its comments.
+docs/specs/
+docs/research/
+
+.sensez/
+.omo/

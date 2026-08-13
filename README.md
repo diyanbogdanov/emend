@@ -432,17 +432,14 @@ thrown away unless it verifies.
 **What this gave up, stated plainly.** Emend used to have the model propose
 `find`/`replace` pairs which it located and applied, so an invented `find`
 matched nothing and was rejected before a byte was written — it failed closed.
-That property is gone, traded for tools and a materially better fix rate. The
-reasoning, the cost and the measurements are in
-[`docs/specs/2026-08-12-model-boundary.md`](docs/specs/2026-08-12-model-boundary.md) §11.
+That property is gone, traded for tools and a materially better fix rate. What
+replaced it is verification and a read-only reviewer, described below.
 
 This follows the literature rather than the intuition: Byam (arXiv 2505.07522)
 found end-to-end LLM migration fully repaired only **27%** of builds, improving
 markedly when given API diffs, failing lines and compiler feedback — all of which
 the harness is given. BigBag (arXiv 2606.24446) drives its agent through a
-harness for **78.6%**. See
-[`docs/research/llm-harness.md`](docs/research/llm-harness.md) for the full
-provider and harness analysis.
+harness for **78.6%**.
 
 ---
 
@@ -539,9 +536,8 @@ caught only when someone read a pull request and asked why the diff was empty.
 
 MVP / proof of concept. TypeScript + npm + GitHub only. Scanning, migration and
 pull requests are exercised against a real private repository; the GitHub App
-token exchange is the one link only a registered App can validate. See
-[`docs/specs/emend-mvp.md`](docs/specs/emend-mvp.md) §10 for what is deliberately
-out of scope, and its Appendix A for the product decisions still open.
+token exchange is the one link only a registered App can validate. What is
+deliberately out of scope is listed under Known limitations below.
 
 ---
 
