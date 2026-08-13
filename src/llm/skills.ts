@@ -28,10 +28,10 @@ export interface Skill {
  * How a job that writes files reports what it did.
  *
  * Replaces the JSON edit-set contract the four tasks shared until the harness
- * became the only writer. That
- * contract existed because a proposer had to hand its work to a parser; an agent
- * working in the checkout has no parser between it and the disk, and telling it
- * to emit JSON is telling it to describe a change instead of making one.
+ * became the only writer. That contract existed because a proposer had to hand
+ * its work to a parser; an agent working in the checkout has no parser between
+ * it and the disk, and telling it to emit JSON is telling it to describe a
+ * change instead of making one.
  *
  * The three things the old contract carried are kept, because each was load
  * bearing and none of them was about JSON: a rationale, a confidence, and the

@@ -8,8 +8,8 @@
  * unless its `find` string matches uniquely, so a hallucinated one is rejected
  * by construction, and an agent with write access has no such constraint.
  *
- * The condition of adopting one is therefore that the evidence gate
- * moves from proposed edits to diff hunks — same rule, different input. That is
+ * The condition of adopting one is therefore that the evidence gate moves from
+ * proposed edits to diff hunks — same rule, different input. That is
  * what this module is: `classifyHunks` already answers the question, and here it
  * is given something to act on. Anything the current failure does not ask for is
  * reverted where it stands, before the result is verified or reported.
@@ -935,14 +935,14 @@ export function systemPrompt<Ctx>(task: Task<Ctx>): string {
 /**
  * Run one job in a checkout. **The only way anything in Emend changes code.**
  *
- * The one-writer rule. There used to be two writers — a
- * proposer whose `find` strings Emend located and applied, and a harness that
- * wrote directly — and keeping both meant two gates, two failure vocabularies
- * and two things to improve whenever repair got better.
+ * The one-writer rule. There used to be two writers — a proposer whose `find`
+ * strings Emend located and applied, and a harness that wrote directly — and
+ * keeping both meant two gates, two failure vocabularies and two things to
+ * improve whenever repair got better.
  *
- * What collapsing them traded is not small: the proposer failed
- * closed, because an invented `find` matches nothing and is rejected before a
- * byte is written. A harness writes first. Standing in its place are `gate`,
+ * What collapsing them traded is not small: the proposer failed closed, because
+ * an invented `find` matches nothing and is rejected before a byte is written.
+ * A harness writes first. Standing in its place are `gate`,
  * which reverts every changed region the evidence did not ask for, and the
  * verification that follows in a throwaway worktree — which is the real
  * backstop, and does not care who wrote the bytes.
@@ -967,11 +967,10 @@ export async function runTask<Ctx>(
  * here and nowhere else.
  *
  * What used to be re-exported alongside it was the whole structured strategy —
- * a proposer, its parser and its edit gate. The one-writer decision removed
- * it: `run` is the only
- * verb that changes a file, and `ask` survives for work that never touches the
- * checkout. `nearbySymbols` is neither; it reads a surface Emend already
- * extracted, and it is here because the tasks it grounds are.
+ * a proposer, its parser and its edit gate. The one-writer decision removed it:
+ * `run` is the only verb that changes a file, and `ask` survives for work that
+ * never touches the checkout. `nearbySymbols` is neither; it reads a surface
+ * Emend already extracted, and it is here because the tasks it grounds are.
  */
 export { nearbySymbols } from './llm/symbols.ts';
 export {

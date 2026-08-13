@@ -1,11 +1,12 @@
 /**
  * Capability that arrived while nobody was reading the changelog.
  *
- * The problem this project was built for has two halves. One is breakage,
- * which is the rest of this codebase. The other is that *useful features quietly launch and go
- * unnoticed*, and until now npm answered it barely at all: `diffSurfaces` has
- * always emitted a change per new symbol — `kind: 'added'`, `severity:
- * 'feature'` — and `consumerImpacting` has always dropped every one of them.
+ * The problem this project was built for has two halves. One is breakage, which
+ * is the rest of this codebase. The other is that *useful features quietly
+ * launch and go unnoticed*, and until now npm answered it barely at all:
+ * `diffSurfaces` has always emitted a change per new symbol — `kind: 'added'`,
+ * `severity: 'feature'` — and `consumerImpacting` has always dropped every one
+ * of them.
  *
  * That filter is right for its own purpose. Its output feeds call-site
  * matching, and a symbol absent from your code has no call sites to match. The

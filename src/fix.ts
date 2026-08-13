@@ -566,10 +566,10 @@ const MAX_COLLATERAL_FILES = 16;
  * An upgrade can break a file that contains no call site at all. One scanned
  * repository asserts its Dockerfile's Playwright image tag matches package.json,
  * so bumping the dependency fails a test in a file the call-site walk never
- * visits — and
- * the agent, shown only call-site files, correctly declined because it could not
- * see what was wrong. Feeding it the files the failure actually names closes
- * that gap without guessing at what else might be relevant.
+ * visits — and the agent, shown only call-site files, correctly declined
+ * because it could not see what was wrong. Feeding it the files the failure
+ * actually names closes that gap without guessing at what else might be
+ * relevant.
  */
 async function filesNamedInOutput(output: string, repoDir: string): Promise<string[]> {
   const found = new Set<string>();

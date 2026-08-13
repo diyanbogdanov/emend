@@ -131,8 +131,8 @@ export function touchedLines(diff: string): Diagnostic[] {
 /**
  * The repair's own hunks: keep all of them, and let the reviewer judge.
  *
- * This replaced `migrationGate`, which decided this badly enough
- * that deleting it removed no protection. Its only rule on the repair path was
+ * This replaced `migrationGate`, which decided this badly enough that deleting
+ * it removed no protection. Its only rule on the repair path was
  * that a hunk landing on a call site the compiler was content with is
  * unrequested; `unanchored: 'allow'` made everything else `evidenced` by
  * construction. Across the whole record it reverted nothing correctly and three
@@ -201,9 +201,9 @@ export function lintGate(findings: ReadonlyArray<Diagnostic>): HunkGate {
  * A harness with filesystem access cannot be gated by inspecting proposed
  * `find`/`replace` pairs, because it never proposes any — it writes. The only
  * artefact it leaves behind is the diff, so the gate reads that instead. This is
- * the precondition on adopting one: the fail-closed
- * property is what an agent with write access costs, and it is only recoverable
- * if the gate can judge a diff.
+ * the precondition on adopting one: the fail-closed property is what an agent
+ * with write access costs, and it is only recoverable if the gate can judge a
+ * diff.
  *
  * Line numbers come from the `+` side of the `@@` header, because that is the
  * state on disk and the state the compiler reports against.

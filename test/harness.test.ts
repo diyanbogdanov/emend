@@ -311,8 +311,8 @@ test('changes a few lines apart are judged separately, not as one region', async
 });
 
 test('when nothing is evidenced the harness’s work stands, and verification judges it', async () => {
-  // The carve-out `selectEvidencedEdits` makes, for the same reason. If the gate
-  // can justify none of the hunks, reverting all of them turns a possible repair
+  // The carve-out the old proposer's edit gate made, for the same reason. If the
+  // gate can justify none of the hunks, reverting all of them turns a possible repair
   // into a guaranteed no-op — and the gate is not certain enough for that, since
   // it only knows about call sites Emend itself found. Verification is still
   // downstream and still has the final say.
