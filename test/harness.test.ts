@@ -351,6 +351,86 @@ test('a harness that changed nothing says so, rather than reporting success', as
   }
 });
 
+test('a clean session that wrote nothing is named as such, not as a generic refusal', async () => {
+  // The only reliability defect in a twelve-run sweep: opencode ran for $0.32
+  // with credits to spare, emitted no error, and wrote no files. `run.ok` was
+  // true — the engine finished believing it was done.
+  //
+  // That is the branch that needs the explanation most, and it was the branch
+  // carrying none: an engine that *failed* has already told us why, while one
+  // that succeeded and did nothing has not. §16.14.
+  const f = await gitFixture({ 'a.txt': BASE });
+  try {
+    const harness = fakeHarness({}, {
+      run: async () => ({ ok: true, log: 'raw events', summary: 'Everything already looked migrated to me.' }),
+    });
+    const result = await escalate(harness, f.dir, { instruction: 'x', failureOutput: FAILURE }, GATE);
+
+    assert.equal(result.ok, false);
+    assert.match(result.reason ?? '', /reported success and changed nothing/);
+    assert.match(
+      result.reason ?? '',
+      /Everything already looked migrated/,
+      'the task asks the model to say why it changed nothing; that answer has to survive',
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('a session that failed keeps its error rather than being called a silent no-op', async () => {
+  // The other empty-diff case, and it must stay distinguishable: §15.4's run
+  // stopped outright on exhausted credits, which is a fact about the account
+  // rather than about the migration, and reads nothing like a model that
+  // considered the work done.
+  const f = await gitFixture({ 'a.txt': BASE });
+  try {
+    const harness = fakeHarness({}, {
+      run: async () => ({ ok: false, log: '', summary: '', error: 'requires more credits' }),
+    });
+    const result = await escalate(harness, f.dir, { instruction: 'x', failureOutput: FAILURE }, GATE);
+
+    assert.equal(result.ok, false);
+    assert.match(result.reason ?? '', /requires more credits/);
+    assert.doesNotMatch(result.reason ?? '', /reported success/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('the engine\'s last word is clipped, since it is rendered in a table cell', async () => {
+  // `reason` reaches `CaseOutcome.inconclusive`, which `renderSummary` puts in a
+  // row. An unbounded model monologue there destroys the table it is supposed to
+  // explain, and a multi-line one breaks the markdown outright.
+  const f = await gitFixture({ 'a.txt': BASE });
+  try {
+    const harness = fakeHarness({}, {
+      run: async () => ({ ok: true, log: '', summary: `first line\n${'x'.repeat(400)}` }),
+    });
+    const result = await escalate(harness, f.dir, { instruction: 'x', failureOutput: FAILURE }, GATE);
+
+    const reason = result.reason ?? '';
+    assert.doesNotMatch(reason, /\n/, 'a newline would break the row it lands in');
+    assert.ok(reason.length < 260, `reason should stay row-sized; got ${reason.length}`);
+    assert.match(reason, /…/, 'and say that it was cut rather than appear complete');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('a no-op with nothing to say is still named, without inventing an explanation', async () => {
+  // A harness with no summarising step has no `summary`, and `log` is documented
+  // as lossless noise. Quoting the log into a table cell would contradict that
+  // field's own contract, so the reason says less rather than saying junk.
+  const f = await gitFixture({ 'a.txt': BASE });
+  try {
+    const result = await escalate(fakeHarness({}), f.dir, { instruction: 'x', failureOutput: FAILURE }, GATE);
+    assert.match(result.reason ?? '', /reported success and changed nothing$/);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('an unavailable harness is refused loudly, never skipped quietly', async () => {
   // Same rule `fixPackage` already applies to an unavailable LLM: asking for a
   // harness and silently not getting one makes the run look like the harness
