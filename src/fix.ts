@@ -47,7 +47,7 @@ import {
   type Harness,
 } from './harness.ts';
 import {
-  migrationGate,
+  reviewerDecides,
   reviewGate,
   lintGate,
   parseDiffHunks,
@@ -320,7 +320,7 @@ async function repairTightening(
       sources: await loadSources(dir, finding, extraFiles),
       errors,
     },
-    migrationGate([], errors),
+    reviewerDecides(),
   );
   if (!run.ok) {
     progress(`    tightening repair unavailable: ${run.reason ?? 'unknown error'}`);
@@ -800,11 +800,7 @@ export async function fixPackage(
             candidateSymbols: candidates,
             failureOutput,
           },
-          migrationGate(
-            findings.map((f) => ({ change: f.change, sites: f.sites })),
-            failureOutput,
-            stillDeprecated,
-          ),
+          reviewerDecides(),
         );
 
         harnessRecord = {

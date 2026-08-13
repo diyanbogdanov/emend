@@ -1,4 +1,5 @@
-import { parseDiffHunks, migrationGate } from '../src/gate.ts';
+import { parseDiffHunks } from '../src/gate.ts';
+import type { HunkGate } from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -19,7 +20,6 @@ import {
   type HarnessRun,
   repairHarness,
 } from '../src/harness.ts';
-import type { CallSite, SurfaceChange } from '../src/types.ts';
 
 /** execFile, not exec: argument arrays, never a shell string. */
 const run = promisify(execFile);
@@ -173,21 +173,6 @@ test('reverting nothing touches nothing', async () => {
 // escalate — the gate around a harness that writes files
 // ---------------------------------------------------------------------------
 
-function change(path: string, kind: SurfaceChange['kind']): SurfaceChange {
-  return {
-    path,
-    kind,
-    severity: kind === 'deprecated' ? 'deprecation' : 'breaking',
-    confidence: 'high',
-    before: 'before',
-    after: 'after',
-  };
-}
-
-function site(file: string, line: number): CallSite {
-  return { file, line, column: 1, text: '', via: 'import' };
-}
-
 /** A harness that performs a fixed set of writes, so the gate is what is tested. */
 function fakeHarness(writes: Record<string, string>, over: Partial<Harness> = {}): Harness {
   return {
@@ -203,13 +188,19 @@ function fakeHarness(writes: Record<string, string>, over: Partial<Harness> = {}
   };
 }
 
-// Only line 2 is broken. Line 25 is a known call site the compiler is content
-// with, so a hunk over it is churn.
+// Only line 2 is broken. Nothing points at line 25, so a hunk over it is
+// outside everything the evidence named.
 const FAILURE = 'a.txt(2,1): error TS2304: Cannot find name.';
-const GATE = migrationGate(
-  [{ change: change('legacyCall', 'removed'), sites: [site('a.txt', 25)] }],
-  FAILURE,
-);
+// Stated literally rather than through a policy function. §14 deleted the one
+// the repair used, and what these tests exercise is `escalate`'s revert
+// machinery — still live under `reviewGate` and `lintGate` — not any policy's
+// choice of anchors.
+const GATE: HunkGate = {
+  anchors: [{ file: 'a.txt', line: 2 }],
+  unanchored: 'revert',
+  whenNoAnchors: 'judge',
+  evidenceName: 'the failure',
+};
 
 test('a hunk the failure did not ask for is reverted before anyone sees the diff', async () => {
   const f = await gitFixture({ 'a.txt': BASE });
@@ -220,7 +211,10 @@ test('a hunk the failure did not ask for is reverted before anyone sees the diff
     assert.equal(result.ok, true);
     assert.equal(result.revertedHunks.length, 1);
     assert.equal(result.keptHunks, 1);
-    assert.ok(result.revertedHunks[0]?.reason.includes('nothing outstanding'));
+    // The reason names the rule that fired. `nothing outstanding` was the
+    // quiet-call-site rule, which §14 deleted along with the rest of the
+    // repair's gate; what reverts now is a hunk outside every anchor.
+    assert.match(result.revertedHunks[0]?.reason ?? '', /is not anywhere the failure pointed/);
 
     const after = readFileSync(path.join(f.dir, 'a.txt'), 'utf8');
     assert.ok(after.includes('LINE02'), 'the diagnostic-backed repair stayed');
@@ -290,10 +284,12 @@ test('changes a few lines apart are judged separately, not as one region', async
   const f = await gitFixture({ 'a.txt': short });
   try {
     const localFailure = 'a.txt(3,1): error TS2304: Cannot find name.';
-    const gate = migrationGate(
-      [{ change: change('quiet', 'removed'), sites: [site('a.txt', 7)] }],
-      localFailure,
-    );
+    const gate: HunkGate = {
+      anchors: [{ file: 'a.txt', line: 3 }],
+      unanchored: 'revert',
+      whenNoAnchors: 'judge',
+      evidenceName: 'the failure',
+    };
     const harness = fakeHarness({
       'a.txt': short.replace('charlie', 'CHARLIE').replace('golf', 'GOLF'),
     });

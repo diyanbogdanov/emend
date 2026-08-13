@@ -72,28 +72,6 @@ export function parseDiagnostics(output: string): Diagnostic[] {
  * TS2305/TS2307/TS2614/TS2724 are the resolution failures: no exported member,
  * cannot find module, and the two "did you mean" variants.
  */
-const MASKING_DIAGNOSTIC = /^\s*(\S+?)\((\d+),\d+\):\s*error TS(?:2305|2307|2614|2724)\b/gm;
-
-/**
- * Files where a resolution failure makes the absence of other diagnostics
- * meaningless.
- *
- * This is the cardinal rule applied to the gate itself: *could not check* is not
- * *checked and clean*. Emend refuses that inference about a call site it cannot
- * read and about a route no description covers; a quiet line downstream of a
- * broken import is the same claim, made by the one component whose job is to
- * decide whether a repair may land.
- */
-export function maskedFiles(output: string): Set<string> {
-  const out = new Set<string>();
-  MASKING_DIAGNOSTIC.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = MASKING_DIAGNOSTIC.exec(output)) !== null) {
-    if (m[1]) out.add(m[1]);
-  }
-  return out;
-}
-
 export type EditEvidence = 'evidenced' | 'unrequested';
 
 export function sameFile(a: string, b: string): boolean {
@@ -133,12 +111,6 @@ export interface HunkClassification {
 export interface HunkGate {
   /** Lines that justify a change here. */
   anchors: ReadonlyArray<Diagnostic>;
-  /**
-   * Lines Emend knows about where a change is *not* justified — a call site the
-   * compiler is content with. Distinct from "unknown": silence about a line
-   * Emend never looked at is not evidence that it is fine.
-   */
-  quiet?: ReadonlyArray<Diagnostic>;
   /** Slack either side of an anchor, in lines. */
   window?: number;
   /**
@@ -192,54 +164,34 @@ export function touchedLines(diff: string): Diagnostic[] {
 }
 
 /**
- * Migration and tightening: the compiler points, and a deprecation still present
- * counts even though it never produces a diagnostic.
+ * The repair's own hunks: keep all of them, and let the reviewer judge.
  *
- * `unanchored: 'allow'` because a version bump genuinely breaks files the
- * call-site walk never visits. `whenNoAnchors: 'abstain'` because a failing test
- * suite reports no locations at all.
+ * **Spec §14.** This replaced `migrationGate`, which decided this badly enough
+ * that deleting it removed no protection. Its only rule on the repair path was
+ * that a hunk landing on a call site the compiler was content with is
+ * unrequested; `unanchored: 'allow'` made everything else `evidenced` by
+ * construction. Across the whole record it reverted nothing correctly and three
+ * things wrongly — the openai regression, where an unresolved import made three
+ * correct repairs look like edits to quiet lines.
+ *
+ * What judges a repair now is the review harness (was it required) and
+ * verification (does it work). Neither is a line-number heuristic, and one of
+ * them runs commands.
+ *
+ * It exists at all, rather than the call site passing nothing, because
+ * `escalate` requires a gate — no gate, no harness — and a silently permissive
+ * one would read as a protection that is not there. This one says so in its
+ * name.
  */
-export function migrationGate(
-  changes: Array<{ change: SurfaceChange; sites: CallSite[] }>,
-  failureOutput: string,
-  unresolvedDeprecations: ReadonlySet<string> = new Set(),
-): HunkGate {
-  const anchors = parseDiagnostics(failureOutput);
-  const masked = maskedFiles(failureOutput);
-  const quiet: Diagnostic[] = [];
-  for (const { change, sites } of changes) {
-    // A deprecated symbol still in the source is work the finding asked for, so
-    // its call sites justify a change rather than forbidding one.
-    const outstanding = unresolvedDeprecations.has(change.path);
-    for (const site of sites) {
-      const point = { file: site.file, line: site.line };
-      // A call site in a file whose imports failed to resolve is not a line the
-      // compiler is content with — it is a line the compiler never reached. Both
-      // lists would be a lie, so it goes in neither, and the hunk falls through
-      // to `unanchored: 'allow'` where verification decides.
-      if (outstanding) anchors.push(point);
-      else if (!masked.has(site.file)) quiet.push(point);
-    }
-  }
+export function reviewerDecides(): HunkGate {
   return {
-    anchors,
-    quiet,
+    anchors: [],
     unanchored: 'allow',
     whenNoAnchors: 'abstain',
-    evidenceName: 'a diagnostic',
+    evidenceName: 'the reviewer',
   };
 }
 
-/**
- * Review: the only thing that justifies an edit is the migration's own diff.
- *
- * No abstain and no `allow`. The pass runs on a build that already passes, so
- * there is nothing to be silent about — an edit outside the diff is out-of-scope
- * churn by definition, which is the single thing this gate exists to stop. No
- * window either: the anchor is the migration's own edit, and a review improving
- * that edit overlaps it. Three lines of slack is enough to reach the next
- * statement, which is exactly the drift being prevented.
- */
 export function reviewGate(
   migrationDiff: string,
   /**
@@ -351,13 +303,6 @@ export function classifyHunks(hunks: DiffHunk[], gate: HunkGate): HunkClassifica
   return hunks.map((hunk): HunkClassification => {
     if (covers(gate.anchors, hunk)) {
       return { hunk, evidence: 'evidenced', reason: `${evidence} points into ${hunk.file}:${hunk.start}` };
-    }
-    if (covers(gate.quiet ?? [], hunk)) {
-      return {
-        hunk,
-        evidence: 'unrequested',
-        reason: `${hunk.file}:${hunk.start} covers a call site with nothing outstanding on it`,
-      };
     }
     return gate.unanchored === 'allow'
       ? { hunk, evidence: 'evidenced', reason: 'nothing known about this line either way' }

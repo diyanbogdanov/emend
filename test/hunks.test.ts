@@ -1,11 +1,10 @@
 import {
   parseDiffHunks,
   classifyHunks,
-  migrationGate,
   reviewGate,
   lintGate,
   touchedLines,
-  maskedFiles,
+  reviewerDecides,
 } from '../src/gate.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -125,49 +124,6 @@ const CHANGES = [
 // Only `record` breaks the build; the deprecation compiles.
 const FAILURE = 'src/schema.ts(25,15): error TS2554: Expected 2 arguments, but got 1.';
 
-test('a hunk a diagnostic points into is evidenced', () => {
-  const classified = classifyHunks(parseDiffHunks(DIFF), migrationGate(CHANGES, FAILURE));
-  const recordHunk = classified.find((h) => h.hunk.start === 25);
-  assert.equal(recordHunk?.evidence, 'evidenced');
-});
-
-test('a hunk over a quiet call site is unrequested', () => {
-  const classified = classifyHunks(parseDiffHunks(DIFF), migrationGate(CHANGES, FAILURE));
-  const emailHunk = classified.find((h) => h.hunk.start === 2);
-  assert.equal(emailHunk?.evidence, 'unrequested');
-});
-
-test('a hunk over a deprecation still present is evidenced', () => {
-  // Same carve-out the edit gate has. A deprecated call never produces a
-  // diagnostic, so a diagnostic-only rule would cancel the migration the finding
-  // asked for.
-  const classified = classifyHunks(parseDiffHunks(DIFF), migrationGate(CHANGES, FAILURE, new Set(['ZodString.email'])));
-  const emailHunk = classified.find((h) => h.hunk.start === 2);
-  assert.equal(emailHunk?.evidence, 'evidenced');
-});
-
-test('with no diagnostics anywhere the gate abstains', () => {
-  // A failing test suite reports no locations, so there is no positive evidence
-  // for anything. Judging from silence is how a gate starts withholding real
-  // repairs.
-  const classified = classifyHunks(parseDiffHunks(DIFF), migrationGate(CHANGES, 'FAIL  test/checkout.test.ts'));
-  assert.ok(classified.every((h) => h.evidence === 'evidenced'));
-});
-
-test('a hunk in a file with no call site and no diagnostic is left alone', () => {
-  // The Dockerfile case: a bump can break a file the call-site walk never
-  // visits, and Emend has no evidence either way there.
-  const diff = `diff --git a/Dockerfile b/Dockerfile
---- a/Dockerfile
-+++ b/Dockerfile
-@@ -1,2 +1,2 @@
--FROM node:18
-+FROM node:22
-`;
-  const classified = classifyHunks(parseDiffHunks(diff), migrationGate(CHANGES, FAILURE));
-  assert.equal(classified[0]?.evidence, 'evidenced');
-});
-
 // ---------------------------------------------------------------------------
 // The three policies
 //
@@ -254,51 +210,57 @@ test('touchedLines counts added lines on the new side', () => {
   assert.deepEqual(added, [{ file: 'x.ts', line: 11 }, { file: 'x.ts', line: 12 }]);
 });
 
-test('migration still abstains when the failure names no locations at all', () => {
-  // The policy that must NOT be flattened into the other two. A failing test
-  // suite reports no file:line anywhere, and reverting everything on that basis
-  // turns a possible repair into a guaranteed no-op.
-  const gate = migrationGate(CHANGES, 'FAIL  test/checkout.test.ts');
-  assert.equal(gate.whenNoAnchors, 'abstain');
-  const classified = classifyHunks(parseDiffHunks(DIFF), gate);
-  assert.ok(classified.every((h) => h.evidence === 'evidenced'));
-});
+// ---------------------------------------------------------------------------
+// §14: the reviewer judges the repair
+// ---------------------------------------------------------------------------
 
-test('a call site downstream of a broken import is not "the compiler is content"', () => {
-  // The openai 3 -> 4 regression, reduced. The harness migrated the file
-  // correctly in four places; the gate reverted three of them as "covers a call
-  // site with nothing outstanding on it", because the failed import on line 1
-  // meant lines 7, 22 and 30 carried no diagnostic of their own. What shipped
-  // was the new import over the old call shapes — more broken than the file it
-  // started from, and scored as a regression the model had actually repaired.
+test('the repair gate keeps everything, because the reviewer is what judges it', () => {
+  // Spec §14. The deterministic gate never decided this well: its only rule on
+  // the repair path was the quiet-call-site one, its only reverts in the whole
+  // record were the openai regression, and `unanchored: 'allow'` made every
+  // other hunk `evidenced` by construction. Nought caught, three wrongly
+  // reverted.
   //
-  // This is the cardinal rule turned on the gate itself. Emend refuses to read
-  // silence as cleanliness about a call site it cannot parse or a route no
-  // description covers; a quiet line downstream of an unresolved import is the
-  // same inference, made by the one component that decides what may land.
-  // `site()` files everything under src/schema.ts, so the import error names it.
-  const importError =
-    "src/schema.ts(1,10): error TS2614: Module '\"openai\"' has no exported member 'Configuration'.";
-  const changes = [
-    { change: change('OpenAIApi', 'signature-changed'), sites: [site(22)] },
-  ];
+  // What is left is honest about itself. `escalate` requires a gate, and a
+  // silently permissive one would read as protection that is not there.
+  const diff = `diff --git a/src/schema.ts b/src/schema.ts
+--- a/src/schema.ts
++++ b/src/schema.ts
+@@ -2,3 +2,3 @@
+-const a = z.string().email();
++const a = z.email();
+@@ -25,3 +25,3 @@
+-z.record(z.string());
++z.record(z.string(), z.unknown());
+`;
+  const classified = classifyHunks(parseDiffHunks(diff), reviewerDecides());
 
-  assert.deepEqual([...maskedFiles(importError)], ['src/schema.ts']);
-
-  const gate = migrationGate(changes, importError);
-  assert.equal(gate.quiet?.length, 0, 'a masked file contributes no quiet lines');
-
-  // Neither anchored nor quiet, so it falls through to `allow` and verification
-  // decides — which is the honest answer when nothing was actually checked.
-  const classified = classifyHunks([{ file: 'src/schema.ts', start: 22, end: 23 }], gate);
-  assert.equal(classified[0]?.evidence, 'evidenced');
+  assert.ok(
+    classified.every((h) => h.evidence === 'evidenced'),
+    'nothing the repair wrote is withheld by a line-number rule',
+  );
 });
 
-test('an ordinary type error does not mask the rest of its file', () => {
-  // The narrowness matters. A TS2554 at line 25 does not stop the compiler
-  // reading line 4, so the quiet rule still applies there — otherwise one error
-  // anywhere in a file would licence editing all of it.
-  assert.equal(maskedFiles('src/schema.ts(25,15): error TS2554: Expected 2 arguments.').size, 0);
-  const gate = migrationGate(CHANGES, FAILURE);
-  assert.ok((gate.quiet?.length ?? 0) > 0, 'unmasked files still contribute quiet lines');
+test('the reviewer is still held to where it may write, which is a different question', () => {
+  // §14.4. Scope is not judgement. A reviewer that may rewrite anything is not a
+  // reviewer, and it is now the component carrying all the trust — so the one
+  // thing still worth bounding is its reach, not its opinion.
+  //
+  // Measured on the 2026-08-13 `--create` run: `review: reverted 1 hunk(s)
+  // outside the migration's diff`.
+  const migrationDiff = `diff --git a/src/schema.ts b/src/schema.ts
+--- a/src/schema.ts
++++ b/src/schema.ts
+@@ -25,3 +25,3 @@
+-z.record(z.string());
++z.record(z.string(), z.unknown());
+`;
+  const wandered = [
+    { file: 'src/schema.ts', start: 25, end: 27 },
+    { file: 'src/unrelated.ts', start: 90, end: 92 },
+  ];
+  const classified = classifyHunks(wandered, reviewGate(migrationDiff));
+
+  assert.equal(classified[0]?.evidence, 'evidenced', 'inside the migration it may speak');
+  assert.equal(classified[1]?.evidence, 'unrequested', 'outside it, it may not');
 });
