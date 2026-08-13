@@ -210,6 +210,9 @@ answer. Measured across two vendors, 5 of 11 offered parameters were that.
 | `emend eval` | Measure the agent against a corpus |
 | `emend serve` | Local dashboard |
 | `emend models` | List models your LLM provider serves |
+| `emend store list` | What is stored locally: repositories, and cache size |
+| `emend store prune <path>` | Forget one repository's scans, findings and runs |
+| `emend store cache` | Cached package surfaces, largest first |
 
 `emend scan --features` answers the other half of the question: not what broke,
 but what *arrived*. It lists new top-level exports in packages you already
