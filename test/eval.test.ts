@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scoreCase, summarise, type CaseOutcome, type EvalCase } from '../src/eval.ts';
+import {
+  scoreCase,
+  summarise,
+  scanOptionsFor,
+  BUILT_IN_CASES,
+  OPENAI_CASE,
+  type CaseOutcome,
+  type EvalCase,
+} from '../src/eval.ts';
 
 const zodCase: EvalCase = {
   id: 'zod-3-to-4',
@@ -239,4 +247,40 @@ test('rates are computed over runs that happened, with the rest counted beside t
   assert.equal(row?.runs, 3);
   assert.equal(row?.inconclusive, 2);
   assert.equal(row?.passRate, 1);
+});
+
+test('a case migrates to the version it names, not to whatever npm published today', () => {
+  // `EvalCase.toVersion` was declared, set on all four cases, and read by
+  // nothing. `runCase` scanned, and a scan resolves the `latest` dist-tag — so
+  // `openai-3.3.0-to-4.104.0` was migrating 3.3.0 to 7.4.0, three major versions
+  // past the migration its own id names.
+  //
+  // That is what openai's steady 1.5x was. `minimalEdits: 4` was counted by
+  // performing the 3 -> 4 migration; the run performed 3 -> 7. The denominator
+  // was never stale — the subject moved out from under it.
+  //
+  // A benchmark whose subject changes with the calendar cannot measure a model:
+  // two sweeps a month apart would share a name and not a migration, and the
+  // difference between them would be read as the model getting worse.
+  const options = scanOptionsFor(OPENAI_CASE);
+
+  assert.deepEqual(options.only, ['openai']);
+  assert.equal(
+    options.targets?.['openai'],
+    OPENAI_CASE.toVersion,
+    'the declared target has to reach the scan, or it is a comment',
+  );
+});
+
+test('every built-in case pins its target, so the corpus is reproducible', () => {
+  // Guards the class rather than the instance. A case added without a target
+  // silently reintroduces the drift, and it would show up as that case
+  // over-editing rather than as a corpus defect.
+  for (const c of BUILT_IN_CASES) {
+    assert.equal(
+      scanOptionsFor(c).targets?.[c.pkg],
+      c.toVersion,
+      `${c.id} must migrate to the version its id names`,
+    );
+  }
 });

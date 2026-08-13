@@ -26,7 +26,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { scanRepo } from './analyze.ts';
+import { scanRepo, type ScanOptions } from './analyze.ts';
 import { fixPackage } from './fix.ts';
 import type { Harness } from './harness.ts';
 import { countTypeEscapes } from './pr.ts';
@@ -324,6 +324,20 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
  * `unverified` is already the verdict Emend refuses to count as a pass, so the
  * failure lands in the scoreboard honestly instead of disappearing from it.
  */
+/**
+ * The scan a case wants: its package, at the version its id names.
+ *
+ * Its own function so a test can assert the target actually reaches the scan.
+ * It did not, for the whole life of the corpus: `toVersion` was declared, set on
+ * every case, and read by nothing, so each run migrated to whatever npm's
+ * `latest` was that morning. `openai-3.3.0-to-4.104.0` was performing 3.3.0 ->
+ * 7.4.0 and being scored against `minimalEdits: 4`, a number counted by
+ * performing the 3 -> 4 migration. See spec §15.
+ */
+export function scanOptionsFor(evalCase: EvalCase): ScanOptions {
+  return { only: [evalCase.pkg], targets: { [evalCase.pkg]: evalCase.toVersion } };
+}
+
 export async function runCase(
   evalCase: EvalCase,
   repoDir: string,
@@ -346,7 +360,7 @@ export async function runCase(
   const elapsed = (): number => Number(process.hrtime.bigint() / 1_000_000n) - startedAt;
 
   try {
-    const scan = await scanRepo(repoDir, { only: [evalCase.pkg] });
+    const scan = await scanRepo(repoDir, scanOptionsFor(evalCase));
     const findings = scan.packages.flatMap((p) => p.findings);
     if (findings.length === 0) {
       return { ...base, durationMs: elapsed() };

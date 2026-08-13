@@ -77,6 +77,18 @@ export interface ScanOptions {
    */
   freshness?: boolean;
   /**
+   * Migrate named packages to a fixed version instead of the registry's latest.
+   *
+   * For callers that need the same migration twice. The benchmark is the one
+   * that does: every case names a target in its id, and resolving `latest`
+   * instead meant `openai-3.3.0-to-4.104.0` was running 3.3.0 -> 7.4.0 and being
+   * scored against a denominator counted for 3 -> 4. See spec §15.
+   *
+   * Not a general "downgrade" switch: an ordinary scan wants the latest, and
+   * anything else is the caller declaring it has a reason.
+   */
+  targets?: Record<string, string>;
+  /**
    * Report new top-level exports in packages this repository depends on.
    *
    * Off by default for freshness's reason, which applies harder here: every
@@ -222,7 +234,25 @@ export async function scanRepo(
 
     try {
       const packument = await fetchPackument(dep.name);
-      const to = resolveTargetVersion(packument);
+      const pinned = options.targets?.[dep.name];
+      // A pin that was never published is a typo, and silently falling back to
+      // `latest` would migrate somewhere the caller did not ask for while
+      // reporting success. The benchmark would read that as the model
+      // over-editing.
+      if (pinned && !packument.versions?.[pinned]) {
+        return {
+          report: {
+            pkg: dep.name,
+            status: 'error',
+            fromVersion: from,
+            toVersion: null,
+            findings: [],
+            unlocatedBreaking: 0,
+            note: `target ${pinned} was requested but the registry does not publish it`,
+          },
+        };
+      }
+      const to = pinned ?? resolveTargetVersion(packument);
       if (!to) {
         return {
           report: {
