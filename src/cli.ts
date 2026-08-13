@@ -18,7 +18,7 @@ import { reintroduced } from './remediate.ts';
 import { offersPagination } from './httpsites.ts';
 import { fixFinding, needsSourceRepair, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
 import { Store } from './store.ts';
-import { listCache, pruneCache } from './registry.ts';
+import { listCache, pruneCache, type CachedPackage } from './registry.ts';
 import { renderPrBody, renderPrTitle, createPullRequest, branchSlug, summarisePr } from './pr.ts';
 import {
   assistantText,
@@ -1462,6 +1462,138 @@ function humanBytes(bytes: number): string {
   return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)}${units[unit]}`;
 }
 
+/** Cache rows printed before the tail is summarised. A 2,640-package cache is a scroll, not a list. */
+const CACHE_ROWS = 40;
+
+const cacheBytes = (cache: ReadonlyArray<CachedPackage>): number =>
+  cache.reduce((n, entry) => n + entry.bytes, 0);
+
+/** Repositories the database holds scans for, and one line summarising the cache. */
+async function storeList(store: Store): Promise<number> {
+  const repos = store.listStoredRepos();
+  console.log('');
+  if (repos.length === 0) {
+    console.log(c.dim('  No scan data stored.'));
+  } else {
+    console.log(c.bold(`  ${repos.length} repositor${repos.length === 1 ? 'y' : 'ies'} with stored data`));
+    console.log('');
+    let missing = 0;
+    for (const repo of repos) {
+      // Whether the directory is still there is what separates a project from a
+      // temp directory left by a sweep, and it is the single most useful thing
+      // when deciding what to delete.
+      const here = await exists(repo.repoDir);
+      if (!here) missing++;
+      console.log(
+        `  ${here ? c.dim('   ') : c.yellow('gone')}  ${String(repo.scans).padStart(3)} scan(s)  ` +
+          `${String(repo.findings).padStart(4)} finding(s)  ${repo.repoDir}`,
+      );
+    }
+    if (missing > 0) {
+      console.log('');
+      console.log(
+        c.dim(`  ${missing} path(s) no longer exist. Forget one with: emend store prune <path>`),
+      );
+    }
+  }
+
+  const cache = await listCache();
+  console.log('');
+  console.log(
+    c.bold(`  Cache: ${cache.length} package(s), ${humanBytes(cacheBytes(cache))}`) +
+      c.dim('  (shared across repositories — see `emend store cache`)'),
+  );
+  console.log('');
+  return 0;
+}
+
+/** Forget one repository's scans, or all of them. */
+function storePrune(args: Args, store: Store): number {
+  const all = args.flags.get('all') === true;
+  const includeApp = args.flags.get('include-app') === true;
+  const target = args.positional[1];
+  if (!all && !target) {
+    console.log(c.red('  Name a repository path, or pass --all.'));
+    return 1;
+  }
+
+  const removed = all
+    ? store.pruneAll({ includeApp })
+    : store.pruneRepo(path.resolve(target!));
+
+  console.log('');
+  // Zero is reported rather than swallowed: a mistyped path must not read like
+  // a successful clear.
+  if (removed.scans === 0 && removed.findings === 0 && removed.runs === 0) {
+    console.log(c.yellow('  Nothing stored for that path — nothing deleted.'));
+    console.log(c.dim('  `emend store list` shows the paths that are stored.'));
+  } else {
+    console.log(
+      c.green(
+        `  Removed ${removed.scans} scan(s), ${removed.findings} finding(s), ${removed.runs} run(s).`,
+      ),
+    );
+    if (all && includeApp) {
+      console.log(c.yellow('  GitHub App state cleared too — installations must be re-added.'));
+    }
+  }
+  console.log('');
+  return 0;
+}
+
+/** How many packages are cached, largest first. */
+async function storeCacheList(): Promise<number> {
+  const cache = await listCache();
+  console.log('');
+  if (cache.length === 0) {
+    console.log(c.dim('  Cache is empty.'));
+    console.log('');
+    return 0;
+  }
+  console.log(c.bold(`  ${cache.length} package(s), ${humanBytes(cacheBytes(cache))} total`));
+  console.log('');
+  for (const entry of cache.slice(0, CACHE_ROWS)) {
+    console.log(
+      `  ${humanBytes(entry.bytes).padStart(7)}  ${entry.pkg} ` +
+        c.dim(`(${entry.versions.length} version${entry.versions.length === 1 ? '' : 's'}, last used ${entry.lastUsed.slice(0, 10)})`),
+    );
+  }
+  if (cache.length > CACHE_ROWS) console.log(c.dim(`  … and ${cache.length - CACHE_ROWS} more`));
+  console.log('');
+  return 0;
+}
+
+/**
+ * Delete cached packages.
+ *
+ * `--older-than` is only read when it carries a value: bare `--older-than`
+ * parses to `1` through `Number(true)`, and silently deleting everything
+ * untouched for a day is not what an operator who forgot the number asked for.
+ * Everything else `pruneCache` refuses — an unparseable age, no target at all —
+ * arrives here as a message to print.
+ */
+async function storeCachePrune(args: Args): Promise<number> {
+  const older = args.flags.get('older-than');
+  try {
+    const removed = await pruneCache({
+      ...(args.positional[2] ? { pkg: args.positional[2] } : {}),
+      ...(typeof older === 'string' ? { olderThanDays: Number(older) } : {}),
+      ...(args.flags.get('all') === true ? { all: true } : {}),
+    });
+    console.log('');
+    console.log(
+      removed.packages === 0
+        ? c.yellow('  Nothing matched — nothing deleted.')
+        : c.green(`  Removed ${removed.packages} package(s), freeing ${humanBytes(removed.bytes)}.`),
+    );
+    console.log('');
+    return 0;
+  } catch (err) {
+    console.log(c.red(`  ${(err as Error).message}`));
+    return 1;
+  }
+}
+
 /**
  * What is on this machine, and how to get rid of it.
  *
@@ -1471,127 +1603,23 @@ function humanBytes(bytes: number): string {
  * the directories they describe. The cache is keyed by *package and version*,
  * shared across every repository that ever resolved it, so it cannot be pruned
  * per repository and this command does not offer to.
+ *
+ * That split is why `cache` returns before the database is opened rather than
+ * inside the `try` with everything else: `new Store()` creates the SQLite file
+ * if it is not there, and a question about a directory of tarballs should not
+ * leave a database behind as a side effect of being asked.
  */
 async function cmdStore(args: Args): Promise<number> {
   const sub = args.positional[0] ?? 'list';
+
+  if (sub === 'cache') {
+    return args.positional[1] === 'prune' ? storeCachePrune(args) : storeCacheList();
+  }
+
   const store = new Store();
-
   try {
-    if (sub === 'list') {
-      const repos = store.listStoredRepos();
-      console.log('');
-      if (repos.length === 0) {
-        console.log(c.dim('  No scan data stored.'));
-      } else {
-        console.log(c.bold(`  ${repos.length} repositor${repos.length === 1 ? 'y' : 'ies'} with stored data`));
-        console.log('');
-        let missing = 0;
-        for (const repo of repos) {
-          // Whether the directory is still there is what separates a project
-          // from a temp directory left by a sweep, and it is the single most
-          // useful thing when deciding what to delete.
-          const here = await exists(repo.repoDir);
-          if (!here) missing++;
-          console.log(
-            `  ${here ? c.dim('   ') : c.yellow('gone')}  ${String(repo.scans).padStart(3)} scan(s)  ` +
-              `${String(repo.findings).padStart(4)} finding(s)  ${repo.repoDir}`,
-          );
-        }
-        if (missing > 0) {
-          console.log('');
-          console.log(
-            c.dim(`  ${missing} path(s) no longer exist. Forget one with: emend store prune <path>`),
-          );
-        }
-      }
-
-      const cache = await listCache();
-      const bytes = cache.reduce((n, entry) => n + entry.bytes, 0);
-      console.log('');
-      console.log(
-        c.bold(`  Cache: ${cache.length} package(s), ${humanBytes(bytes)}`) +
-          c.dim('  (shared across repositories — see `emend store cache`)'),
-      );
-      console.log('');
-      return 0;
-    }
-
-    if (sub === 'prune') {
-      const all = args.flags.get('all') === true;
-      const target = args.positional[1];
-      if (!all && !target) {
-        console.log(c.red('  Name a repository path, or pass --all.'));
-        return 1;
-      }
-
-      const removed = all
-        ? store.pruneAll({ includeApp: args.flags.get('include-app') === true })
-        : store.pruneRepo(path.resolve(target!));
-
-      console.log('');
-      // Zero is reported rather than swallowed: a mistyped path must not read
-      // like a successful clear.
-      if (removed.scans === 0 && removed.findings === 0 && removed.runs === 0) {
-        console.log(c.yellow('  Nothing stored for that path — nothing deleted.'));
-        console.log(c.dim('  `emend store list` shows the paths that are stored.'));
-      } else {
-        console.log(
-          c.green(
-            `  Removed ${removed.scans} scan(s), ${removed.findings} finding(s), ${removed.runs} run(s).`,
-          ),
-        );
-        if (all && args.flags.get('include-app') === true) {
-          console.log(c.yellow('  GitHub App state cleared too — installations must be re-added.'));
-        }
-      }
-      console.log('');
-      return 0;
-    }
-
-    if (sub === 'cache') {
-      if (args.positional[1] === 'prune') {
-        const older = args.flags.get('older-than');
-        try {
-          const removed = await pruneCache({
-            ...(args.positional[2] ? { pkg: args.positional[2] } : {}),
-            ...(older ? { olderThanDays: Number(older) } : {}),
-            ...(args.flags.get('all') === true ? { all: true } : {}),
-          });
-          console.log('');
-          console.log(
-            removed.packages === 0
-              ? c.yellow('  Nothing matched — nothing deleted.')
-              : c.green(`  Removed ${removed.packages} package(s), freeing ${humanBytes(removed.bytes)}.`),
-          );
-          console.log('');
-          return 0;
-        } catch (err) {
-          console.log(c.red(`  ${(err as Error).message}`));
-          return 1;
-        }
-      }
-
-      const cache = await listCache();
-      console.log('');
-      if (cache.length === 0) {
-        console.log(c.dim('  Cache is empty.'));
-        console.log('');
-        return 0;
-      }
-      const total = cache.reduce((n, entry) => n + entry.bytes, 0);
-      console.log(c.bold(`  ${cache.length} package(s), ${humanBytes(total)} total`));
-      console.log('');
-      for (const entry of cache.slice(0, 40)) {
-        console.log(
-          `  ${humanBytes(entry.bytes).padStart(7)}  ${entry.pkg} ` +
-            c.dim(`(${entry.versions.length} version${entry.versions.length === 1 ? '' : 's'}, last used ${entry.lastUsed.slice(0, 10)})`),
-        );
-      }
-      if (cache.length > 40) console.log(c.dim(`  … and ${cache.length - 40} more`));
-      console.log('');
-      return 0;
-    }
-
+    if (sub === 'list') return await storeList(store);
+    if (sub === 'prune') return storePrune(args, store);
     console.log(c.red(`  Unknown subcommand: ${sub}`));
     console.log(c.dim('  Try: emend store list | prune | cache'));
     return 1;
