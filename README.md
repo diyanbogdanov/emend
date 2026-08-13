@@ -276,7 +276,7 @@ real migrations and scores them:
 ```
 $ emend eval --model z-ai/glm-5.2,qwen/qwen3-coder --repeat 3
 
-| Model | Cases | Runs | Pass | Clean | Edit ratio | Withheld | ... |
+| Model | Cases | Runs | Pass | Clean | Unresolved | Edit ratio | Withheld | ... |
 ```
 
 **`Pass` and `Clean` are deliberately different columns.** A green build says the
@@ -284,6 +284,14 @@ migration compiles and the tests pass. It says nothing about whether the model
 changed things nobody asked about, bought the green with `any`, or shipped a
 commit titled *"migrate `Cell`"* without removing a single use of `Cell`. Every
 failure this project has actually hit lived in that gap.
+
+**`Unresolved` is whether the migration finished, and `Edit ratio` is not.** Each
+case declares the pre-migration forms a finished migration removes, and
+`Unresolved` counts the ones still there. The ratio measures *scope* — it divides
+diff hunks by logical edits, and hunks merge when changes land near each other, so
+it can show that a run did too much and never that it did too little. It read a
+complete zod migration as "4 of 6 required edits" for an entire sweep before that
+was noticed.
 
 Migrations vary between runs, so `--repeat` is how you tell a real change from
 noise.

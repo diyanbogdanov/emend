@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile, readdir } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { checkFires } from '../src/quality.ts';
 import {
   scoreCase,
   summarise,
@@ -16,8 +20,11 @@ const zodCase: EvalCase = {
   toVersion: '4.4.3',
   repo: { kind: 'fixture', name: 'demo-repo' },
   minimalEdits: 2,
-  mustResolve: ['ZodError.errors', 'record'],
+  mustResolve: [{ symbol: 'ZodError.errors', kind: 'absent', pattern: '\\.error\\.errors\\b' }],
 };
+
+/** The real corpus denominator, for the tests that are about the ceiling. */
+const zodSixCase: EvalCase = { ...zodCase, minimalEdits: 6 };
 
 function outcome(over: Partial<CaseOutcome> = {}): CaseOutcome {
   return {
@@ -59,28 +66,84 @@ test('over-editing is penalised even though the build is green', () => {
   assert.ok(score.penalties.some((p) => p.includes('edit')));
 });
 
-test('under-editing is penalised too, and never rewarded', () => {
+test('a complete migration is not penalised for hunks that merged', () => {
+  // The measurement artifact §16 is about. `editsApplied` counts diff hunks;
+  // `minimalEdits` counts logical edits. Applying all six of zod's required
+  // edits to the fixture by hand produces *four* hunks at `--unified=1`, because
+  // the three deprecations sit on lines 11, 12 and 14 with unchanged context
+  // between them. Six is unreachable, so the old under-edit penalty fired on the
+  // correct answer — and the sweep recorded zod at "4 of 6" on all three runs.
+  const score = scoreCase(zodSixCase, outcome({ editsApplied: 4 }));
+  assert.equal(score.passed, true);
+  assert.equal(score.clean, true, 'four hunks is what six required edits look like');
+  assert.deepEqual(score.penalties, []);
+});
+
+test('under-editing is caught by what resolved, not by how few hunks landed', () => {
   // The first live sweep ranked qwen3-coder top at 0.4x: it fixed the two
   // compile errors and skipped all three deprecations. A scorer that only
   // punishes doing too much reads "did less" as "did better" and puts the least
   // complete migration at the head of the table — training for exactly the
   // failure #2 exists to catch.
-  const score = scoreCase(zodCase, outcome({ editsApplied: 1 }));
+  //
+  // The count cannot see it: hunks are a lower bound on edits, so a low number
+  // is equally consistent with a finished migration whose edits merged. What
+  // that run actually left behind is three unresolved symbols, and that is the
+  // thing worth scoring.
+  const score = scoreCase(zodSixCase, outcome({
+    editsApplied: 1,
+    unresolved: ['ZodString.uuid', 'ZodString.email', 'ZodString.datetime'],
+  }));
   assert.equal(score.passed, true, 'the build is green');
-  assert.equal(score.clean, false, 'but half the required edits is not a finished migration');
-  assert.ok(score.penalties.some((p) => p.includes('incomplete')));
+  assert.equal(score.clean, false, 'but three deprecations left in place is not a finished migration');
+  assert.ok(score.penalties.some((p) => p.includes('ZodString.uuid')));
 });
 
-test('the table ranks by distance from the minimum, not by fewest edits', () => {
+test('a completeness check that could not run never scores clean', () => {
+  // The cardinal rule, turned on the benchmark's own completeness column.
+  // "Could not check" is not "checked and clean", and the two are reported
+  // separately because they are different claims.
+  const score = scoreCase(zodSixCase, outcome({
+    editsApplied: 4,
+    uncheckable: ['record — src/schema.ts could not be read'],
+  }));
+  assert.equal(score.passed, true);
+  assert.equal(score.clean, false, 'an unread file is not evidence of a finished migration');
+  assert.ok(score.penalties.some((p) => p.includes('could not')));
+});
+
+test('the table never ranks a padder above a run whose edits merged', () => {
+  // The sort inverts with the ratio. Ordering by `|ratio - 1|` was right while
+  // the ratio could err in both directions; once a *correct* migration reads
+  // below one — zod's six edits are four hunks — nearest-to-1.0 puts the run
+  // that padded ahead of the run that did the job. Excess is the only half of
+  // the ratio that is measurable, so it is the only half that orders.
+  //
+  // Both runs carry a type escape so their clean rates tie and the tiebreaker is
+  // what is actually under test.
   const rows = summarise(
-    [zodCase],
+    [zodSixCase],
     [
-      outcome({ model: 'complete', editsApplied: 2 }),
-      outcome({ model: 'skipped-work', editsApplied: 1 }),
-      outcome({ model: 'padder', editsApplied: 5 }),
+      outcome({ model: 'merged', editsApplied: 3, typeEscapes: 1 }),
+      outcome({ model: 'padder', editsApplied: 7, typeEscapes: 1 }),
     ],
   );
-  assert.equal(rows[0]?.model, 'complete', 'the migration that did the job comes first');
+  assert.equal(rows[0]?.model, 'merged', 'a ratio below one is merged hunks, not skipped work');
+});
+
+test('unresolved symbols are totalled, because completeness is now the headline', () => {
+  // The argument `totalEditsWithheld` and `totalHunksReverted` were both added
+  // under: a signal absent from the table is invisible in the only place it
+  // would ever be judged.
+  const rows = summarise(
+    [zodSixCase],
+    [
+      outcome({ model: 'finished', editsApplied: 4 }),
+      outcome({ model: 'partial', editsApplied: 2, unresolved: ['ZodString.uuid', 'record'] }),
+    ],
+  );
+  assert.equal(rows.find((r) => r.model === 'finished')?.totalUnresolved, 0);
+  assert.equal(rows.find((r) => r.model === 'partial')?.totalUnresolved, 2);
 });
 
 test('buying a green build with `any` is penalised', () => {
@@ -270,6 +333,56 @@ test('a case migrates to the version it names, not to whatever npm published tod
     OPENAI_CASE.toVersion,
     'the declared target has to reach the scan, or it is a comment',
   );
+});
+
+test('every built-in case declares what finishing it means', () => {
+  // Guards the class, like the target test below. `mustResolve` is optional so a
+  // third-party corpus can make no completeness claim, but this corpus makes one
+  // for every case — otherwise a case added without checks scores clean on the
+  // strength of nothing having been measured, which is the shape of the bug this
+  // whole section is about.
+  for (const c of BUILT_IN_CASES) {
+    assert.ok(
+      (c.mustResolve?.length ?? 0) > 0,
+      `${c.id} must declare what a finished migration looks like`,
+    );
+  }
+});
+
+test('every declared check fires on the un-migrated fixture', async () => {
+  // The invariant that makes the completeness column mean anything. A check that
+  // does not match the *baseline* is vacuous: it reports `resolved` against a
+  // migration that did nothing at all, and the column reads clean everywhere
+  // while measuring nothing.
+  //
+  // That is exactly how `EvalCase.toVersion`, `SurfaceChange.symbolKind` and
+  // `mustResolve` itself each failed — declared, plausible, and never once
+  // executed against the case they were written for. This test is pure: it reads
+  // `fixtures/`, and needs no install, no network and no model.
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+  for (const c of BUILT_IN_CASES) {
+    if (c.repo.kind !== 'fixture') continue;
+    const dir = path.join(root, 'fixtures', c.repo.name);
+    const sources: string[] = [];
+    for (const sub of ['src', 'test']) {
+      const at = path.join(dir, sub);
+      const entries = await readdir(at, { recursive: true, withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (!entry.isFile() || !/\.[cm]?[jt]sx?$/.test(entry.name)) continue;
+        sources.push(await readFile(path.join(entry.parentPath, entry.name), 'utf8'));
+      }
+    }
+    assert.ok(sources.length > 0, `${c.id}: no fixture sources found at ${dir}`);
+
+    for (const check of c.mustResolve ?? []) {
+      assert.ok(
+        sources.some((source) => checkFires(check, source)),
+        `${c.id}: the check for \`${check.symbol}\` matches nothing in the un-migrated fixture, ` +
+          `so it would report the migration finished before it started`,
+      );
+    }
+  }
 });
 
 test('every built-in case pins its target, so the corpus is reproducible', () => {
