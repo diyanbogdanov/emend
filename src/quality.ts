@@ -239,20 +239,33 @@ export async function resolveChecks(
 ): Promise<Resolution[]> {
   if (checks.length === 0) return [];
 
-  const sources = new Map<string, string>();
-  for (const file of await sourceFiles(dir)) {
-    try {
-      sources.set(file, await readFile(path.join(dir, file), 'utf8'));
-    } catch {
-      // Unreadable: it contributes nothing either way, and an empty map below is
-      // what turns "nothing could be read" into `unknown` rather than `resolved`.
-    }
+  const files = await sourceFiles(dir);
+  const read = await Promise.all(
+    files.map(async (file): Promise<[string, string] | null> => {
+      try {
+        return [file, await readFile(path.join(dir, file), 'utf8')];
+      } catch {
+        // Unreadable: it contributes nothing either way, and an empty map below
+        // is what turns "nothing could be read" into `unknown`, not `resolved`.
+        return null;
+      }
+    }),
+  );
+  const sources = new Map(read.filter((entry) => entry !== null));
+
+  // Hoisted: whether anything could be read is a property of the tree, not of a
+  // check, and asking it once says so. Every check is `unknown` together or none
+  // is.
+  if (sources.size === 0) {
+    return checks.map((check) => ({
+      check,
+      state: 'unknown' as const,
+      files: [],
+      reason: 'no source files could be read',
+    }));
   }
 
   return checks.map((check): Resolution => {
-    if (sources.size === 0) {
-      return { check, state: 'unknown', files: [], reason: 'no source files could be read' };
-    }
     try {
       const files = [...sources]
         .filter(([, source]) => checkFires(check, source))
