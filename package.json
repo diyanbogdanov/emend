@@ -1,5 +1,5 @@
 {
-  "name": "@emend/cli",
+  "name": "emend-cli",
   "version": "0.1.0",
   "description": "Detects API drift between installed and target dependency versions, locates affected call sites, and produces verified migration PRs.",
   "author": "Diyan Bogdanov",
