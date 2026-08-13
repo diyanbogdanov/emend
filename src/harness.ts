@@ -943,6 +943,7 @@ export { nearbySymbols } from './llm/symbols.ts';
 export {
   MIGRATION_TASK,
   REVIEW_TASK,
+  reviewTask,
   TIGHTENING_TASK,
   LINT_TASK,
   type Task,

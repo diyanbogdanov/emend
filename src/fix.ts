@@ -40,7 +40,7 @@ import {
   runTask,
   MIGRATION_TASK,
   TIGHTENING_TASK,
-  REVIEW_TASK,
+  reviewTask,
   LINT_TASK,
   nearbySymbols,
   NARROWING,
@@ -133,6 +133,13 @@ export interface FixOptions {
    * happens to be called rather than of what was passed.
    */
   reviewHarness?: Harness;
+  /**
+   * The quality standard the review applies, by built-in name or path.
+   *
+   * Undefined means `thermo-nuclear-code-quality-review`. Completeness is not
+   * selectable — see `reviewTask`.
+   */
+  reviewSkill?: string;
   onProgress?: (message: string) => void;
 }
 
@@ -357,6 +364,8 @@ async function reviewMigration(
   extraFiles: string[],
   candidateSymbols: string[],
   progress: (message: string) => void,
+  /** Which quality standard to review against. Undefined means the default. */
+  qualitySkill: string | undefined,
   // The kept edit count travels back with the report. Without it the review's
   // work is invisible to `appliedEdits`, and a migration that landed five edits
   // reports two — which is exactly what the first eval sweep measured.
@@ -397,7 +406,7 @@ async function reviewMigration(
   const run = await runTask(
     harness,
     ws.dir,
-    REVIEW_TASK,
+    reviewTask(qualitySkill),
     {
       finding,
       sources,
@@ -861,7 +870,7 @@ export async function fixPackage(
       // Green, and now: is it worth merging? Verification cannot answer that.
       const reviewed = await reviewMigration(
         writer, ws, phaseOpts, baseline, agentFinding, findings,
-        extraFiles, candidates, progress,
+        extraFiles, candidates, progress, options.reviewSkill,
       );
       if (reviewed) {
         verification = reviewed.report;
@@ -1260,7 +1269,7 @@ export async function fixVulnerability(
 
       const reviewed = await reviewMigration(
         writer, ws, phaseOpts, baseline, polishFinding, [],
-        extraFiles, [], progress,
+        extraFiles, [], progress, options.reviewSkill,
       );
       if (reviewed) verification = reviewed.report;
     }

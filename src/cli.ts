@@ -924,6 +924,8 @@ async function runPinFixes(repoDir: string, findings: Finding[], args: Args): Pr
 interface FixContext {
   store: Store;
   reviewHarness: Harness | undefined;
+  /** The quality standard the review applies. Undefined means the default. */
+  reviewSkill: string | undefined;
 }
 
 /**
@@ -962,6 +964,7 @@ async function runVulnerabilityFixes(
       // knows how to fix it.
       useAgent: agentAllowed(args),
       ...(ctx.reviewHarness ? { reviewHarness: ctx.reviewHarness } : {}),
+      ...(ctx.reviewSkill ? { reviewSkill: ctx.reviewSkill } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
 
@@ -1108,6 +1111,7 @@ async function runPackageFixes(
       useAgent: agentAllowed(args),
       ...(harness ? { harness } : {}),
       ...(ctx.reviewHarness ? { reviewHarness: ctx.reviewHarness } : {}),
+      ...(ctx.reviewSkill ? { reviewSkill: ctx.reviewSkill } : {}),
       onProgress: (m) => console.log(c.dim(`    ${m}`)),
     });
 
@@ -1231,7 +1235,12 @@ async function cmdFix(args: Args): Promise<number> {
   }
 
   console.log('');
-  const ctx: FixContext = { store, reviewHarness: reviewHarnessFrom(args) };
+  const skillFlag = args.flags.get('review-skill');
+  const ctx: FixContext = {
+    store,
+    reviewHarness: reviewHarnessFrom(args),
+    reviewSkill: typeof skillFlag === 'string' ? skillFlag : undefined,
+  };
 
   // Collected rather than folded into a running flag. `anyVerified ||= await …`
   // reads better and is wrong: once one branch has verified, `||=` stops
@@ -1728,6 +1737,12 @@ ${c.bold('COMMANDS')}
                     a shared module a caller leaked into, a call that now
                     returns different rows. It changes nothing; the notes go in
                     the pull request body.
+    --review-skill=<name|path>
+                    The quality standard the review applies. Defaults to
+                    thermo-nuclear-code-quality-review, which ships in skills/.
+                    Migration completeness is always applied on top
+                    and is not selectable — a review that dropped it would judge
+                    the elegance of a migration that never finished.
     --no-review     Skip that pass. It is the only one that reads what a change
                     means rather than what it says, so skipping it is a choice.
     --keep          Leave the workspace on disk for inspection
