@@ -169,17 +169,22 @@ test('a review edit outside the migration diff is churn by definition', () => {
   assert.equal(classified[0]?.evidence, 'unrequested');
 });
 
-test('review allows itself no window, where lint needs one', () => {
+test('lint reaches past the line it was given; review no longer needs to', () => {
   // Measured difference, not a style choice. A linter names the head of a
   // construct — the `RUN` — while the fix spans its continuations, so lint must
-  // reach past the flagged line. Review's anchor IS the migration's own edit, so
-  // an improvement to it already overlaps; three lines of slack there is enough
-  // to reach the next statement, which is the drift being prevented.
-  const nearby = [{ file: 'src/schema.ts', start: 28, end: 28 }];
-  assert.equal(classifyHunks(nearby, reviewGate(MIGRATION_DIFF))[0]?.evidence, 'unrequested');
-
+  // reach past the flagged line.
+  //
+  // Review used to be the strict half of this pair: no window at all, because
+  // its anchor WAS the migration's own edit. That bound is gone — it is now
+  // scoped by file, since a restructuring is never on the lines the migration
+  // happened to touch. See "the reviewer may work anywhere in a file the
+  // migration touched" below for the boundary that replaced it.
   const lint = lintGate([{ file: 'Dockerfile', line: 3 }]);
   assert.equal(classifyHunks([{ file: 'Dockerfile', start: 5, end: 5 }], lint)[0]?.evidence, 'evidenced');
+
+  // And lint is still bounded by line, not by file — its findings are the
+  // complete list of what is wrong, so distance from them is churn.
+  assert.equal(classifyHunks([{ file: 'Dockerfile', start: 40, end: 40 }], lint)[0]?.evidence, 'unrequested');
 });
 
 test('lint reverts a change away from every flagged line', () => {
@@ -263,4 +268,35 @@ test('the reviewer is still held to where it may write, which is a different que
 
   assert.equal(classified[0]?.evidence, 'evidenced', 'inside the migration it may speak');
   assert.equal(classified[1]?.evidence, 'unrequested', 'outside it, it may not');
+});
+
+test('the reviewer may work anywhere in a file the migration touched', () => {
+  // Widened deliberately. The quality skill asks for restructuring — extract a
+  // helper, split a file, collapse a branch — and a line-level anchor reverts
+  // every one of those on arrival, because the better shape is by definition not
+  // on the lines the migration happened to change. A reviewer whose every
+  // suggestion is undone before verification is a reviewer in name.
+  //
+  // Still bounded, and the bound is the one that matters: a file the migration
+  // never opened is not this pass's business. Verification remains the judge of
+  // whether the restructuring was any good, and reverts the lot if it was not.
+  const migrationDiff = `diff --git a/src/schema.ts b/src/schema.ts
+--- a/src/schema.ts
++++ b/src/schema.ts
+@@ -25,3 +25,3 @@
+-z.record(z.string());
++z.record(z.string(), z.unknown());
+`;
+  const classified = classifyHunks(
+    [
+      { file: 'src/schema.ts', start: 25, end: 27 },
+      { file: 'src/schema.ts', start: 4, end: 9 },
+      { file: 'src/unrelated.ts', start: 90, end: 92 },
+    ],
+    reviewGate(migrationDiff),
+  );
+
+  assert.equal(classified[0]?.evidence, 'evidenced', 'on the migration’s own lines');
+  assert.equal(classified[1]?.evidence, 'evidenced', 'elsewhere in the same file — the comment case');
+  assert.equal(classified[2]?.evidence, 'unrequested', 'a file the migration never opened');
 });

@@ -112,6 +112,16 @@ export interface HunkGate {
   /** Slack either side of an anchor, in lines. */
   window?: number;
   /**
+   * Files where any line is fair game, whatever the anchors say.
+   *
+   * For a pass whose job is *shape* rather than a specific line. The review
+   * skill asks for extraction, decomposition and branch removal, and the better
+   * shape is by definition not on the lines the migration happened to touch — so
+   * a line-level anchor reverts every restructuring on arrival and leaves a
+   * reviewer that can only agree.
+   */
+  files?: ReadonlySet<string>;
+  /**
    * A hunk matching neither list.
    *
    * `allow` when there can be a cause Emend cannot see — a bump breaks
@@ -204,6 +214,8 @@ export function reviewGate(
 ): HunkGate {
   return {
     anchors: [...touchedLines(migrationDiff), ...unfinishedDeprecations],
+    // Whole files, not just the lines. See `HunkGate.files`.
+    files: new Set(touchedLines(migrationDiff).map((d) => d.file)),
     unanchored: 'revert',
     whenNoAnchors: 'judge',
     evidenceName: 'the migration',
@@ -299,6 +311,9 @@ export function classifyHunks(hunks: DiffHunk[], gate: HunkGate): HunkClassifica
   }
 
   return hunks.map((hunk): HunkClassification => {
+    if (gate.files && [...gate.files].some((f) => sameFile(f, hunk.file))) {
+      return { hunk, evidence: 'evidenced', reason: `${hunk.file} is a file ${evidence} changed` };
+    }
     if (covers(gate.anchors, hunk)) {
       return { hunk, evidence: 'evidenced', reason: `${evidence} points into ${hunk.file}:${hunk.start}` };
     }

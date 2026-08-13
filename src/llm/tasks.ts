@@ -26,6 +26,7 @@
 import { renderImpact, type SymbolImpact } from '../impact.ts';
 import type { CallSite, Finding, SurfaceChange } from '../types.ts';
 import { NARROWING, WRITE_AND_REPORT, type Skill } from './skills.ts';
+import { loadSkill, REVIEW_SKILL_DEFAULT, COMPLETENESS_SKILL } from './skillfiles.ts';
 
 /**
  * One job the model can be given.
@@ -190,35 +191,47 @@ You are given the API changes in a dependency upgrade, the exact lines in a code
  *  - The migration repeated the same coercion at nine call sites. The reviewer
  *    extracted one module and the diff got smaller.
  */
-export const REVIEW_TASK: Task<ReviewContext> = {
-  name: 'review',
-  preamble: `You are a demanding code reviewer with commit rights, reviewing a dependency migration that already compiles and passes its tests.
+/**
+ * The review, composed from two skills rather than a fixed block of prose.
+ *
+ * **Completeness under quality, in that order.** They answer different
+ * questions and only one of them is a matter of taste. `migration-completeness`
+ * asks whether the migration did what it reported — the deprecated call gone,
+ * the comment it falsified corrected — and is not swappable, because a review
+ * that skipped it would judge the elegance of a migration that never finished.
+ * The quality skill on top is a house opinion about what good code looks like,
+ * and hard-coding one would make disagreeing with Emend a fork.
+ *
+ * Rule order is the precedence. `systemPrompt` numbers them in sequence, and the
+ * completeness rules come first because a structural regression outranks a
+ * simplification but an unfinished migration outranks both.
+ */
+export function reviewTask(qualitySkill: string = REVIEW_SKILL_DEFAULT): Task<ReviewContext> {
+  return {
+    name: 'review',
+    preamble: `You are a demanding code reviewer with commit rights, reviewing a dependency migration that already compiles and passes its tests.
 
-Passing is the floor, not the goal. Decide whether this diff leaves the codebase better or merely green, and fix it where it does not.`,
-  rulesHeading: `Rules you must follow:`,
-  rules: [
-    `Behaviour must not change. This is a restructuring pass. The one exception: replacing a deprecated API with its supported equivalent is the migration finishing its job, not a behaviour change.`,
-    `Finish the migration first. If you are told a deprecated symbol is still imported, removing it is the highest-priority edit in this pass. A migration that reports "X is deprecated" and still uses X has not done what it said. Use the package's supported replacement; if there is none, leave it and say so in "rationale".`,
-    `Then look for the move that deletes complexity rather than rearranging it. Work this list in order — a structural regression outranks every simplification below it, and naming a nit while a structural problem stands is a wasted pass:
-   - Ad-hoc branching added to an existing flow, or a "temporary" special case that will become permanent. Spaghetti growth is the regression that compounds.
-   - The same edit repeated at three or more call sites is a missing helper. Extract it once, in the layer that owns that boundary, and call it.
-   - Conditionals, flags or special cases the diff added where a better shape would need none.
-   - Independent \`await\`s the diff made sequential. If two operations do not depend on each other, \`Promise.all\` is both faster and clearer; only leave them sequential when ordering is load-bearing.
-   - Logic applied in steps that can leave state half-updated if one step throws. Either make it atomic or make the partial state impossible to observe.
-   - Casts, \`any\`, \`unknown\` or new optionality that hides an invariant instead of stating it. A loosely-shaped ad-hoc object where an explicit type belongs is the same problem.
-   - A wrapper or indirection that does not earn the extra hop.`,
-    `Do not reformat, rename, or restructure code the migration did not touch. Out-of-scope churn buries the change under noise and is the fastest way for a reviewer to reject an otherwise good pull request.
-   This boundary is ENFORCED, not requested: every region you change is checked against the migration's own diff, and one that does not overlap a line the migration changed is reverted before anything is verified. You have a single attempt, so spending it on code outside the diff spends it on nothing. Repository-wide concerns — a file grown too long, feature logic that belongs in a different module — are real and are not this pass's job; say them in "rationale" instead, where they reach a human.
-   Comments are the exception, and only when the migration made one false. A comment naming the old version, or describing behaviour the migration changed, is now wrong and correcting it finishes the job. Rewrite it to describe what the code does now, in a form that reads correctly on its own — do not repeat a sentence that already appears beside it, and do not leave a fragment of the old one. A comment the migration did not falsify stays exactly as it is.`,
-    `When a coercion has to stand in for missing data, prefer a value the caller can detect over one it cannot. \`Number(x ?? 0)\` renders a real string as "0", which no test objects to and no reader spots; returning null, or a sentinel the formatter understands, keeps the absence visible.`,
-    `If the diff is already good, change nothing and say why. That is a valid and useful answer — a pass that invents work to look busy is worse than one that declines.`,
-  ],
-  closing: [
-    `Prefer a small number of high-conviction structural improvements to an exhaustive list of nits.`,
-    WRITE_AND_REPORT,
-  ],
-  render: renderReview,
-};
+Passing is the floor, not the goal. Decide whether this diff leaves the codebase better or merely green, and fix it where it does not. You have edit rights: make the changes, do not merely describe them.`,
+    rulesHeading: `Rules you must follow:`,
+    rules: [
+      `Two standards apply, and they are stated in full below. MIGRATION COMPLETENESS says when the migration is finished; CODE QUALITY says whether the result is good. Where they conflict, finishing wins — a beautifully restructured migration that still calls the deprecated API has not done its job.`,
+      `You may edit any file the migration touched. Work outside those files is reverted before anything is verified, so spending your single attempt there spends it on nothing — say those concerns in "rationale" instead, where they reach a human.`,
+    ],
+    closing: [
+      // Below the numbered rules, not among them: each skill carries its own
+      // headings and its own numbering, and nesting that inside Emend's would
+      // put two "rule 1"s in one prompt — the exact collision the generated
+      // numbering exists to prevent.
+      { name: 'completeness', text: `--- STANDARD 1: MIGRATION COMPLETENESS ---\n\n${loadSkill(COMPLETENESS_SKILL).text}` },
+      { name: 'quality', text: `--- STANDARD 2: CODE QUALITY ---\n\n${loadSkill(qualitySkill).text}` },
+      WRITE_AND_REPORT,
+    ],
+    render: renderReview,
+  };
+}
+
+/** The review as configured by default. */
+export const REVIEW_TASK: Task<ReviewContext> = reviewTask();
 
 /**
  * The follow-up task: the migration is green and the `any` annotations have been

@@ -181,7 +181,15 @@ test('the review prompt demands the deprecation be finished before anything else
   assert.match(REVIEW_SYSTEM_PROMPT, /has not done what it said/);
   // The two human-review findings that motivated this pass, neither of which
   // could fail verification.
-  assert.match(REVIEW_SYSTEM_PROMPT, /repeated at three or more call sites is a missing helper/);
+  //
+  // Duplication is now asserted in its general form. The specific threshold —
+  // "the same edit repeated at three or more call sites is a missing helper" —
+  // was a measured rule from a human review, and it did not survive swapping the
+  // quality half for `thermo-nuclear-code-quality-review`, which says
+  // "copy-pasted logic instead of extracted helpers" without a count. Recorded
+  // as a real if small loss of specificity rather than quietly dropped: the
+  // price of the quality standard being someone else's to choose.
+  assert.match(REVIEW_SYSTEM_PROMPT, /copy-pasted logic|missing helper/i);
   assert.match(REVIEW_SYSTEM_PROMPT, /renders a real string as "0"/);
   // And the licence to decline, so the pass does not invent work to look busy.
   // Worded as "change nothing" since §11: there is no edit array to return
