@@ -294,6 +294,30 @@ function refused(reason: string, log = ''): EscalationResult {
 }
 
 /**
+ * What the engine said about doing nothing, if it said anything.
+ *
+ * The migration task already ends "If you changed nothing, say that plainly and
+ * why", so the answer exists — it arrives as `text` events and `summariseEvents`
+ * collects them into `summary`. It was then handed to `refused` as the *log*,
+ * and `runCase` records only the reason, so the one field written to answer this
+ * question was dropped exactly when it was asked.
+ *
+ * Only `summary` is quoted. `log` is documented as lossless and `summary` as the
+ * readable one "for the PR body, where the log is noise", so putting a log into a
+ * table cell would contradict that field's own contract — better to say less than
+ * to say junk.
+ *
+ * Single-lined and clipped because this reaches `CaseOutcome.inconclusive`, which
+ * `renderSummary` renders inside a markdown row: a newline breaks the table and
+ * an unbounded monologue destroys the thing it was meant to explain.
+ */
+function lastWord(summary: string | undefined): string {
+  const said = summary?.split('\n').map((line) => line.trim()).filter(Boolean).at(-1);
+  if (!said) return '';
+  return ` — it said: "${said.length > 160 ? `${said.slice(0, 159)}…` : said}"`;
+}
+
+/**
  * Run a harness and hold its output to the same evidence rule as a proposed edit.
  *
  * The index is borrowed to establish a baseline: staging everything before the
@@ -344,7 +368,15 @@ export async function escalate(
     if (diff.trim() === '') {
       // An empty diff after an escalation is not a repair, and reporting it as
       // one is how a run that did nothing gets recorded as a run that worked.
-      const why = run.ok ? `${harness.id} changed nothing` : `${harness.id} changed nothing — ${run.error ?? 'no reason given'}`;
+      //
+      // The two cases are named apart because they are different failures. An
+      // engine that errored has already said why; one that reported *success*
+      // and wrote nothing has not, and it is the harder of the two — it finished
+      // believing the work was done, so nothing downstream has a reason to look
+      // again. Measured: one run in twelve, no error, credits to spare.
+      const why = run.ok
+        ? `${harness.id} reported success and changed nothing${lastWord(run.summary)}`
+        : `${harness.id} changed nothing — ${run.error ?? 'no reason given'}`;
       return refused(why, (run.summary ?? run.log));
     }
 

@@ -30,7 +30,7 @@ import { scanRepo, type ScanOptions } from './analyze.ts';
 import { fixPackage } from './fix.ts';
 import type { Harness } from './harness.ts';
 import { countTypeEscapes } from './pr.ts';
-import { remainingDeprecations } from './quality.ts';
+import { remainingDeprecations, resolveChecks, type ResolutionCheck } from './quality.ts';
 import type { VerifyOutcome } from './types.ts';
 
 const execFileAsync = promisify(execFile);
@@ -47,15 +47,38 @@ export interface EvalCase {
     | { kind: 'local'; dir: string }
     | { kind: 'git'; url: string; ref: string };
   /**
-   * How many edits the correct migration needs.
+   * How many edits the correct migration needs, in logical edits.
    *
-   * The denominator for over-editing. Recorded per case because it is a property
-   * of the migration, not of any model: zod 3 -> 4 on the demo repository needs
-   * exactly two.
+   * **The scale a reported ratio is expressed in — not a threshold.** Nothing is
+   * judged against this in either direction, and both directions were dropped for
+   * their own reason.
+   *
+   * Under-counting was unsound. `CaseOutcome.editsApplied` counts diff hunks, and
+   * a hunk is a contiguous region, so `hunks <= edits` always: fewer hunks than
+   * this is equally consistent with a finished migration whose edits merged.
+   * Measured rather than argued — all six of zod's required edits, applied to the
+   * fixture by hand, produce four hunks at `GATE_CONTEXT`, because its
+   * deprecations sit on lines 11, 12 and 14 of `schema.ts` with unchanged context
+   * between them. react-query's two are adjacent and produce one. Both cases spent
+   * an entire pinned sweep at their ceiling being called incomplete.
+   *
+   * Over-counting was sound and still wrong to score with: the review pass exists
+   * to edit, and a scoreboard that charges it for editing argues with the
+   * reviewer-judges design rather than measuring it.
+   *
+   * Whether the migration finished is `mustResolve`, which reads the code instead
+   * of counting regions.
    */
   minimalEdits: number;
-  /** Symbols that must no longer be reachable once the migration is finished. */
-  mustResolve?: string[];
+  /**
+   * What must no longer be in its pre-migration form once the migration is done.
+   *
+   * The completeness signal, and the reason under-counting is no longer a
+   * penalty. Optional because a third-party corpus may make no completeness
+   * claim; every built-in case declares one, held by a test, so this corpus
+   * cannot regress to unmeasured.
+   */
+  mustResolve?: ResolutionCheck[];
 }
 
 /** What one run of one case under one model produced. */
@@ -89,9 +112,25 @@ export interface CaseOutcome {
    * engine never ran is the same claim, made by the thing that measures.
    */
   inconclusive?: string;
+  /**
+   * Deterministic edits plus kept diff hunks.
+   *
+   * A *lower bound* on the work done, because hunks merge. Read as a bound on
+   * over-editing only; `unresolved` is what says whether the migration finished.
+   */
   editsApplied: number;
   /** Edits the evidence gate withheld — informational, never a penalty. */
   editsWithheld: number;
+  /** Symbols the case required and the migration left in their old form. */
+  unresolved?: string[];
+  /**
+   * Completeness checks that could not be evaluated at all.
+   *
+   * Beside `unresolved` rather than inside it, for the same reason `inconclusive`
+   * sits beside the rates: "could not check" and "checked and found wanting" are
+   * different claims, and only one of them is about the migration.
+   */
+  uncheckable?: string[];
   errorsBefore: number;
   errorsAfter: number;
   /** Added lines trading a type check for a compile. */
@@ -149,19 +188,34 @@ export function scoreCase(evalCase: EvalCase, outcome: CaseOutcome): CaseScore {
   if (outcome.typeEscapes > 0) {
     penalties.push(`${outcome.typeEscapes} type escape(s) — a green build bought with \`any\``);
   }
-  // Both directions. Doing too much is churn a reviewer has to read; doing too
-  // little is a migration that reported work it did not do, and a scorer that
-  // only punished the first would rank the least complete run highest — which is
-  // precisely what the first live sweep did.
-  if (outcome.editsApplied > minimal) {
+  // Whether the migration finished, read off the code rather than off a count.
+  // This is the half of the old edit-count penalty that was worth keeping: the
+  // first live sweep ranked qwen3-coder top at 0.4x for fixing two compile errors
+  // and skipping all three deprecations, and something has to catch that.
+  if (outcome.unresolved && outcome.unresolved.length > 0) {
     penalties.push(
-      `${outcome.editsApplied} edit(s) where ${minimal} were required (${editRatio.toFixed(1)}x)`,
-    );
-  } else if (outcome.editsApplied < minimal) {
-    penalties.push(
-      `only ${outcome.editsApplied} of ${minimal} required edit(s) — the migration is incomplete`,
+      `${outcome.unresolved.length} symbol(s) left in their pre-migration form: ${outcome.unresolved.join(', ')}`,
     );
   }
+  if (outcome.uncheckable && outcome.uncheckable.length > 0) {
+    penalties.push(
+      `could not check ${outcome.uncheckable.length} completeness requirement(s): ${outcome.uncheckable.join(', ')}`,
+    );
+  }
+  // No edit-count penalty in either direction, and the two were dropped for
+  // different reasons. Under-counting was *unsound*: `editsApplied` counts hunks
+  // and `minimal` counts edits, so fewer proves nothing — zod's six required
+  // edits are four hunks, measured by hand on the fixture.
+  //
+  // Over-counting was sound and still wrong to score with, because the review
+  // pass is supposed to edit. The repair's judgement was handed to the reviewer
+  // and the commits after that gave the review room to act; charging it for
+  // acting argues with the design. Measured: react-query's review changed
+  // `isLoading` to `isPending` — the exact behaviour that case says the review
+  // "exists to notice" — and the count marked the run down for it.
+  //
+  // `editRatio` is still computed and still reported, as the scope signal
+  // `RECHARTS_CASE` always described. It decides nothing.
   if (outcome.verdict === 'typecheck-only') {
     penalties.push('the tests did not run, so behaviour is unverified');
   }
@@ -221,6 +275,14 @@ export interface ModelSummary {
    */
   totalHunksReverted: number;
   totalHunksKept: number;
+  /**
+   * Symbols left in their pre-migration form across the sweep.
+   *
+   * The same argument `totalEditsWithheld` and `totalHunksReverted` were added
+   * under: completeness is the signal that replaced the under-edit penalty, and
+   * one absent from the table is invisible in the only place it would be judged.
+   */
+  totalUnresolved: number;
   totalDurationMs: number;
 }
 
@@ -244,10 +306,14 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
   const byCase = new Map(cases.map((c) => [c.id, c]));
   const byModel = new Map<string, CaseScore[]>();
   const engines = new Map<string, { model: string; harness?: string }>();
-  const meta = new Map<
-    string,
-    { escapes: number; gaps: number; ms: number; withheld: number; kept: number; reverted: number }
-  >();
+  /** The per-engine totals that are summed rather than averaged. */
+  interface Totals {
+    escapes: number; gaps: number; ms: number; withheld: number;
+    kept: number; reverted: number; unresolved: number;
+  }
+  const meta = new Map<string, Totals>();
+  const zero = (): Totals =>
+    ({ escapes: 0, gaps: 0, ms: 0, withheld: 0, kept: 0, reverted: 0, unresolved: 0 });
 
   for (const outcome of outcomes) {
     const evalCase = byCase.get(outcome.caseId);
@@ -261,19 +327,20 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
     scores.push(scoreCase(evalCase, outcome));
     byModel.set(key, scores);
 
-    const m = meta.get(key) ?? { escapes: 0, gaps: 0, ms: 0, withheld: 0, kept: 0, reverted: 0 };
+    const m = meta.get(key) ?? zero();
     m.escapes += outcome.typeEscapes;
     m.withheld += outcome.editsWithheld;
     m.gaps += outcome.deprecationGaps;
     m.ms += outcome.durationMs;
     m.kept += outcome.harnessKept ?? 0;
     m.reverted += outcome.harnessReverted ?? 0;
+    m.unresolved += outcome.unresolved?.length ?? 0;
     meta.set(key, m);
   }
 
   return [...byModel.entries()]
     .map(([key, scores]) => {
-      const m = meta.get(key) ?? { escapes: 0, gaps: 0, ms: 0, withheld: 0, kept: 0, reverted: 0 };
+      const m = meta.get(key) ?? zero();
       const engine = engines.get(key) ?? { model: key };
       // Rates are computed over runs that actually happened. A run whose engine
       // produced nothing is not a failure to average in — it is an absence of
@@ -299,16 +366,21 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
         totalEditsWithheld: m.withheld,
         totalHunksReverted: m.reverted,
         totalHunksKept: m.kept,
+        totalUnresolved: m.unresolved,
         totalDurationMs: m.ms,
       };
     })
-    // Distance from the minimum, not the smallest number: 0.4x and 2.5x are both
-    // wrong, and ordering by the raw ratio puts the run that skipped most of the
-    // work at the top of the table.
+    // Clean rate decides; churn only breaks ties, and only upward. This ordered
+    // by distance from 1.0 while the ratio could err in both directions; once a
+    // *correct* migration reads below one — zod's six edits are four hunks —
+    // nearest-to-1.0 ranks the run that padded above the run that did the job.
+    // A ratio under one is merged hunks and orders no worse than an exact match;
+    // above one is more diff for a reader, which is a preference between equals
+    // rather than a verdict, since it no longer affects `clean` at all.
     .sort(
       (a, b) =>
         b.cleanRate - a.cleanRate ||
-        Math.abs(a.meanEditRatio - 1) - Math.abs(b.meanEditRatio - 1),
+        Math.max(0, a.meanEditRatio - 1) - Math.max(0, b.meanEditRatio - 1),
     );
 }
 
@@ -376,7 +448,24 @@ export async function runCase(
     const gaps = result.workspaceDir
       ? await remainingDeprecations(findings, result.workspaceDir)
       : [];
+    // Measured against the migrated tree, for the same reason the deprecation
+    // gaps are: a case declares what a finished migration looks like, and only
+    // the files it produced can answer whether it got there. A case that declares
+    // nothing asks nothing, and a workspace that is gone could not be asked —
+    // which is `unknown`, not `resolved`.
+    const resolutions = evalCase.mustResolve?.length
+      ? result.workspaceDir
+        ? await resolveChecks(evalCase.mustResolve, result.workspaceDir)
+        : evalCase.mustResolve.map((check) => ({
+            check, state: 'unknown' as const, files: [], reason: 'no workspace was kept',
+          }))
+      : [];
     if (result.workspaceDir) await rm(result.workspaceDir, { recursive: true, force: true });
+
+    const unresolved = resolutions.filter((r) => r.state === 'unresolved').map((r) => r.check.symbol);
+    const uncheckable = resolutions
+      .filter((r) => r.state === 'unknown')
+      .map((r) => `${r.check.symbol} — ${r.reason ?? 'unknown'}`);
 
     // A refusal only makes the run inconclusive when it also failed: a harness
     // that declined on a migration the deterministic phase already fixed has not
@@ -395,6 +484,8 @@ export async function runCase(
       // reverted hunks rather than withheld edits — same question, and the only
       // shape there is left to ask it in.
       editsWithheld: result.harness?.revertedHunks.length ?? 0,
+      ...(unresolved.length > 0 ? { unresolved } : {}),
+      ...(uncheckable.length > 0 ? { uncheckable } : {}),
       typeEscapes: countTypeEscapes(result.diff),
       deprecationGaps: gaps.length,
       // Recorded from the run rather than from the request: a harness that was
@@ -451,8 +542,24 @@ export const DEMO_CASE: EvalCase = {
   // the agent to skip them. It then said five until every run made exactly six
   // edits; scoring the sixth as over-editing was the harness mismeasuring, not
   // the model over-reaching.
+  //
+  // Six is also unreachable as a *hunk* count, which is what the pipeline
+  // reports. The three deprecations are on lines 11, 12 and 14 of `schema.ts`
+  // with unchanged context between them, so a perfect migration produces four
+  // hunks and the sweep read it as "4 of 6" on all three runs. `minimalEdits`
+  // above bounds over-editing; `mustResolve` measures completeness.
   minimalEdits: 6,
-  mustResolve: ['ZodError.errors', 'record', 'ZodString.uuid', 'ZodString.email', 'ZodString.datetime'],
+  // The old form in each case, never the symbol. `z.string().uuid()` becomes
+  // `z.uuid()`, so a check for `.uuid` matches the *correct* answer; `z.record`
+  // survives into zod 4 with a second parameter, so its presence proves nothing.
+  // What is checkable is the shape the migration is supposed to remove.
+  mustResolve: [
+    { symbol: 'ZodError.errors', kind: 'absent', pattern: '\\.error\\.errors\\b' },
+    { symbol: 'z.record/1', kind: 'absent', pattern: 'z\\.record\\(\\s*z\\.string\\(\\)\\s*\\)' },
+    { symbol: 'ZodString.uuid', kind: 'absent', pattern: '\\.string\\(\\)\\s*\\.uuid\\(' },
+    { symbol: 'ZodString.email', kind: 'absent', pattern: '\\.string\\(\\)\\s*\\.email\\(' },
+    { symbol: 'ZodString.datetime', kind: 'absent', pattern: '\\.string\\(\\)\\s*\\.datetime\\(' },
+  ],
 };
 
 /**
@@ -483,7 +590,9 @@ export const RECHARTS_CASE: EvalCase = {
   // scope, not a precise measure, and is read alongside the deprecation and
   // escape columns rather than on its own.
   minimalEdits: 3,
-  mustResolve: ['Cell'],
+  // A named import, so the check `remainingDeprecations` already performs is the
+  // right one — and the reason this case is in the corpus at all.
+  mustResolve: [{ symbol: 'Cell', kind: 'import', pkg: 'recharts' }],
 };
 
 /**
@@ -534,7 +643,13 @@ export const OPENAI_CASE: EvalCase = {
   // six and encoded three unrequested major versions of openai as the standard.
   // Five is the count against 4.104.0, which is the migration the case names.
   minimalEdits: 5,
-  mustResolve: ['Configuration', 'OpenAIApi'],
+  // Both stop existing in openai 4, and both are named imports, so absence is
+  // exactly what "resolved" means here — the one case where the naive reading is
+  // also the correct one.
+  mustResolve: [
+    { symbol: 'Configuration', kind: 'import', pkg: 'openai' },
+    { symbol: 'OpenAIApi', kind: 'import', pkg: 'openai' },
+  ],
 };
 
 /**
@@ -560,7 +675,21 @@ export const REACT_QUERY_CASE: EvalCase = {
   toVersion: '5.90.2',
   repo: { kind: 'fixture', name: 'react-query-repo' },
   // Two, and only the compiler-visible ones, for the reason above.
+  //
+  // Both land on adjacent lines, so a perfect migration is *one* hunk and the
+  // sweep read this case as "1 of 2" — while the one run that scored clean is the
+  // one that produced two. Doing the job exactly was penalised and doing more was
+  // rewarded, which is the inversion this scorer was rebuilt to remove.
   minimalEdits: 2,
+  // Neither is imported — one is a call shape and the other an option key — so
+  // both are `absent` checks. `isLoading` is deliberately absent from this list
+  // for the same reason it is absent from the denominator: whether replacing it
+  // is *required* is genuinely arguable, and a check that encodes an arguable
+  // edit measures the corpus author rather than the migration.
+  mustResolve: [
+    { symbol: 'useQuery/positional', kind: 'absent', pattern: 'useQuery\\(\\s*\\[' },
+    { symbol: 'cacheTime', kind: 'absent', pattern: '\\bcacheTime\\s*:' },
+  ],
 };
 
 export const BUILT_IN_CASES: EvalCase[] = [
@@ -608,8 +737,8 @@ export function renderSummary(rows: ModelSummary[]): string {
   // comparison is not widened by a column of dashes.
   const escalated = rows.some((r) => r.harness);
   const lines = [
-    `| Engine | Cases | Runs | Inconc. | Pass | Clean | Edit ratio | Withheld |${escalated ? ' Hunks kept | Hunks reverted |' : ''} Err. reduced (failed) | Escapes | Depr. gaps |`,
-    `| --- | --- | --- | --- | --- | --- | --- | --- |${escalated ? ' --- | --- |' : ''} --- | --- | --- |`,
+    `| Engine | Cases | Runs | Inconc. | Pass | Clean | Unresolved | Edit ratio | Withheld |${escalated ? ' Hunks kept | Hunks reverted |' : ''} Err. reduced (failed) | Escapes | Depr. gaps |`,
+    `| --- | --- | --- | --- | --- | --- | --- | --- | --- |${escalated ? ' --- | --- |' : ''} --- | --- | --- |`,
   ];
   const pct = (n: number): string => `${Math.round(n * 100)}%`;
   for (const r of rows) {
@@ -617,6 +746,7 @@ export function renderSummary(rows: ModelSummary[]): string {
     const engine = r.harness ? `\`${r.model}\` + \`${r.harness}\`` : `\`${r.model}\``;
     lines.push(
       `| ${engine} | ${r.casesRun}/${r.casesTotal} | ${r.runs} | ${r.inconclusive > 0 ? `**${r.inconclusive}**` : '0'} | ${pct(r.passRate)} | ${pct(r.cleanRate)} | ` +
+        `${r.totalUnresolved > 0 ? `**${r.totalUnresolved}**` : '0'} | ` +
         `${r.meanEditRatio.toFixed(1)}x | ${r.totalEditsWithheld} |` +
         (escalated ? ` ${r.totalHunksKept} | ${r.totalHunksReverted} |` : '') +
         ` ${pct(r.meanErrorReduction)} | ${r.totalTypeEscapes} | ${r.totalDeprecationGaps} |`,

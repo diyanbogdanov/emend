@@ -11,6 +11,7 @@ import {
   deprecationStillPresent,
   remainingDeprecations,
   describeDeprecationGaps,
+  resolveChecks,
 } from '../src/quality.ts';
 import type { Finding } from '../src/types.ts';
 
@@ -217,4 +218,143 @@ test('the review prompt says what to do with a comment the migration made false'
   // Specifically: the replacement has to stand on its own, which is the part
   // that failed.
   assert.match(REVIEW_SYSTEM_PROMPT, /repeat|duplicat/i);
+});
+
+// ---------------------------------------------------------------------------
+// resolveChecks — did the migration finish, and can we tell?
+// ---------------------------------------------------------------------------
+
+/** The demo fixture's zod-3 shapes, and the zod-4 forms they become. */
+const ZOD_3 = `import { z } from 'zod';
+export const C = z.object({
+  id: z.string().uuid(),
+  email: z.string().email(),
+  createdAt: z.string().datetime(),
+  meta: z.record(z.string()),
+});
+export function f(i: unknown) {
+  const r = C.safeParse(i);
+  return r.success ? [] : r.error.errors.map((e) => e.message);
+}
+`;
+
+const ZOD_4 = ZOD_3
+  .replace('z.string().uuid()', 'z.uuid()')
+  .replace('z.string().email()', 'z.email()')
+  .replace('z.string().datetime()', 'z.iso.datetime()')
+  .replace('z.record(z.string())', 'z.record(z.string(), z.string())')
+  .replace('r.error.errors', 'r.error.issues');
+
+const ZOD_CHECKS = [
+  { symbol: 'ZodError.errors', kind: 'absent' as const, pattern: '\\.error\\.errors\\b' },
+  { symbol: 'z.record/1', kind: 'absent' as const, pattern: 'z\\.record\\(\\s*z\\.string\\(\\)\\s*\\)' },
+  { symbol: 'ZodString.uuid', kind: 'absent' as const, pattern: '\\.string\\(\\)\\s*\\.uuid\\(' },
+];
+
+function repoWith(files: Record<string, string>): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-resolve-'));
+  for (const [rel, body] of Object.entries(files)) {
+    mkdirSync(path.join(dir, path.dirname(rel)), { recursive: true });
+    writeFileSync(path.join(dir, rel), body);
+  }
+  return dir;
+}
+
+test('a finished zod migration resolves every check, including the ones a symbol search cannot', async () => {
+  // The direction that matters most, because getting it wrong reports a correct
+  // migration as incomplete. `z.string().uuid()` becomes `z.uuid()`, so a search
+  // for the *symbol* `uuid` still matches — `usesMemberAccess(migrated, 'uuid')`
+  // is true of the right answer. Only the pre-migration *form* distinguishes
+  // them, which is why a check declares one.
+  const dir = repoWith({ 'src/schema.ts': ZOD_4 });
+  try {
+    const rs = await resolveChecks(ZOD_CHECKS, dir);
+    assert.deepEqual(rs.map((r) => r.state), ['resolved', 'resolved', 'resolved']);
+    // The trap, stated directly: the naive check disagrees with the correct one.
+    assert.equal(deprecationStillPresent('ZodString.uuid', 'zod', ZOD_4), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an untouched file leaves every check unresolved, and names the file', async () => {
+  const dir = repoWith({ 'src/schema.ts': ZOD_3 });
+  try {
+    const rs = await resolveChecks(ZOD_CHECKS, dir);
+    assert.deepEqual(rs.map((r) => r.state), ['unresolved', 'unresolved', 'unresolved']);
+    assert.deepEqual(rs[0]?.files, ['src/schema.ts']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('`z.record` surviving into zod 4 is why arity is checked and presence is not', async () => {
+  // The symbol is still there after a correct migration — `z.record` exists in
+  // zod 4 with a second parameter — so "is `record` present" answers the wrong
+  // question. The single-argument *call* is the thing that had to go.
+  const dir = repoWith({ 'src/schema.ts': ZOD_4 });
+  try {
+    const rs = await resolveChecks(ZOD_CHECKS, dir);
+    assert.equal(rs.find((r) => r.check.symbol === 'z.record/1')?.state, 'resolved');
+    assert.match(ZOD_4, /z\.record\(/, 'the symbol is still very much in use');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a tree with nothing readable is unknown, never resolved', async () => {
+  // The cardinal rule on the thing that measures. An empty workspace is not
+  // evidence that the migration finished; reporting `resolved` here would be the
+  // benchmark making exactly the claim Emend refuses to make about a call site it
+  // could not parse.
+  const dir = repoWith({ 'README.md': 'no source here' });
+  try {
+    const rs = await resolveChecks(ZOD_CHECKS, dir);
+    assert.deepEqual(rs.map((r) => r.state), ['unknown', 'unknown', 'unknown']);
+    assert.match(rs[0]?.reason ?? '', /no source files/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('vendored trees are not the migration', async () => {
+  // A pre-migration copy inside node_modules is the dependency, not the repo's
+  // own code, and counting it would make every case permanently unresolved.
+  const dir = repoWith({
+    'src/schema.ts': ZOD_4,
+    'node_modules/zod/index.ts': ZOD_3,
+  });
+  try {
+    const rs = await resolveChecks(ZOD_CHECKS, dir);
+    assert.deepEqual(rs.map((r) => r.state), ['resolved', 'resolved', 'resolved']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an import check sees a renamed import, because `Cell as C` still uses Cell', async () => {
+  const checks = [{ symbol: 'Cell', kind: 'import' as const, pkg: 'recharts' }];
+  const dir = repoWith({ 'src/chart.tsx': `import { Bar, Cell as C } from 'recharts';\n` });
+  try {
+    const rs = await resolveChecks(checks, dir);
+    assert.equal(rs[0]?.state, 'unresolved');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a check kind nothing recognises is unknown, not resolved', async () => {
+  // `loadCases` casts parsed JSON straight to `EvalCase[]`, so a corpus written
+  // against the old `mustResolve: ['Cell']` shape reaches here as a bare string.
+  // The fallthrough that would have regexed `undefined` reported every such check
+  // as resolved — a migration scored complete because nothing could read the
+  // requirement.
+  const dir = repoWith({ 'src/schema.ts': ZOD_3 });
+  try {
+    const rs = await resolveChecks(['ZodError.errors' as unknown as never], dir);
+    assert.equal(rs[0]?.state, 'unknown');
+    assert.match(rs[0]?.reason ?? '', /unrecognised completeness check/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
