@@ -1,5 +1,7 @@
 # Emend
 
+[![CI](https://github.com/diyanbogdanov/emend/actions/workflows/ci.yml/badge.svg)](https://github.com/diyanbogdanov/emend/actions/workflows/ci.yml)
+
 **Dependabot tells you a version changed. Emend tells you which of your lines break, fixes them, and proves the fix compiles and passes your tests.**
 
 Emend diffs the published TypeScript declarations of the dependency version you

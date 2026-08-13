@@ -1,0 +1,43 @@
+# The check CONTRIBUTING.md promises: typecheck and tests, both green, on every
+# push and pull request. For a project whose thesis is "could not check is not
+# the same as checked and clean", contributions carrying no automated check was
+# the one gap that argued with the product.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: node ${{ matrix.node }}
+    # ubuntu only, deliberately: the harness tests write `#!/bin/sh` stand-ins
+    # and execute them, so the suite is POSIX-only. A Windows lane would need
+    # those fixtures rethought, not just a matrix entry.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # engines.node is >=22.6 (native type stripping). 22 is the floor's
+        # major; 24 is what development runs on.
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # One test (fix.integration) installs packages from the public registry.
+      # It skips honestly when the registry is unreachable, so an npm outage
+      # degrades this lane rather than failing it.
+      - run: npm test
