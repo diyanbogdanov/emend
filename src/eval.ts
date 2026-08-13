@@ -49,20 +49,25 @@ export interface EvalCase {
   /**
    * How many edits the correct migration needs, in logical edits.
    *
-   * **A ceiling, not a target.** `CaseOutcome.editsApplied` counts diff hunks, and
-   * a hunk is a contiguous region, so `hunks <= edits` always. Dividing one by the
-   * other therefore supports exactly one direction: more hunks than this means
-   * more edits than this, while *fewer* is equally consistent with a finished
-   * migration whose edits merged.
+   * **The scale a reported ratio is expressed in — not a threshold.** Nothing is
+   * judged against this in either direction, and both directions were dropped for
+   * their own reason.
    *
-   * Measured rather than argued. All six of zod's required edits, applied to the
-   * fixture by hand, produce four hunks at `GATE_CONTEXT` — its deprecations sit
-   * on lines 11, 12 and 14 of `schema.ts` with unchanged context between them.
-   * react-query's two are adjacent and produce one. Both cases spent the whole
-   * pinned sweep at their ceiling being told the migration was incomplete.
+   * Under-counting was unsound. `CaseOutcome.editsApplied` counts diff hunks, and
+   * a hunk is a contiguous region, so `hunks <= edits` always: fewer hunks than
+   * this is equally consistent with a finished migration whose edits merged.
+   * Measured rather than argued — all six of zod's required edits, applied to the
+   * fixture by hand, produce four hunks at `GATE_CONTEXT`, because its
+   * deprecations sit on lines 11, 12 and 14 of `schema.ts` with unchanged context
+   * between them. react-query's two are adjacent and produce one. Both cases spent
+   * an entire pinned sweep at their ceiling being called incomplete.
    *
-   * So this bounds over-editing and nothing else. Whether the migration finished
-   * is `mustResolve`, which reads the code instead of counting regions. See §16.
+   * Over-counting was sound and still wrong to score with: the review pass exists
+   * to edit, and a scoreboard that charges it for editing argues with §14 rather
+   * than measuring it. See §16.11.
+   *
+   * Whether the migration finished is `mustResolve`, which reads the code instead
+   * of counting regions.
    */
   minimalEdits: number;
   /**
@@ -197,16 +202,20 @@ export function scoreCase(evalCase: EvalCase, outcome: CaseOutcome): CaseScore {
       `could not check ${outcome.uncheckable.length} completeness requirement(s): ${outcome.uncheckable.join(', ')}`,
     );
   }
-  // One direction only, and this is not a softening — it is the only comparison
-  // the numbers support. `editsApplied` counts hunks and `minimal` counts edits,
-  // so more hunks than `minimal` proves more edits than `minimal`, while fewer
-  // proves nothing at all: zod's six required edits are four hunks, and the old
-  // "incomplete" penalty fired on every complete run of it ever recorded. §16.
-  if (outcome.editsApplied > minimal) {
-    penalties.push(
-      `${outcome.editsApplied} edit(s) where ${minimal} were required (${editRatio.toFixed(1)}x)`,
-    );
-  }
+  // No edit-count penalty in either direction, and the two were dropped for
+  // different reasons. Under-counting was *unsound*: `editsApplied` counts hunks
+  // and `minimal` counts edits, so fewer proves nothing — zod's six required
+  // edits are four hunks (§16.1).
+  //
+  // Over-counting was sound and still wrong to score with, because the review
+  // pass is supposed to edit. §14 handed the repair's judgement to the reviewer
+  // and the commits after it gave the review room to act; charging it for acting
+  // argues with the design. Measured: react-query's review changed `isLoading` to
+  // `isPending` — the exact behaviour that case says the review "exists to
+  // notice" — and the count marked the run down for it. §16.11.
+  //
+  // `editRatio` is still computed and still reported, as the scope signal
+  // `RECHARTS_CASE` always described. It decides nothing.
   if (outcome.verdict === 'typecheck-only') {
     penalties.push('the tests did not run, so behaviour is unverified');
   }
@@ -361,11 +370,13 @@ export function summarise(cases: EvalCase[], outcomes: CaseOutcome[]): ModelSumm
         totalDurationMs: m.ms,
       };
     })
-    // Excess only. This ordered by distance from 1.0 while the ratio could err in
-    // both directions; once a *correct* migration reads below one — zod's six
-    // edits are four hunks — nearest-to-1.0 ranks the run that padded above the
-    // run that did the job, which is the inversion the sort exists to prevent.
-    // Doing less is no longer measured here at all; `totalUnresolved` measures it.
+    // Clean rate decides; churn only breaks ties, and only upward. This ordered
+    // by distance from 1.0 while the ratio could err in both directions; once a
+    // *correct* migration reads below one — zod's six edits are four hunks —
+    // nearest-to-1.0 ranks the run that padded above the run that did the job.
+    // A ratio under one is merged hunks and orders no worse than an exact match;
+    // above one is more diff for a reader, which is a preference between equals
+    // rather than a verdict, since it no longer affects `clean` at all.
     .sort(
       (a, b) =>
         b.cleanRate - a.cleanRate ||
