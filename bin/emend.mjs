@@ -8,11 +8,16 @@
  * launching.
  *
  * There are two because Node refuses to strip types for files under
- * `node_modules` and offers no way to ask it to. From a checkout the sources run
- * as they always have; an installed package runs `dist/cli.js`, which
- * `npm run build` produces and `prepack` guarantees is there. Preferring the
- * bundle only when it exists keeps development on the sources, where a change
- * takes effect when it is saved rather than when it is rebuilt.
+ * `node_modules` and offers no way to ask it to. So that — being installed — is
+ * the question, and it is asked directly rather than through a proxy for it.
+ *
+ * Both proxies were tried first and both are wrong in one layout each. "Prefer
+ * the bundle when it exists" is a trap in a checkout: one `npm pack` leaves a
+ * `dist/` behind, and from then on every run silently executes it while the
+ * developer edits files that no longer do anything. "Prefer the sources when
+ * they exist" is a trap the other way: `npm install github:…` puts the whole
+ * repository under `node_modules`, sources and all, which is precisely the case
+ * Node refuses. Node's own rule is the only one true in both.
  */
 
 import { spawn } from 'node:child_process';
@@ -22,10 +27,24 @@ import { totalmem } from 'node:os';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const bundle = path.resolve(here, '..', 'dist', 'cli.js');
 const sources = path.resolve(here, '..', 'src', 'cli.ts');
-const bundled = existsSync(bundle);
-const cli = bundled ? bundle : sources;
+const bundle = path.resolve(here, '..', 'dist', 'cli.js');
+const installed = here.split(path.sep).includes('node_modules');
+const cli = installed ? bundle : sources;
+
+// An install with no bundle cannot run at all, and the error Node gives for it
+// names a `.ts` file and a constant nobody has heard of. Say what is actually
+// missing instead: `prepare` builds it, so getting here means the package was
+// assembled by hand or the build was skipped.
+if (installed && !existsSync(bundle)) {
+  console.error(
+    `emend: installed without its bundle — ${bundle} does not exist.\n` +
+      'The published package cannot run from TypeScript sources: Node declines to\n' +
+      'strip types under node_modules. Reinstall from npm, or run `npm run build`\n' +
+      'in the source of this install.',
+  );
+  process.exit(1);
+}
 
 /**
  * Give V8 most of the machine rather than its default ceiling.
@@ -46,7 +65,7 @@ const child = spawn(
     // whatever the code was written in, and it announces itself on every
     // command. Only the stripping is about which of the two is running.
     '--disable-warning=ExperimentalWarning',
-    ...(bundled ? [] : ['--experimental-strip-types']),
+    ...(installed ? [] : ['--experimental-strip-types']),
     cli,
     ...process.argv.slice(2),
   ],

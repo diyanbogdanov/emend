@@ -64,7 +64,8 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      # `prepack` bundles, so this is also the check that the build works.
+      # `prepare` bundled during `npm ci` above, so packing is also the check
+      # that the build works.
       - run: npm pack --pack-destination /tmp
       - name: install the tarball into a bare project
         run: |

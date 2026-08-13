@@ -45,8 +45,8 @@ together is in [docs/architecture.md](docs/architecture.md).
 
 Requires **Node 22.6+** (uses native TypeScript type stripping — a checkout runs
 its sources directly, with no build step). Node declines to strip types under
-`node_modules`, so the published package ships a bundle instead; `npm run build`
-makes it and packing runs that for you.
+`node_modules`, so anything installed runs a bundle instead; `npm run build`
+makes it and `prepare` runs that for you, on install and on pack alike.
 
 Repairing anything also requires the [`opencode`](https://opencode.ai) binary on
 your `PATH`, plus a key for a model it can reach. Scanning does not — `emend

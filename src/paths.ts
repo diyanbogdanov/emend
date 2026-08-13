@@ -35,8 +35,11 @@ export const PACKAGE_ROOT: string = (() => {
   let dir = path.dirname(fileURLToPath(import.meta.url));
   // Bounded rather than "until the filesystem root": an unbounded walk from a
   // module in the wrong place finds whatever package.json is nearest above it
-  // and confidently reads another project's directories as Emend's own. Four is
-  // `src/llm/` with room to spare, and a miss is an error rather than a guess.
+  // and confidently reads another project's directories as Emend's own. The
+  // walk starts from *this* module, which is one level down in both layouts —
+  // `src/paths.ts` and, once bundled into it, `dist/cli.js` — so two is the
+  // real requirement and the extra two are slack. A miss is an error, not a
+  // guess.
   for (let up = 0; up < 4; up++) {
     if (existsSync(path.join(dir, 'package.json'))) return dir;
     const parent = path.dirname(dir);

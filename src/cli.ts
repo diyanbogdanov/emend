@@ -66,6 +66,9 @@ import type { CallSite, Finding, ScanReport } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
+/** Every spelling of "show me the usage", none of which is a failure. */
+const HELP_COMMANDS = new Set(['help', '--help', '-h']);
+
 /**
  * How a driving session re-enters Emend to reach its MCP tools.
  *
@@ -2064,7 +2067,13 @@ async function main(): Promise<void> {
         break;
       default:
         usage();
-        process.exitCode = args.command === 'help' ? 0 : 1;
+        // Asking for help is not an error in any of its spellings. The first
+        // argv entry is the command, and `parseArgs` defaults it to `help` when
+        // there is none — so bare `emend` exited 0 while `emend --help` arrived
+        // here as the *command* `--help`, matched nothing, and exited 1. It is
+        // the most common way there is to check that a CLI works at all, and it
+        // failed the packaging smoke test doing exactly that.
+        process.exitCode = HELP_COMMANDS.has(args.command) ? 0 : 1;
     }
   } catch (err) {
     console.error('');

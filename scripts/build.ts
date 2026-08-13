@@ -9,8 +9,10 @@
  * before it shipped: `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`, from a
  * tarball, on the first command in the README.
  *
- * So this exists for distribution and nothing else. `npm run build` before
- * packing, never during development.
+ * So this exists for distribution and nothing else. `prepare` runs it, so it is
+ * not something to remember; a checkout goes on running its sources whether or
+ * not a `dist/` is sitting beside them, because the launcher goes by whether it
+ * is under `node_modules` rather than by what has been built.
  *
  *   node --experimental-strip-types scripts/build.ts
  */
@@ -60,7 +62,7 @@ const result = await build({
 
 const bytes = Object.values(result.metafile.outputs).reduce((n, o) => n + o.bytes, 0);
 const inputs = Object.keys(result.metafile.inputs).length;
-// stderr, because `prepack` runs this and `npm pack --json` puts machine-readable
+// stderr, because `prepare` runs this and `npm pack --json` puts machine-readable
 // output on stdout. Progress written there is not a second opinion about what was
 // packed, it is corruption of the answer — measured, as an unparseable `--json`.
 console.error(`bundled ${inputs} module(s) -> dist/cli.js (${(bytes / 1024).toFixed(0)}kB)`);

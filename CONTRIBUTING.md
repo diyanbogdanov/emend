@@ -36,11 +36,18 @@ npm run typecheck
 npm test
 ```
 
-Both must be green. You do not need `npm run build` — that bundles the CLI for
-publishing, and a checkout runs its sources directly. Reach for it only if you
-touched how Emend finds the files it ships beside the code (`skills/`,
-`fixtures/`, `bin/`), because those resolve differently once bundled and CI
-proves it by installing the tarball rather than by reading the diff. If you changed anything the agent does — a prompt, the
+Both must be green.
+
+You do not need to run `npm run build` yourself. It bundles the CLI for
+publishing, `npm install` runs it for you through `prepare`, and a checkout runs
+its sources regardless of whether a `dist/` is sitting there — the launcher goes
+by whether it is under `node_modules`, not by what has been built. The one thing
+worth building deliberately for is a change to how Emend finds the files it
+ships beside the code (`skills/`, `fixtures/`, `bin/`): those resolve differently
+once bundled, and CI proves it by installing the tarball rather than by reading
+the diff.
+
+If you changed anything the agent does — a prompt, the
 evidence gate, the planner — also run:
 
 ```bash

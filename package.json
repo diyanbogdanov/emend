@@ -39,7 +39,7 @@
   },
   "scripts": {
     "build": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/build.ts",
-    "prepack": "npm run build",
+    "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning test/*.test.ts",
     "emend": "node bin/emend.mjs",
