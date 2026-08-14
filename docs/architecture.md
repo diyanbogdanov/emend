@@ -499,3 +499,25 @@ Node 22.6+, native TypeScript type stripping, **no build step**. Two runtime
 dependencies (`typescript`, `yaml`). `node:sqlite` for persistence. That is
 deliberate: a tool that audits other people's dependency trees should be able to
 account for its own.
+
+---
+
+## 9. Design decisions worth knowing
+
+**A version bump is atomic.** All findings for one package are fixed together in
+one workspace and land as one PR. Fixing them separately would make each look
+like a regression (alone, each *is* insufficient) and produce conflicting PRs.
+
+**Signature-change filtering is version-aware.** Within a major version a changed
+signature is unusual and probably deliberate, so it's reported. Across a major
+version, an internal rewrite changes nearly every signature string without
+changing any contract — so Emend demands the one signal it can trust, a newly
+*required* parameter. Without this filter the zod 3→4 scan reported 2,100+
+"breaking" changes, essentially all noise.
+
+**The planner refuses to guess.** If two replacement symbols match equally well,
+or the only candidate is itself deprecated, it produces no plan rather than a
+coin flip.
+
+**PRs are drafts, and `emend pr` is a dry run by default.** Opening a PR requires
+`--create`, and Emend refuses to open one for a change that didn't verify.

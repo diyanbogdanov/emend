@@ -8,7 +8,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readdir, cp, access, rm } from 'node:fs/promises';
+import { mkdir, readdir, cp, access, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { emendPath } from './paths.ts';
@@ -68,6 +68,9 @@ const execFileAsync = promisify(execFile);
 
 /** Every spelling of "show me the usage", none of which is a failure. */
 const HELP_COMMANDS = new Set(['help', '--help', '-h']);
+
+/** Every spelling of "which version is this", none of which is a failure. */
+const VERSION_COMMANDS = new Set(['version', '--version', '-v']);
 
 /**
  * How a driving session re-enters Emend to reach its MCP tools.
@@ -2013,6 +2016,10 @@ ${c.bold('EXAMPLE')}
   emend scan ./emend-demo --only zod
   emend fix ./emend-demo
 
+${c.bold('GLOBAL')}
+  --version, -v   Print the running version and exit
+  --help, -h      Print this usage and exit
+
 ${c.bold('LLM AGENT')} ${c.dim('(any OpenAI-compatible endpoint; on by default)')}
   export EMEND_LLM_PROVIDER=openrouter    # or deepinfra, nebius, fireworks, groq, ollama...
   export OPENROUTER_API_KEY=...
@@ -2030,9 +2037,33 @@ ${c.bold('LLM AGENT')} ${c.dim('(any OpenAI-compatible endpoint; on by default)'
 `);
 }
 
+/**
+ * The running version, read from the manifest rather than held as a constant.
+ *
+ * A literal in the source is a second place the version lives, and the one
+ * `npm version` does not update — so it goes stale exactly where it is quoted
+ * from, which is a bug report. `PACKAGE_ROOT` is already the answer to "where
+ * are Emend's own files", and it is correct in a checkout and in a bundle
+ * alike.
+ */
+async function printVersion(): Promise<void> {
+  const manifest = JSON.parse(await readFile(emendPath('package.json'), 'utf8')) as {
+    version?: string;
+  };
+  console.log(manifest.version ?? 'unknown');
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   try {
+    // Answered before the dispatch rather than as a case in it: asking a CLI its
+    // version is not one of its commands, and every spelling reached `default`,
+    // printed the usage, and exited 1 — which is a failure exit for the question
+    // most likely to be asked by a script checking whether Emend is installed.
+    if (VERSION_COMMANDS.has(args.command)) {
+      await printVersion();
+      return;
+    }
     switch (args.command) {
     case 'mcp':
       // Speaks JSON-RPC on stdout, so nothing else may write there.
