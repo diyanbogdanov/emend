@@ -1,0 +1,48 @@
+name: Bug report
+description: Emend crashed, hung, or behaved unexpectedly
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Command you ran
+      description: The full command, including flags.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output or stack trace
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Emend version
+      description: "Output of `emend --version`, or the commit SHA."
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: "Output of `node --version`. Emend requires 22.6+."
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 15.2 / Ubuntu 24.04 / Windows 11"

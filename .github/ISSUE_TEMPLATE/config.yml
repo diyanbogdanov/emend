@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/diyanbogdanov/emend/security/advisories/new
+    about: Please report security issues privately — see SECURITY.md.
+  - name: Commercial licence
+    url: https://github.com/diyanbogdanov/emend/issues/new
+    about: Embedding Emend without AGPL obligations. Open an issue to start the conversation.
+  - name: How it works
+    url: https://github.com/diyanbogdanov/emend/blob/main/docs/architecture.md
+    about: The design, the three tiers of evidence, and where the model deliberately does not participate.
+  - name: Known limitations
+    url: https://github.com/diyanbogdanov/emend/blob/main/docs/limitations.md
+    about: Every measured case where Emend can be wrong or silent. Worth checking before filing.

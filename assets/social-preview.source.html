@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1280px; height:640px; }
+  body {
+    background:
+      radial-gradient(1100px 620px at 88% -12%, rgba(74,222,128,.13), transparent 60%),
+      radial-gradient(760px 520px at -8% 108%, rgba(56,189,248,.10), transparent 62%),
+      #0A0D13;
+    color:#E8EDF5;
+    font-family:"Inter","SF Pro Display",-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+    padding:64px 72px 56px;
+    display:flex; flex-direction:column; justify-content:space-between;
+    position:relative; overflow:hidden;
+  }
+  body::after{
+    content:""; position:absolute; inset:0;
+    background-image:linear-gradient(rgba(255,255,255,.024) 1px, transparent 1px),
+                     linear-gradient(90deg, rgba(255,255,255,.024) 1px, transparent 1px);
+    background-size:64px 64px; pointer-events:none;
+  }
+  .top { display:flex; align-items:center; gap:14px; }
+  .mark {
+    width:34px; height:34px; border-radius:9px; flex:none;
+    background:linear-gradient(145deg,#4ADE80,#22A45D);
+    box-shadow:0 0 32px rgba(74,222,128,.42);
+    display:flex; align-items:center; justify-content:center;
+    font-weight:800; font-size:20px; color:#04140A; font-family:ui-monospace,monospace;
+  }
+  .word { font-size:25px; font-weight:750; letter-spacing:-.015em; }
+  .pill {
+    margin-left:6px; font-size:12.5px; font-weight:650; letter-spacing:.11em;
+    text-transform:uppercase; color:#7EE7A8;
+    border:1px solid rgba(74,222,128,.34); border-radius:999px;
+    padding:5px 12px; background:rgba(74,222,128,.075);
+  }
+  h1 { font-size:63px; line-height:1.08; letter-spacing:-.032em; font-weight:800; }
+  h1 .dim { color:#8A97AB; font-weight:750; }
+  h1 .hit { color:#4ADE80; }
+  .sub {
+    margin-top:24px; font-size:25px; line-height:1.45; color:#A9B6CA;
+    max-width:1000px; letter-spacing:-.008em;
+  }
+  .sub b { color:#E8EDF5; font-weight:680; }
+  .foot { display:flex; align-items:center; justify-content:space-between; }
+  .cmd {
+    font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:22px;
+    color:#DCE5F0; background:rgba(255,255,255,.055);
+    border:1px solid rgba(255,255,255,.11); border-radius:11px; padding:13px 20px;
+  }
+  .cmd .p { color:#4ADE80; margin-right:11px; }
+  .repo { font-size:20px; color:#7C8AA0; font-weight:560; letter-spacing:-.005em; }
+</style>
+<div class="top">
+  <div class="mark">◆</div>
+  <div class="word">emend</div>
+  <div class="pill">verified migrations</div>
+</div>
+
+<div>
+  <h1>zod 4 ships <span class="dim">1,934 breaking changes.</span><br><span class="hit">Four</span> of them touch your code.</h1>
+  <div class="sub">
+    Emend finds <b>which of your lines</b> a dependency upgrade actually breaks,
+    migrates them, then <b>proves</b> the result compiles and your tests still pass.
+  </div>
+</div>
+
+<div class="foot">
+  <div class="cmd"><span class="p">$</span>npx emend-cli scan .</div>
+  <div class="repo">github.com/diyanbogdanov/emend</div>
+</div>

@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1400px; }
+  body { background:#0A0D13; padding:34px; font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace; }
+  .win { background:#0E1219; border:1px solid #1F2734; border-radius:13px; overflow:hidden;
+         box-shadow:0 26px 68px rgba(0,0,0,.62); }
+  .bar { height:44px; background:#141A24; border-bottom:1px solid #1F2734;
+         display:flex; align-items:center; padding:0 17px; gap:9px; }
+  .dot { width:12px; height:12px; border-radius:50%; }
+  .t { margin-left:15px; color:#6E7C90; font-size:13.5px;
+       font-family:"Inter",-apple-system,"Segoe UI",sans-serif; letter-spacing:.01em; }
+  pre { padding:26px 30px 30px; font-size:19px; line-height:1.68; color:#C4D0E0;
+        white-space:pre; letter-spacing:-.002em; }
+  .p    { color:#4ADE80; }
+  .cmd  { color:#F0F5FB; font-weight:600; }
+  .pkg  { color:#F0F5FB; font-weight:600; }
+  .brk  { color:#FF7A6B; font-weight:600; }
+  .dep  { color:#FFC24B; font-weight:600; }
+  .sym  { color:#F0F5FB; }
+  .meta { color:#66748A; }
+  .arw  { color:#4C5A70; }
+  .path { color:#5BC8FA; }
+  .code { color:#9FB0C6; }
+  .note { color:#66748A; font-style:italic; }
+  .sum  { color:#F0F5FB; font-weight:700; }
+  .ok   { color:#4ADE80; font-weight:600; }
+  .hint { color:#7E8DA3; }
+</style>
+<div class="win">
+  <div class="bar">
+    <div class="dot" style="background:#FF5F57"></div>
+    <div class="dot" style="background:#FEBC2E"></div>
+    <div class="dot" style="background:#28C840"></div>
+    <div class="t">emend — scan</div>
+  </div>
+<pre><span class="p">$</span> <span class="cmd">npx emend-cli scan ./my-service --only zod</span>
+
+  <span class="pkg">zod 3.22.4 → 4.4.3</span>
+    <span class="brk">breaking</span>   <span class="sym">array</span> <span class="meta">(signature-changed, high confidence)</span>
+      <span class="arw">→</span> <span class="path">src/schema.ts:26:12</span>  <span class="code">items: z.array(LineItemSchema).min(1),</span>
+    <span class="brk">breaking</span>   <span class="sym">ZodError.errors</span> <span class="meta">(removed, high confidence)</span>
+      <span class="arw">→</span> <span class="path">src/schema.ts:41:23</span>  <span class="code">return result.error.errors.map((issue) =&gt; …)</span>
+    <span class="dep">deprecated</span> <span class="sym">ZodString.email</span> <span class="meta">(deprecated, high confidence)</span>
+      <span class="meta">Use `z.email()` instead.</span>
+      <span class="arw">→</span> <span class="path">src/schema.ts:12:21</span>  <span class="code">email: z.string().email(),</span>
+
+    <span class="note">+ 1930 other breaking change(s) in this upgrade do not appear anywhere in your code</span>
+
+  <span class="sum">Summary</span>  <span class="sum">4 breaking · 3 deprecated · 65 call site(s)</span>
+           <span class="hint">1 package(s) analyzed, 0 skipped (skipped ≠ clean)</span>
+</pre>
+</div>

@@ -1,80 +1,85 @@
+<div align="center">
+
 # Emend
 
+**Verified AI migrations for dependency upgrades.**
+
+Emend finds which of *your* lines a version bump actually breaks, migrates them with an
+agent in a throwaway worktree, then proves the result compiles and your tests still
+pass — or refuses to call it fixed.
+
+[![npm](https://img.shields.io/npm/v/emend-cli?color=2ea44f&label=npm)](https://www.npmjs.com/package/emend-cli)
 [![CI](https://github.com/diyanbogdanov/emend/actions/workflows/ci.yml/badge.svg)](https://github.com/diyanbogdanov/emend/actions/workflows/ci.yml)
+[![node](https://img.shields.io/badge/node-%E2%89%A522.6-informational)](https://nodejs.org)
+[![licence](https://img.shields.io/badge/licence-AGPL--3.0-blue)](./LICENSE)
 
-**Dependabot tells you a version changed. Emend tells you which of your lines break, fixes them, and proves the fix compiles and passes your tests.**
+</div>
 
-Emend diffs the published TypeScript declarations of the dependency version you
-have installed against the one you'd upgrade to, intersects the changed symbols
-with the call sites in your code, applies a migration, and verifies it against a
-real baseline before proposing anything.
+![emend scan output](assets/scan.png)
 
-```
-$ emend scan ./my-service --only zod
-
-  zod 3.22.4 → 4.4.3
-    breaking record (signature-changed, high confidence, id 42c38dcf56ce)
-      → src/schema.ts:28:15  metadata: z.record(z.string()),
-    breaking ZodError.errors (removed, high confidence, id 55028a971871)
-      → src/schema.ts:41:23  return result.error.errors.map((issue) => ...)
-    deprecated ZodString.email (deprecated, high confidence, id 12c97d6d915a)
-      Use `z.email()` instead.
-      → src/schema.ts:12:21  email: z.string().email(),
-    + 1212 other breaking change(s) in this upgrade do not appear anywhere in your code
-
-  Summary  4 breaking · 3 deprecated · 7 call site(s)
-           1 package(s) analyzed, 0 skipped (skipped ≠ clean)
-```
-
-That last line is the product. zod 4 ships roughly 1,219 breaking changes; seven
-call sites in this repository touch any of them. Everything downstream operates
-on those seven — and on the second line, which says how much of the repository
-went unexamined, because a summary that cannot be wrong about its own coverage
-is the only kind worth reading.
-
-*(That is the real output of `emend demo /tmp/d && emend scan /tmp/d --only zod`,
-not an illustration.)*
-
-The same question, asked of the HTTP calls no package describes, is
-[`--contracts`](#calls-to-apis-you-dont-have-a-package-for). How it all fits
-together is in [docs/architecture.md](docs/architecture.md).
+**That "+ 1930" line is the product.** zod 4 ships 1,934 breaking changes. Four of them
+touch this repository. Everything downstream operates on those four — and on the line
+below the summary, which says how much of the repository went *unexamined*, because a
+summary that cannot be wrong about its own coverage is the only kind worth reading.
 
 ---
 
-## Quick start
+## Try it in 30 seconds
 
-Requires **Node 22.6+** (uses native TypeScript type stripping — a checkout runs
-its sources directly, with no build step). Node declines to strip types under
-`node_modules`, so anything installed runs a bundle instead; `npm run build`
-makes it and `prepare` runs that for you, on install and on pack alike.
-
-Repairing anything also requires the [`opencode`](https://opencode.ai) binary on
-your `PATH`, plus a key for a model it can reach. Scanning does not — `emend
-scan` is fully deterministic and needs neither. A run that cannot reach a harness
-says so and repairs nothing, rather than reporting a clean scan: *could not fix
-is not the same as nothing to fix.*
+No API key. No config. `scan` is fully deterministic and never calls a model.
 
 ```bash
-npm install
-
-# Scaffold a demo repo with genuine dependency drift
-node bin/emend.mjs demo /tmp/emend-demo
-
-# Find what actually breaks
-node bin/emend.mjs scan /tmp/emend-demo --only zod
-
-# Migrate and verify in an isolated workspace
-node bin/emend.mjs fix /tmp/emend-demo
-
-# Browse everything in a browser
-node bin/emend.mjs serve
+npx emend-cli@latest demo ./emend-demo
 ```
 
-`npm link` puts `emend` on your PATH if you prefer that to `node bin/emend.mjs`.
+```bash
+npx emend-cli@latest scan ./emend-demo --only zod
+```
 
-**[docs/getting-started.md](docs/getting-started.md)** walks the whole thing:
-configuring a model, scanning a real repository, checking your HTTP calls, and
-what to do when something looks wrong.
+That scaffolds a repo with genuine dependency drift and shows you exactly the output
+above. Requires **Node 22.6+**.
+
+Then point it at something real:
+
+```bash
+npx emend-cli@latest scan . --only zod,axios
+```
+
+---
+
+## Why this isn't another AI migration tool
+
+Most tools in this category end at "the model edited your files." Emend treats that as
+the *start* of the problem, because a model that edits confidently and wrongly is worse
+than one that does nothing.
+
+**Every migration runs in a throwaway `git worktree`:**
+
+1. **baseline** — typecheck + tests run *before* any edit
+2. apply the edits, bump the dependency
+3. **post** — typecheck + tests run again, and the two are compared
+
+Without step 1, a repository that was already failing has its pre-existing failures
+blamed on the migration. Emend distinguishes `verified` / `regression` /
+`pre-existing-failure` / `typecheck-only` / `unverified`, and **never reports the last
+three as success.** Nothing touches your working tree; the worktree is thrown away
+unless it verifies.
+
+A second pass — a read-only behaviour review — then answers what a green build cannot:
+whether the change still *means* the same thing. Its own edits are re-verified, and
+reverted wholesale if they don't hold.
+
+### Honesty rules, enforced in code
+
+Not conventions. These are properties the test suite holds to:
+
+- A package with no type declarations is **`unanalyzable`**, never "clean".
+- A truncated surface walk **suppresses removal reporting** — absence past a cutoff is not deletion.
+- Verification that didn't run is **`unverified`**, never "passing".
+- No test script means **`typecheck-only`**, never "tests pass".
+- Breaking changes detected but *not* located in your code are **counted and reported**, not silently dropped — static analysis cannot see `client[name]()`.
+- Skipped packages are counted separately from analyzed ones. **Skipped ≠ clean.**
+- A run that cannot reach a model **repairs nothing and says so.** *Could not fix is not the same as nothing to fix.*
 
 ---
 
@@ -112,94 +117,66 @@ what to do when something looks wrong.
              verified · regression · unverified · unreviewed
 ```
 
-That is the typed-package path. A second one runs beside it for HTTP calls,
-which no `.d.ts` describes — see [Calls to APIs you don't have a package
-for](#calls-to-apis-you-dont-have-a-package-for).
+**Why `.d.ts` diffing.** Other approaches read version numbers (no idea what changed),
+OpenAPI specs (most SDK surface isn't in them), or changelogs (prose, and frequently
+silent about breaks). Type declarations are machine-readable, versioned, exhaustive, and
+**already published** by nearly every TypeScript SDK — no provider cooperation required.
 
-### Why `.d.ts` diffing
+**Why the intersection matters.** A diff alone is noise. Crossing it with real call sites
+turns "1,934 breaking changes" into a four-item work order with file and line numbers.
 
-Other approaches read version numbers (no idea what changed), OpenAPI specs (most
-SDK surface isn't in them), or changelogs (prose, and frequently silent about
-breaks). Type declarations are **machine-readable, versioned, exhaustive, and
-already published** by nearly every TypeScript SDK — no provider cooperation
-required.
-
-### Why the intersection matters
-
-A diff alone is noise. Crossing it with real call sites turns "1,215 breaking
-changes" into a five-item work order with file and line numbers.
-
-### Why verification is not optional
-
-Every migration runs in a throwaway `git worktree`:
-
-1. **baseline** — typecheck + tests *before* any edit
-2. apply edits, bump the dependency
-3. **post** — typecheck + tests again
-
-Without the baseline, a repository that was already failing would have its
-pre-existing failures blamed on the migration. Emend distinguishes
-`verified` / `regression` / `pre-existing-failure` / `typecheck-only` /
-`unverified`, and never reports the last three as success.
+The deterministic core — detection, localisation, rename-class migrations, verification —
+runs with **no model involved**. The model runs only where the answer is a judgement.
+Full design in **[docs/architecture.md](docs/architecture.md)**.
 
 ---
 
-## Calls to APIs you don't have a package for
+## What it checks
 
-Half the contracts a service depends on are not packages at all:
+| Tier | What it reads | Command |
+| --- | --- | --- |
+| **Typed packages** | Published `.d.ts` of both versions, crossed with your call sites | `emend scan <repo>` |
+| **HTTP contracts** | Each vendor's *own* published OpenAPI description, vs. your outbound calls | `emend scan <repo> --contracts` |
+| **Version pins** | Lockfile vs. the copies in Dockerfiles, CI matrices, `.nvmrc` | `emend pins <repo>` |
+| **Vulnerabilities** | The installed tree against OSV — no key, no rate limit | `emend scan <repo> --vulns` |
+
+### Calls to APIs you don't have a package for
+
+Half the contracts a service depends on aren't packages at all:
 
 ```ts
 const res = await fetch(`https://api.vendor.com/v1/audiences/${id}/contacts`);
 ```
 
-There is no `.d.ts` here, no lockfile entry, and no type — a URL is a string
-that compiles whatever it says. When the vendor retires that route, nothing in
-your toolchain notices until production does.
+No `.d.ts`, no lockfile entry, no type — a URL is a string that compiles whatever it
+says. `--contracts` resolves each vendor's own OpenAPI description and reports calls
+reaching a route the description no longer contains, guarded by **provenance** (is this
+really the vendor speaking?), **currency** (a first-party spec last touched in 2020
+asserts nothing), and **coverage** (one host often serves several APIs).
 
-`emend scan <repo> --contracts` reads outbound HTTP calls out of your source,
-resolves each vendor's **own** published OpenAPI description, and reports calls
-that reach a route the description no longer contains.
+A finding here is **a lead to verify, not a proof** — providers do serve endpoints they
+never wrote down, which is why it says *not described by* rather than *removed*. See
+[docs/limitations.md](docs/limitations.md).
+
+### Versions your repo writes down twice
+
+A version lives in the lockfile, where the package manager keeps it honest. The same
+version copied into a Docker tag, an `.nvmrc`, or a CI matrix is a copy, and nothing
+keeps a copy honest.
 
 ```
-  api.github.com
-    drift      GET /repos/{owner}/{repo}/git/refs/{ref}
-      → packages/pieces/github/src/lib/common/index.ts:88
-      not described by github/rest-api-description (fetched today)
+$ emend pins ./my-service
 
-  3 host(s) resolved · 1,173 calls read · 412 unreadable (URL built at runtime)
+  drift      node → 22 (the declared engines.node)
+    → Dockerfile:1  node:18-alpine
+    → .github/workflows/ci.yml:6  node-version: '22'
+
+  VERIFIED  2 edit(s) applied of 1 repairable conflict(s)
 ```
 
-Three guards keep that from becoming a rumour mill, and they are the reason this
-is worth trusting rather than a grep for stale URLs:
-
-- **Provenance.** A description found under some random GitHub account is not
-  the vendor speaking. Emend walks the provider's own origin, their `apis.json`,
-  and their GitHub organisation, and refuses anything it cannot trace back to
-  them.
-- **Currency.** First-party is not the same as current. `slackapi/slack-api-specs`
-  is unimpeachably Slack's and last changed in 2020. A stored copy that has not
-  moved in a year asserts nothing; one served live from the vendor's domain
-  needs no date, because being served *is* the evidence.
-- **Coverage.** One host commonly serves several APIs. Xero's accounting
-  description says nothing about `/projects.xro`. Where the description names
-  nothing under the same top-level path, the path is reported **unchecked**
-  rather than broken.
-
-A finding here is a **lead to verify, not a proof** — providers do serve
-endpoints they never wrote down, and the finding says *not described by* rather
-than *removed* for exactly that reason. See [Known
-limitations](#known-limitations).
-
-`--since` compares a description against itself as it stood a year ago, which is
-the only way to see a **deprecation** or a **newly available capability** —
-both are still in today's copy, so reading it alone can never surface either.
-
-A newly offered parameter is reported and never written into your code, because
-adopting a filter changes which records come back and that is a decision rather
-than a repair. One kind is treated differently: a **pagination control** showing
-up on an endpoint you call without paging is not a capability, it is the vendor
-disclosing that you have been taking the default and calling it the whole
-answer. Measured across two vendors, 5 of 11 offered parameters were that.
+Three files declaring three versions with nothing to arbitrate are reported as
+disagreeing and **not** repaired — picking a winner would be guessing, and that decision
+is yours.
 
 ---
 
@@ -213,201 +190,27 @@ answer. Measured across two vendors, 5 of 11 offered parameters were that.
 | `emend pr <repo> --finding <id>` | Render the pull request (dry run by default) |
 | `emend pins <repo>` | Repair drifted version pins — no model involved |
 | `emend eval` | Measure the agent against a corpus |
-| `emend serve` | Local dashboard |
+| `emend serve` | Local dashboard, or a hosted monitor with GitHub App credentials |
 | `emend models` | List models your LLM provider serves |
-| `emend store list` | What is stored locally: repositories, and cache size |
-| `emend store prune <path>` | Forget one repository's scans, findings and runs |
-| `emend store cache` | Cached package surfaces, largest first |
-| `emend mcp` | Serve Emend's tools over MCP stdio, so a coding agent can drive it |
-
-`emend mcp` exposes seven tools — `scan`, `plan_remediation`, `fix_vulnerability`,
-`fix_package`, `verify`, `advisory_status`, `impact` — and every one returns what
-was *measured*, never a judgement: an agent claiming a vulnerability is fixed has
-to call `advisory_status` and read the lockfile's answer.
-
-`emend scan --features` answers the other half of the question: not what broke,
-but what *arrived*. It lists new top-level exports in packages you already
-depend on — `@types/react` 18 → 19 reports `Activity`, `cache`, `cacheSignal`,
-`captureOwnerStack`, `use` — read from the declarations rather than a changelog.
-Types are excluded, only values count, and it never enters the headline: nothing
-in your repository is affected either way.
+| `emend store list` | What is stored locally |
+| `emend mcp` | Serve Emend's tools over MCP, so a coding agent can drive it |
 
 Useful flags: `--only pkg,pkg`, `--all`, `--json`, `--no-dev`, `--contracts`,
-`--features`, `--freshness`, `--vulns`, `--lint` (scan);
-`--finding <id>`, `--no-agent`, `--no-review`, `--drive`, `--untrusted`,
-`--keep` (fix); `--create` (pr); `--model a,b`, `--repeat n`, `--cases <file>`
-(eval). `--untrusted` treats the repository as hostile — no lifecycle scripts,
-no test script, no model session in the checkout; it is what the hosted service
-sets for every repository, and `emend --help` has the full list.
+`--features`, `--freshness`, `--vulns`, `--lint` (scan); `--finding <id>`, `--no-agent`,
+`--no-review`, `--untrusted`, `--keep` (fix). `emend --help` has the full list.
+
+**`emend mcp`** exposes seven tools — `scan`, `plan_remediation`, `fix_vulnerability`,
+`fix_package`, `verify`, `advisory_status`, `impact` — and every one returns what was
+*measured*, never a judgement. An agent claiming a vulnerability is fixed has to call
+`advisory_status` and read the lockfile's answer.
 
 ---
 
-## Versions your repo writes down twice
+## Repairing, not just scanning
 
-A dependency version lives in the lockfile, where the package manager keeps it
-honest. The same version copied into a Dockerfile tag, an `.nvmrc` or a CI matrix
-is a copy, and nothing keeps a copy honest.
-
-```
-$ emend pins ./my-service
-
-  drift      node → 22 (the declared engines.node)
-    → Dockerfile:1  node:18-alpine
-    → .github/workflows/ci.yml:6  node-version: '22'
-
-  VERIFIED  2 edit(s) applied of 1 repairable conflict(s)
-```
-
-Two authorities and no others. For a package you install, the resolved version is
-the fact and the tag is the stale copy. For node, `engines` is your own statement
-of intent. Three files declaring three versions with nothing to arbitrate are
-reported as disagreeing and **not** repaired — picking a winner would be guessing,
-and that decision is yours.
-
-**Wire-protocol versions** are the same shape and a different problem. A vendor
-versions its HTTP API separately from the SDK that calls it: `stripe@18` and
-`apiVersion: '2024-06-20'` move independently, and upgrading the package does not
-touch the pin. Emend reads these by convention rather than by vendor —
-
-```ts
-headers: { 'Notion-Version': '2022-06-28' }   // the key names the vendor
-new AWS.SES({ apiVersion: '2010-12-01' })     // the import names it
-fetch(`${url}?api-version=2023-05-15`)        // the host names it
-```
-
-— so vendors nobody wrote down work the same as the ones that did. Where the
-source names nobody, the pin is reported **unattributed** rather than guessed at.
-That matters more than it sounds: a dated `apiVersion` is a shape eight vendors
-share, and an earlier version read every one of them as Stripe's. Sampled across
-160 real files, that mislabelled 8 pins in 9 — and since the label is the key the
-vendor's published version is looked up by, an AWS pin from 2010 was being
-compared against Stripe's current API version and reported as behind.
-
----
-
-## Measuring the agent
-
-Prompt changes are cheap to make and hard to judge. `emend eval` runs a corpus of
-real migrations and scores them:
-
-```
-$ emend eval --model z-ai/glm-5.2,qwen/qwen3-coder --repeat 3
-
-| Model | Cases | Runs | Pass | Clean | Unresolved | Edit ratio | Withheld | ... |
-```
-
-**`Pass` and `Clean` are deliberately different columns.** A green build says the
-migration compiles and the tests pass. It says nothing about whether the model
-changed things nobody asked about, bought the green with `any`, or shipped a
-commit titled *"migrate `Cell`"* without removing a single use of `Cell`. Every
-failure this project has actually hit lived in that gap.
-
-**`Unresolved` is whether the migration finished. `Edit ratio` is reported and
-never scored.** Each case declares the pre-migration forms a finished migration
-removes, and `Unresolved` counts the ones still there — that is the completeness
-signal. The ratio divides diff hunks by logical edits, and hunks merge when
-changes land near each other, so a *complete* zod migration reads "4 of 6" and did
-so for an entire sweep before anyone noticed. It is a signal about scope, read
-alongside the other columns rather than on its own, and nothing is judged against
-it in either direction: the review pass exists to edit, so charging it for editing
-would measure the design rather than the model.
-
-Migrations vary between runs, so `--repeat` is how you tell a real change from
-noise.
-
----
-
-## Running it as a service
-
-`emend serve` becomes a hosted monitor when GitHub App credentials are present,
-and stays a local dashboard when they are not.
-
-```bash
-export EMEND_GITHUB_APP_ID=...
-export EMEND_GITHUB_PRIVATE_KEY="$(cat emend.private-key.pem)"   # or base64
-export EMEND_GITHUB_WEBHOOK_SECRET=...
-
-emend serve --port 8080 --host 0.0.0.0     # POST /webhook is now live
-```
-
-Register the App with these repository permissions:
-
-| Permission | Level | Why |
-| --- | --- | --- |
-| Contents | **Read and write** | Read the source tarball; create the branch and commit |
-| Pull requests | **Read and write** | Open and update the draft PR |
-| Checks | Read-only | Receive `check_suite` so CI results come back |
-| Metadata | Read-only | Mandatory for every App |
-
-Subscribe to `installation`, `installation repositories`, `push`, and
-`check suite`.
-
-Contents must be **write**, not read. Commits are built through the Git Data
-API — blobs, a tree, a commit, a ref — and every one of those writes.
-
-Step-by-step registration, including tunnelling webhooks to a local server,
-verifying the loop end to end, and making the App public:
-[`docs/github-app-setup.md`](docs/github-app-setup.md). Sizing, hosting options
-and the systemd/TLS setup: [`docs/deployment.md`](docs/deployment.md).
-
-Installing it on a repository queues a scan. Pushes to the default branch queue
-another. Each scan reconstructs `node_modules` from the lockfile, finds the
-drift, migrates what it can, and opens a **draft** pull request per package.
-
-### Why it can run untrusted repositories in-process
-
-Analysis never executes anything from the repository or its dependency tree:
-
-- Dependencies are **symlinked from a tarball cache**, not installed.
-- The dependency bump passes `--ignore-scripts`, so no lifecycle hook runs.
-- The repository's **test script is never invoked**.
-
-That is what makes a per-job container unnecessary. It is a property, not a
-convention — anything added to this path that executes repository code brings
-the isolation requirement back with it.
-
-The cost is that hosted verification is **typecheck-only**. Emend says so on the
-pull request rather than implying more, and reads the real verdict back from the
-`check_suite` webhook when your CI runs the tests on the branch. Your CI is the
-better verifier anyway: it runs them in the environment they were written for.
-
----
-
-## The harness
-
-One thing changes code: a harness session — `opencode`, driving an open-weight
-model with MCP and tools, in an isolated worktree. There is no second
-model-driven route and no fallback to one; a run that cannot reach a harness
-repairs nothing and says so.
-
-The deterministic core handles detection, localisation, rename-class migrations,
-and verification with **no model involved** — those are the parts whose answers
-have to be reproducible and auditable.
-
-The model runs where the answer is a judgement: findings the planner declines,
-and the read-only review that asks whether a verified change still *means* the
-same thing. **Both are on by default.** A finding Emend will not attempt is a
-finding somebody repairs by hand; `--no-agent` and `--no-review` are there for
-runs that must stay offline or byte-for-byte reproducible. `--no-agent` also
-turns off the harness, since from an operator's side "do not use a model" is one
-decision.
-
-It also writes the **What to look at** section of a pull request — one or two
-sentences on what the change does in your codebase's terms, and which of the
-call sites is the one worth reading. Every other section of the body reports
-what happened; facts do not prioritise themselves. It is never a verdict: the
-verification table is the verdict, and it comes from commands that actually ran.
-
-A `path` the model names that appears in neither the call sites nor the diff
-sinks the whole summary rather than being quietly dropped. A model confident
-enough to invent a filename has said what the rest of its prose is worth.
-
-Without a key configured, the run still works and says so, rather than quietly
-delivering the deterministic half as though that were everything.
-
-Pin the harness's model with `--harness=<provider>/<model>`; the recommended
-defaults are open-weight. Emend's own reviews and PR summaries work with **any
-OpenAI-compatible endpoint**:
+`scan` needs nothing. **Repairing** additionally needs the
+[`opencode`](https://opencode.ai) binary on your `PATH` and a key for a model it can
+reach. Emend's reviews and PR summaries work with **any OpenAI-compatible endpoint**:
 
 ```bash
 export EMEND_LLM_PROVIDER=nebius     # or fireworks, together, groq,
@@ -419,255 +222,119 @@ export EMEND_LLM_MODEL=<id from above>
 emend fix ./my-service
 ```
 
-Or point it anywhere directly:
+Or point it anywhere directly — a local Ollama works:
 
 ```bash
-export EMEND_LLM_BASE_URL=http://localhost:11434/v1   # local Ollama
+export EMEND_LLM_BASE_URL=http://localhost:11434/v1
 export EMEND_LLM_MODEL=qwen3-coder:30b
 ```
 
-### How the model is constrained
+The recommended defaults are open-weight. This follows the literature rather than the
+intuition: Byam (arXiv 2505.07522) found end-to-end LLM migration fully repaired only
+**27%** of builds, improving markedly when given API diffs, failing lines and compiler
+feedback — all of which the harness is given. BigBag (arXiv 2606.24446) drives its agent
+through a harness for **78.6%**.
 
-**One thing changes code: a harness working in a throwaway git worktree**, given
-the API contract diff, the located call sites, and the symbols that actually
-exist in the new version. It has tools, because a dependency bump breaks
-Dockerfiles, CI config and build scripts that no list of call sites contains, and
-reading those is not an enhancement to the repair — for those findings it *is*
-the repair.
-
-Two things stand between it and your branch:
-
-1. **Verification**: baseline before any edit, apply, re-run, compare. Only
-   `verified` is reported as success, and it is the backstop that has actually
-   caught things — including a reviewer whose own suggestion broke a migration
-   that had already passed.
-2. **A read-only behaviour review**, which reads the result and answers what a
-   green build cannot: whether the change still *means* the same thing, and
-   whether it was needed at all. Its edits are re-verified, and reverted
-   wholesale if they do not hold.
-
-There used to be a third — a deterministic gate that reverted any region the
-compiler had not pointed at. It was removed once its record could be read: it
-never once withheld a bad change, and the only reverts it ever produced were
-three correct repairs it discarded. `gate.ts` survives to bound *where* the
-reviewer and the linter may write, which is a different question from whether
-an edit was warranted.
-
-Nothing ever touches your working tree. All of it happens in a worktree that is
-thrown away unless it verifies.
-
-**What this gave up, stated plainly.** Emend used to have the model propose
-`find`/`replace` pairs which it located and applied, so an invented `find`
-matched nothing and was rejected before a byte was written — it failed closed.
-That property is gone, traded for tools and a materially better fix rate. What
-replaced it is verification and a read-only reviewer, described below.
-
-This follows the literature rather than the intuition: Byam (arXiv 2505.07522)
-found end-to-end LLM migration fully repaired only **27%** of builds, improving
-markedly when given API diffs, failing lines and compiler feedback — all of which
-the harness is given. BigBag (arXiv 2606.24446) drives its agent through a
-harness for **78.6%**.
+Prompt changes are cheap to make and hard to judge, so there's a scored corpus:
+[docs/evaluating-the-agent.md](docs/evaluating-the-agent.md).
 
 ---
 
-## Honesty rules
+## Can I use this at work?
 
-These are enforced in code, not convention:
+**Yes — running Emend on your own code triggers no obligations at all.**
 
-- A package with no type declarations is **`unanalyzable`**, never "clean".
-- A truncated surface walk **suppresses removal reporting** — absence past a
-  cutoff is not deletion.
-- Verification that didn't run is **`unverified`**, never "passing".
-- No test script means **`typecheck-only`**, never "tests pass".
-- Breaking changes detected but not located in your code are **counted and
-  reported**, not silently dropped — static analysis cannot see `client[name]()`.
-- Skipped packages are counted separately from analyzed ones. Skipped ≠ clean.
+Emend is AGPL-3.0. The clause people are usually worried about is **§13, Remote Network
+Interaction**, and it is narrower than its reputation:
 
----
+| What you're doing | What you owe |
+| --- | --- |
+| Running `emend scan` / `fix` on your own repositories | **Nothing.** |
+| Running it in your own CI, on private code | **Nothing.** |
+| Modifying it for internal use | **Nothing**, as long as it stays internal. |
+| Running a **modified** Emend as a service *for other people* | Offer those users your modified source. |
+| Embedding it in a product you ship without AGPL terms | Get a commercial licence. |
 
-## Design decisions worth knowing
+AGPL is a copyleft on *distribution and network service*, not on the code it reads. Emend
+analysing your repository no more licences your repository than `tsc` does.
 
-**A version bump is atomic.** All findings for one package are fixed together in
-one workspace and land as one PR. Fixing them separately would make each look
-like a regression (alone, each *is* insufficient) and produce conflicting PRs.
-
-**Signature-change filtering is version-aware.** Within a major version a changed
-signature is unusual and probably deliberate, so it's reported. Across a major
-version, an internal rewrite changes nearly every signature string without
-changing any contract — so Emend demands the one signal it can trust, a newly
-*required* parameter. Without this filter the zod 3→4 scan reported 2,100+
-"breaking" changes, essentially all noise.
-
-**The planner refuses to guess.** If two replacement symbols match equally well,
-or the only candidate is itself deprecated, it produces no plan rather than a
-coin flip.
-
-**PRs are drafts, and `emend pr` is a dry run by default.** Opening a PR requires
-`--create`, and Emend refuses to open one for a change that didn't verify.
+A separate **commercial licence** is available for embedding Emend without AGPL
+obligations — reach out via [issues](https://github.com/diyanbogdanov/emend/issues). That
+option only exists because contributions are collected under a [CLA](./CLA.md); see
+[CONTRIBUTING.md](./CONTRIBUTING.md) for why it's collected before the first merge rather
+than after.
 
 ---
 
-## Project layout
+## Running it as a service
 
-```
-src/
-  surface.ts      .d.ts → public API surface (breadth-first, canonical paths)
-  diff.ts         surface × surface → classified changes
-  specs.ts        resolve a vendor's OpenAPI description, with provenance
-  specdiff.ts     description × description → route changes
-  callsites.ts    repo → where package symbols are used (type resolution)
-  httpsites.ts    repo → outbound HTTP calls, and which are unreadable
-  detectors.ts    every tier → one finding shape
-  analyze.ts      the scan pipeline
-  plan.ts         deterministic rename planning
-  apply.ts        isolated workspace, edit application, rollback
-  verify.ts       baseline/post command running and comparison
-  fix.ts          the fix pipeline (per-package)
-  harness.ts      THE boundary: `ask` reports, `run` writes, `runTask` drives a job
-  gate.ts         is this change one the evidence asked for? no model involved
-  reviewharness.ts read-only repo-wide and behaviour reviews
-  pr.ts           evidence-rich PR rendering + gh integration
-  mcp.ts          MCP server, so a coding agent can drive Emend
-  cli.ts          command surface
-  github.ts       vendor OpenAPI discovery in the vendor's own GitHub org
-  github/         the App: auth, webhook intake, job runner, API pull requests
-  server.ts       dashboard + webhook endpoint · store.ts  SQLite persistence
-  llm/tasks.ts    the four jobs, each as skills + instructions + a renderer
-  llm/skills.ts   instruction fragments, named once and shared by reference
-  llm/symbols.ts  symbols the new version really exports, to ground a replacement
-  llm/client.ts   the HTTP transport · llm/providers.ts  provider presets
-docs/
-  architecture.md             how it fits together, and why
-  deployment.md               running it as a service
-  github-app-setup.md         the App, step by step
-fixtures/demo-repo/           demo template with real drift
+`emend serve` is a local dashboard, and becomes a hosted monitor when GitHub App
+credentials are present:
+
+```bash
+export EMEND_GITHUB_APP_ID=...
+export EMEND_GITHUB_PRIVATE_KEY="$(cat emend.private-key.pem)"
+export EMEND_GITHUB_WEBHOOK_SECRET=...
+
+emend serve --port 8080 --host 0.0.0.0     # POST /webhook is now live
 ```
 
-**[docs/architecture.md](docs/architecture.md) is the full map** — the three
-tiers of evidence, the provenance and currency gates, where the model
-participates and where it deliberately does not, and the rules that were each
-learned by shipping the opposite.
+Installing it on a repository queues a scan; pushes to the default branch queue another.
+Each scan reconstructs `node_modules` from the lockfile, finds the drift, migrates what
+it can, and opens a **draft** pull request per package.
 
-Run `npm run typecheck` and `npm test` to verify.
+**Why it can run untrusted repositories in-process:** analysis never executes anything
+from the repository or its dependency tree. Dependencies are symlinked from a tarball
+cache rather than installed, the bump passes `--ignore-scripts`, and the repository's
+test script is never invoked. The cost is that hosted verification is **typecheck-only** —
+Emend says so on the pull request rather than implying more, and reads the real verdict
+back from the `check_suite` webhook when your CI runs the tests.
 
-`npm run audit:removals` cross-examines every reported removal across 18 real
-SDK upgrades, resolving each path the way a consumer would rather than trusting
-Emend's own index. It exists because the one bug class that matters most here —
-a confident finding that is simply wrong — is invisible to unit tests and was
-caught only when someone read a pull request and asked why the diff was empty.
+Step-by-step: [docs/github-app-setup.md](docs/github-app-setup.md) ·
+[docs/deployment.md](docs/deployment.md)
 
 ---
 
 ## Status
 
-MVP / proof of concept. TypeScript + npm + GitHub only. Scanning, migration and
-pull requests are exercised against a real private repository; the GitHub App
-token exchange is the one link only a registered App can validate. What is
-deliberately out of scope is listed under Known limitations below.
+**MVP / proof of concept.** TypeScript + npm + GitHub only. Scanning, migration and pull
+requests are exercised against a real private repository; the GitHub App token exchange
+is the one link only a registered App can validate.
+
+Emend is deliberately explicit about where it can be wrong or silent —
+**[docs/limitations.md](docs/limitations.md)** documents each case, measured rather than
+hypothesised. If you only read one other page, read that one.
+
+Issues and PRs welcome — [CONTRIBUTING.md](./CONTRIBUTING.md) has the ground rules
+(`npm run typecheck` and `npm test` must be green; prompt changes need an `emend eval`
+table before and after).
+
+---
+
+## Docs
+
+| | |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Configure a model, scan a real repository, read the output |
+| [Architecture](docs/architecture.md) | The three tiers of evidence, and where the model deliberately does not participate |
+| [Known limitations](docs/limitations.md) | Every case where Emend can be wrong or silent, measured |
+| [Evaluating the agent](docs/evaluating-the-agent.md) | The scored corpus, and why `Pass` and `Clean` are different columns |
+| [GitHub App setup](docs/github-app-setup.md) | Registering the App, step by step |
+| [Deployment](docs/deployment.md) | Sizing, hosting, systemd/TLS |
+
+Build from source:
+
+```bash
+git clone https://github.com/diyanbogdanov/emend.git && cd emend && npm install
+npm run typecheck && npm test
+```
+
+A checkout runs its sources directly via native type stripping — no build step needed.
 
 ---
 
 ## Licence
 
-Copyright © 2026 Diyan Bogdanov.
-
-**AGPL-3.0-only** — see [LICENSE](./LICENSE). Third-party material is listed in
-[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
-
-The clause that matters here is §13, Remote Network Interaction: run a modified
-Emend as a service for other people and you owe them its source. Run it privately
-and nothing is required of you.
-
-A separate commercial licence is available for anyone who wants to embed Emend
-without AGPL obligations. That is only possible because contributions are
-collected under a [CLA](./CLA.md) — see [CONTRIBUTING.md](./CONTRIBUTING.md) for
-why, and for the reason it is collected before the first merge rather than after.
-
-## Known limitations
-
-Measured, not hypothetical. Each of these is a case where Emend can be wrong or
-silent, and knowing which is which is the point.
-
-**A vendor's published description can omit an endpoint that works.** Emend
-checks a raw HTTP call against the description the provider publishes, and some
-providers do not describe everything they serve. `openrouter.ai` documents
-`GET /api/v1/auth/key` while its `openapi.json` lists only `/auth/keys`; GitHub
-has served `GET /repositories/{id}` for years without ever putting it in its
-OpenAPI. Emend cannot tell that from a removal, so it says what it actually
-checked — *not described by* the resolved description — rather than claiming the
-endpoint is gone. **Treat a Tier 3 finding as a lead to verify against the
-vendor's documentation, not as proof.** Two of two findings in a sweep of nine
-public repositories were this.
-
-**One host can serve several APIs.** Xero's accounting description says nothing
-about `/projects.xro`, and GitHub's REST description says nothing about
-`/graphql`. Emend refuses to claim a removal where the description names nothing
-under the same top-level path, and reports those paths as unchecked instead.
-
-**A description can be first-party and still dead.** `slackapi/slack-api-specs`
-last changed in 2020 and still lists endpoints Slack has retired. Provenance and
-currency are separate checks; a stored copy that has not moved in a year asserts
-nothing.
-
-**Only some calls can be read.** A URL assembled at runtime — `this.baseUrl`,
-`process.env.API_URL ?? ''` — is recorded as unreadable rather than skipped, and
-the count is shown. About a third of outbound calls in a typical repository are
-readable; the rest genuinely do not exist until the process runs.
-
-**Type-level findings are compared as text, and say so.** Package surfaces are
-diffed by comparing declaration signatures. Two things that comparison can
-demonstrate are reported as **breaking**: a symbol that is no longer there, and
-a new required parameter — value or type — because every existing call is then
-short an argument.
-
-Every other signature edit is reported as **drift**: something moved under you,
-with its call sites, and Emend cannot tell whether it bites. Spending the word
-"breaking" on those is what makes it ignorable on the ones that deserve it.
-
-All 41 drift findings from one large repository, read individually:
-
-| what actually changed | n | is it a break? |
-| --- | --- | --- |
-| a parameter's name, or its destructuring pattern | 4 | **no — now suppressed** |
-| a type alias inlined or renamed (`QueryKey` → `readonly unknown[]`) | ~9 | **no — now suppressed** |
-| an optional parameter or member added | 5 | no — a widening |
-| the return type narrowed (`ReactNode` → `ReactElement`) | 3 | no — returns are covariant |
-| `any` → a specific type on a parameter | 7 | technically yes, in practice rarely |
-| the result set narrowed (`(A \| B)[]` → `A[]`) | 3 | **type-safe, behaviour-changing** |
-| generics too large to adjudicate by text | ~10 | unknown, honestly |
-
-The alias row needed the type checker rather than string comparison, and it was
-the largest: across five real package pairs it was **80 findings**, because a
-library rewriting `type QueryKey = ReadonlyArray<unknown>` as a conditional
-changes nothing about the type and everything about how it prints. An alias is
-substituted only where both versions agree what it means, so it can collapse a
-difference the printer invented and never create one.
-
-Union member order is settled the same way — by parsing the type and sorting on
-the AST, using the TypeScript compiler this project already depends on. The
-printer orders a union by internal type id, so which order you see depends on
-what else the program happened to load.
-
-So is a type argument that only restates its default: `QueryObserverResult` and
-`QueryObserverResult<unknown, Error>` are one type where the declaration reads
-`<TData = unknown, TError = Error>`. That one matters out of proportion to its
-subtlety — axios 1.18 → 1.19 adds a single defaulted type parameter, seventeen
-symbols mention it, and axios is in nearly every TypeScript repository.
-
-Together these removed **101 findings across five real package pairs and added
-none**.
-
-The row that matters most is the smallest. A return type narrowing from
-`(A | B)[]` to `A[]` is *safe* to the compiler and means the call now returns
-fewer kinds of thing. No type-level analysis will ever catch that one; it is why
-the behaviour review exists.
-
-**A known blind spot, measured.** Where a package changes an *internal* type
-alias that its exported signatures mention, those signatures render identically
-in both versions and Emend reports nothing —
-`@tanstack/query-core`'s `Listener` went from `() => void` to
-`(focused: boolean) => void` and is invisible. Expanding aliases the two versions
-disagree about would surface it, and was tried: across 77 real package pairs it
-added **782** findings to catch that one, most of them differences buried deep in
-expanded inferred types. Reporting the changed alias itself instead measures at
-154 across the same 77 pairs, which is the shape a fix should take.
+Copyright © 2026 Diyan Bogdanov. **AGPL-3.0-only** — see [LICENSE](./LICENSE) and
+[Can I use this at work?](#can-i-use-this-at-work) above. Third-party material is listed
+in [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).

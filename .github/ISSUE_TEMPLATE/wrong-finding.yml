@@ -1,0 +1,65 @@
+name: Wrong or misleading finding
+description: Emend reported something that is not true, or missed something that is
+title: "[finding] "
+labels: ["correctness"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the bug class that matters most in this project — a confident
+        finding that is simply wrong is invisible to unit tests. Thank you for
+        reporting it.
+
+        If the finding involves a private repository, a reduced public
+        reproduction is welcome but **not required**: the package pair and the
+        symbol are usually enough.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What went wrong
+      options:
+        - Reported as breaking, but the code is fine (false positive)
+        - Not reported, but the upgrade did break this code (false negative)
+        - Reported against the wrong file or line
+        - Severity is wrong (breaking vs drift vs deprecated)
+        - A vendor's API route was reported as missing but works
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: packages
+    attributes:
+      label: Package and versions
+      placeholder: "zod 3.22.4 → 4.4.3"
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: The finding as Emend printed it
+      description: Paste the relevant lines from `emend scan`. `--json` is ideal if you have it.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: truth
+    attributes:
+      label: What is actually true, and how you know
+      description: >
+        The upstream changelog, the `.d.ts` in the new version, a passing build —
+        whatever established it. Emend's rule is that evidence beats assertion,
+        and that applies to its own bugs too.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Emend version
+      description: "Output of `emend --version`, or the commit SHA."
+    validations:
+      required: true

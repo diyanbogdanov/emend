@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest a capability, an ecosystem, or a flag
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Emend is TypeScript + npm + GitHub today. Support for other ecosystems
+        (Python, Go, Rust, Java) is the most commonly requested direction — if
+        that's what you're after, say which one and what your upgrade pain looks
+        like concretely, since the `.d.ts` equivalent differs a lot per language.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that Emend can't do today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like it to do
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+      description: Even "upgrade and see what breaks" is a useful answer.
