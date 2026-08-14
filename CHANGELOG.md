@@ -7,6 +7,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-08-14
+
+### Fixed
+
+- `emend --version` (and `-v`, and `version`) printed the usage and exited 1, so
+  an install check like `emend --version >/dev/null` reported a working install
+  as broken. The version is read from the manifest rather than held as a
+  constant, so `npm version` cannot leave it stale.
+
 ### Changed
 
 - README restructured around the scan output, with a `npx` quick start that needs
@@ -61,5 +70,6 @@ First published release. MVP / proof of concept: TypeScript + npm + GitHub only.
   no test script means `typecheck-only`, skipped ≠ clean, and a run that cannot
   reach a model repairs nothing and says so.
 
-[Unreleased]: https://github.com/diyanbogdanov/emend/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/diyanbogdanov/emend/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/diyanbogdanov/emend/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/diyanbogdanov/emend/releases/tag/v0.1.0

@@ -1,7 +1,7 @@
 {
   "name": "emend-cli",
-  "version": "0.1.0",
-  "description": "Detects API drift between installed and target dependency versions, locates affected call sites, and produces verified migration PRs.",
+  "version": "0.1.1",
+  "description": "Verified AI dependency migrations. Finds which of your lines a version bump actually breaks, fixes them, and proves the result still compiles and passes your tests.",
   "author": "Diyan Bogdanov",
   "license": "AGPL-3.0-only",
   "repository": {
