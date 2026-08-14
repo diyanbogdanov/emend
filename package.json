@@ -24,7 +24,7 @@
   ],
   "type": "module",
   "bin": {
-    "emend": "./bin/emend.mjs"
+    "emend": "bin/emend.mjs"
   },
   "files": [
     "bin",

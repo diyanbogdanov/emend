@@ -15,6 +15,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   an install check like `emend --version >/dev/null` reported a working install
   as broken. The version is read from the manifest rather than held as a
   constant, so `npm version` cannot leave it stale.
+- The `bin` path dropped its `./` prefix. npm rejects the prefixed form and was
+  silently correcting it on every publish, so the published manifest was one npm
+  had rewritten rather than the one in the repository.
 
 ### Changed
 
