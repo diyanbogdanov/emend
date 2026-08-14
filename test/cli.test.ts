@@ -45,3 +45,22 @@ test('a command Emend does not have is still a failure', async () => {
   assert.equal(code, 1);
   assert.match(stdout, /USAGE/, 'usage is still the useful thing to show');
 });
+
+test('asking for the version answers it, in every spelling of it', async () => {
+  // The same failure as `--help`, in the question a bug report is built from:
+  // every spelling fell through to `default`, printed the usage and exited 1.
+  // An install check — `emend --version >/dev/null` — therefore reported Emend
+  // as broken on a working install, and the issue template that asks reporters
+  // to quote it was asking for output they could not get.
+  for (const spelling of ['version', '--version', '-v']) {
+    const { code, stdout } = await run(spelling);
+    assert.equal(code, 0, `\`emend ${spelling}\` must exit 0`);
+    // The manifest's version, not merely non-empty: reading it from anywhere
+    // else is how the number goes stale without anyone noticing.
+    assert.match(
+      stdout.trim(),
+      /^\d+\.\d+\.\d+/,
+      'and must print the version rather than the usage',
+    );
+  }
+});
