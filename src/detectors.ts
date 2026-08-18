@@ -602,6 +602,22 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
 
       // One pass over the source tree, then a lookup per package.
       const imports = await indexImports(ctx.sourceFiles, ctx.read);
+
+      // One manifest parse per claiming inventory, not one per non-imported
+      // package: manifestSites re-reads and re-parses a whole lockfile, and
+      // asking per package turned a 50,000-package lockfile's one-time parse
+      // cost into a per-finding one.
+      const sitesByKey = new Map<string, CallSite>();
+      for (const inventory of inventories) {
+        const owned = ordered.filter((p) => p.ecosystem === inventory.osvEcosystem);
+        if (owned.length === 0) continue;
+        for (const [key, site] of await inventory.manifestSites(ctx.repoDir, owned)) {
+          // First-registered inventory wins a shared OSV ecosystem key,
+          // matching the uniqueness assumption documented on osvEcosystem.
+          if (!sitesByKey.has(key)) sitesByKey.set(key, site);
+        }
+      }
+
       const findings: Finding[] = [];
 
       for (const pkg of ordered) {
@@ -610,8 +626,12 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
         const sites: CallSite[] = [...(imports.get(pkg.name) ?? [])];
         const imported = sites.length > 0;
         if (!imported) {
-          const owner = inventories.find((i) => i.osvEcosystem === pkg.ecosystem);
-          const site = owner ? await owner.manifestSite(ctx.repoDir, pkg) : null;
+          // Absent when no registered inventory understands this package's
+          // OSV ecosystem, or when the owning inventory had nothing to cite
+          // for this repository at all (no lockfile present, or it could not
+          // be read) — the finding stands without a manifest site rather
+          // than with a fabricated one.
+          const site = sitesByKey.get(`${pkg.name}@${pkg.version}`);
           if (site) sites.push(site);
         }
 

@@ -6,7 +6,7 @@
  * which reads exactly like having checked. An adapter that claims a repository
  * is the only thing that makes it screened, so claiming is the contract.
  *
- * `manifestSite` is here rather than in the detector because pointing at the
+ * `manifestSites` is here rather than in the detector because pointing at the
  * line that names a package is a fact about the ecosystem's own lockfile, and
  * the detector should not know that npm writes install paths.
  */
@@ -25,12 +25,26 @@ export interface InventoryResult {
 
 export interface EcosystemInventory {
   id: string;
-  /** OSV's ecosystem key: `npm`, `PyPI`, `crates.io`. */
+  /**
+   * OSV's ecosystem key: `npm`, `PyPI`, `crates.io`. Assumed unique per
+   * registered inventory — if two ever share one, whichever is registered
+   * first silently wins and the second is never consulted.
+   */
   osvEcosystem: string;
   applies(repoDir: string): Promise<boolean>;
   read(repoDir: string): Promise<InventoryResult>;
-  /** Where this package is named in the ecosystem's own manifest, if anywhere. */
-  manifestSite(repoDir: string, pkg: InstalledPackage): Promise<CallSite | null>;
+  /**
+   * Where each of these packages is named in the ecosystem's own manifest.
+   *
+   * Batch rather than per-package because the answer comes from one parse of one
+   * file: asking per package re-read a 50,000-entry lockfile once per finding.
+   * Keyed `name@version`; a package with no locatable manifest line is absent
+   * from the map rather than present with a fabricated site.
+   */
+  manifestSites(
+    repoDir: string,
+    packages: InstalledPackage[],
+  ): Promise<Map<string, CallSite>>;
 }
 
 /**
@@ -93,29 +107,38 @@ function npmInventory(): EcosystemInventory {
       return { packages, unsupported: lock.unsupported };
     },
 
-    async manifestSite(repoDir, pkg) {
+    async manifestSites(repoDir, packages) {
       const lock = await readLockfile(repoDir);
-      // Nothing was parsed, so there is nothing to cite. Citing
+      // Nothing was parsed, so there is nothing to cite for anyone. Citing
       // package-lock.json regardless used to fabricate evidence pointing at a
       // file that was never on disk for a pnpm/yarn/bun repository — a false
       // citation, which is worse than none.
       const kind = lock.kind;
-      if (kind === null) return null;
+      if (kind === null) return new Map();
 
-      let installPath = pkg.name;
-      for (const entry of lock.tree.values()) {
-        if (entry.name === pkg.name && entry.version === pkg.version) {
-          installPath = entry.installPath;
-          break;
-        }
-      }
       let raw: string;
       try {
         raw = await readFile(path.join(repoDir, kind), 'utf8');
       } catch {
-        return null;
+        return new Map();
       }
-      return lockfileSite(kind, raw, installPath);
+
+      // One pass over the tree builds every install path this call could
+      // need, rather than re-scanning it once per package as manifestSite
+      // used to — the parse and the read above already happened only once.
+      const installPaths = new Map<string, string>();
+      for (const entry of lock.tree.values()) {
+        const key = `${entry.name}@${entry.version}`;
+        if (!installPaths.has(key)) installPaths.set(key, entry.installPath);
+      }
+
+      const sites = new Map<string, CallSite>();
+      for (const pkg of packages) {
+        const key = `${pkg.name}@${pkg.version}`;
+        const installPath = installPaths.get(key) ?? pkg.name;
+        sites.set(key, lockfileSite(kind, raw, installPath));
+      }
+      return sites;
     },
   };
 }
