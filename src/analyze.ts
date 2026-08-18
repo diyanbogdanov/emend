@@ -23,9 +23,9 @@ import {
 } from './detectors.ts';
 import { walkDir } from './callsites.ts';
 import {
-  fetchPackument,
   fetchPackageDir,
   resolveTargetVersion,
+  clientFor,
 } from './registry.ts';
 import { compareVersions } from './versions.ts';
 import { extractorFor } from './surface.ts';
@@ -233,13 +233,31 @@ export async function scanRepo(
     }
 
     try {
-      const packument = await fetchPackument(dep.name);
+      // 'npm' is transitional, not an unnoticed assumption: every dependency
+      // reaching this point was read from package.json, so it is genuinely the
+      // only correct ecosystem today. Spec C threads each dependency's real
+      // ecosystem through here once inventories drive this pipeline too.
+      const client = clientFor('npm');
+      if (!client) {
+        return {
+          report: {
+            pkg: dep.name,
+            status: 'error',
+            fromVersion: from,
+            toVersion: null,
+            findings: [],
+            unlocatedBreaking: 0,
+            note: `no registry client claims ecosystem 'npm'`,
+          },
+        };
+      }
+      const packageVersions = await client.versions(dep.name);
       const pinned = options.targets?.[dep.name];
       // A pin that was never published is a typo, and silently falling back to
       // `latest` would migrate somewhere the caller did not ask for while
       // reporting success. The benchmark would read that as the model
       // over-editing.
-      if (pinned && !packument.versions?.[pinned]) {
+      if (pinned && !packageVersions.versions.includes(pinned)) {
         return {
           report: {
             pkg: dep.name,
@@ -252,7 +270,7 @@ export async function scanRepo(
           },
         };
       }
-      const to = pinned ?? resolveTargetVersion(packument);
+      const to = pinned ?? resolveTargetVersion(packageVersions);
       if (!to) {
         return {
           report: {

@@ -21,7 +21,7 @@
  */
 import ts from 'typescript';
 import path from 'node:path';
-import { fetchPackageDir, fetchPackument, resolveTargetVersion } from '../src/registry.ts';
+import { fetchPackageDir, resolveTargetVersion, clientFor } from '../src/registry.ts';
 import { compareVersions } from '../src/versions.ts';
 import { extractSurface, resolveTypesEntry } from '../src/surface.ts';
 import { diffSurfaces } from '../src/diff.ts';
@@ -133,10 +133,14 @@ const offenders: string[] = [];
 
 for (const pkg of PACKAGES) {
   try {
-    const pack = await fetchPackument(pkg);
+    // `PACKAGES` is npm-only, but the lookup still returns `undefined` for an
+    // ecosystem nothing claims rather than asserting one exists.
+    const client = clientFor('npm');
+    if (!client) throw new Error(`no registry client claims ecosystem 'npm'`);
+    const pack = await client.versions(pkg);
     const to = resolveTargetVersion(pack);
     if (!to) continue;
-    const from = pickFrom(Object.keys(pack.versions ?? {}), to);
+    const from = pickFrom(pack.versions, to);
     if (!from) continue;
 
     const [fd, td] = await Promise.all([fetchPackageDir(pkg, from), fetchPackageDir(pkg, to)]);

@@ -10,7 +10,7 @@
 
 import { readFile, mkdir, writeFile, readdir, symlink, access } from 'node:fs/promises';
 import path from 'node:path';
-import { fetchPackument, fetchPackageDir, resolveRange, packageNameOfSpecifier } from '../registry.ts';
+import { fetchPackageDir, resolveRange, packageNameOfSpecifier, clientFor } from '../registry.ts';
 
 const NODE_BUILTINS = new Set([
   'assert', 'buffer', 'child_process', 'cluster', 'console', 'constants', 'crypto',
@@ -155,8 +155,13 @@ export async function materializeTypeDeps(pkgDir: string): Promise<string[]> {
 
         seen.add(name);
         try {
-          const pack = await fetchPackument(name);
-          const version = resolveRange(pack, range);
+          // Type dependencies are always resolved against npm: this file
+          // exists solely to satisfy TypeScript's own resolver (see the
+          // module doc above), which has no equivalent for a Python or Rust
+          // adapter.
+          const client = clientFor('npm');
+          if (!client) throw new Error(`no registry client claims ecosystem 'npm'`);
+          const version = resolveRange(await client.versions(name), range);
           if (!version) continue;
           const depDir = await fetchPackageDir(name, version);
           const target = path.join(nmDir, name);

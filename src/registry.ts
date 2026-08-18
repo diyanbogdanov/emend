@@ -30,6 +30,17 @@ export interface Packument {
   versions: Record<string, PackumentVersion>;
 }
 
+/**
+ * A package's published versions, in a shape no ecosystem's wire format leaks
+ * into. `Packument` stays npm's own and is not part of this contract.
+ */
+export interface PackageVersions {
+  name: string;
+  versions: string[];
+  /** What a bare install gets: npm's `latest` tag, PyPI's `info.version`. */
+  latest: string | null;
+}
+
 /** Filesystem-safe cache key for a package name (scoped names contain `/`). */
 function cacheKey(pkg: string): string {
   return pkg.replace('/', '+');
@@ -59,17 +70,17 @@ export async function fetchPackument(pkg: string): Promise<Packument> {
 }
 
 /**
- * The version we should compare against: the `latest` dist-tag, which is what a
- * developer running `npm install pkg` would get.
+ * The version we should compare against: `pack.latest`, which is what a bare
+ * install would get.
  *
  * Deliberately not "highest version" — packages publish prereleases and
  * back-ported patches to older majors under other tags, and neither is what the
  * user would actually receive.
  */
-export function resolveTargetVersion(pack: Packument): string | null {
-  const latest = pack['dist-tags']?.latest;
-  if (latest && pack.versions?.[latest]) return latest;
-  const stable = Object.keys(pack.versions ?? {})
+export function resolveTargetVersion(pack: PackageVersions): string | null {
+  const latest = pack.latest;
+  if (latest && pack.versions.includes(latest)) return latest;
+  const stable = pack.versions
     .filter((v) => !isPrerelease(v))
     .sort(compareVersions);
   return stable.at(-1) ?? null;
@@ -174,13 +185,13 @@ async function fetchPackageDirUncached(
  * Resolve a semver range to a concrete published version.
  *
  * This is deliberately not a full semver implementation — it covers exact pins,
- * `^`, `~`, and the wildcard/comparator forms, and falls back to the `latest`
- * dist-tag for anything more exotic. It is used only to place *type
- * dependencies* on disk so declarations resolve; the versions Emend actually
- * diffs come from the lockfile or node_modules, never from here.
+ * `^`, `~`, and the wildcard/comparator forms, and falls back to `pack.latest`
+ * for anything more exotic. It is used only to place *type dependencies* on
+ * disk so declarations resolve; the versions Emend actually diffs come from
+ * the lockfile or node_modules, never from here.
  */
-export function resolveRange(pack: Packument, range: string): string | null {
-  const published = Object.keys(pack.versions ?? {}).filter((v) => !isPrerelease(v));
+export function resolveRange(pack: PackageVersions, range: string): string | null {
+  const published = pack.versions.filter((v) => !isPrerelease(v));
   if (published.length === 0) return null;
   const latest = resolveTargetVersion(pack);
 
@@ -199,7 +210,7 @@ export function resolveRange(pack: Packument, range: string): string | null {
   // Exact pin, or a comparator we do not model precisely: prefer the pin when it
   // exists, otherwise latest. Guessing wide is worse than guessing narrow here.
   if (op === undefined || op === '=' || op === 'v') {
-    return pack.versions?.[floor] ? floor : latest;
+    return pack.versions.includes(floor) ? floor : latest;
   }
   if (op === '>' || op === '>=' || op === '<' || op === '<=') return latest;
 
@@ -215,7 +226,7 @@ export function resolveRange(pack: Packument, range: string): string | null {
   };
 
   const best = published.filter(inRange).sort(compareVersions).at(-1);
-  return best ?? (pack.versions?.[floor] ? floor : latest);
+  return best ?? (pack.versions.includes(floor) ? floor : latest);
 }
 
 /** `@scope/pkg/sub` -> `@scope/pkg`; `pkg/sub` -> `pkg`. */
@@ -401,4 +412,51 @@ export async function pruneCache(
     bytes += entry.bytes;
   }
   return { packages: doomed.length, bytes };
+}
+
+/**
+ * One ecosystem's registry: where a package's published versions and tarball
+ * come from.
+ *
+ * `versions` returns the neutral `PackageVersions` shape rather than
+ * `Packument` — npm's own wire format — so a crates.io or PyPI client
+ * satisfying this contract is never forced to fabricate `dist-tags` or a
+ * `dist.tarball` field it does not have. An ecosystem with no client is absent
+ * from the registry below, never present with an implementation that invents
+ * versions nobody published.
+ */
+export interface RegistryClient {
+  id: string;
+  /** Whether this client resolves packages published under `ecosystem`. */
+  handles(ecosystem: string): boolean;
+  /** This package's published versions, and what a bare install would get. */
+  versions(pkg: string): Promise<PackageVersions>;
+  /** Download and extract, returning the directory. Never runs install scripts. */
+  fetch(pkg: string, version: string): Promise<string>;
+}
+
+function npmClient(): RegistryClient {
+  return {
+    id: 'npm',
+    handles: (ecosystem) => ecosystem === 'npm',
+    async versions(pkg) {
+      const pack = await fetchPackument(pkg);
+      return {
+        name: pack.name,
+        versions: Object.keys(pack.versions ?? {}),
+        latest: pack['dist-tags']?.latest ?? null,
+      };
+    },
+    fetch: fetchPackageDir,
+  };
+}
+
+// Every registry a package's versions and tarball can be resolved from.
+// Registering one here is what makes an ecosystem resolvable at all — leaving
+// one out is not a crash, it is `clientFor` returning `undefined`, which
+// callers must handle explicitly rather than assume away.
+const CLIENTS: RegistryClient[] = [npmClient()];
+
+export function clientFor(ecosystem: string): RegistryClient | undefined {
+  return CLIENTS.find((c) => c.handles(ecosystem));
 }
