@@ -34,21 +34,30 @@ export interface EcosystemInventory {
 }
 
 /**
- * The lockfile line that names this package, so a finding can point at it.
+ * The line in `file` that names this package, so a finding can point at it.
  *
- * Moved verbatim from `detectors.ts`'s `lockfileSite`, quirks intact: the search
- * is for the install path *in quotes*, `text` is the bare path rather than the
- * line, and the column is not computed. `via: 'import'` is a stretch for a
- * manifest reference — `CallSite.via` is only `'import' | 'type'` — but widening
- * that union changes what every renderer prints, which a behaviour-neutral
- * refactor must not do. Worth revisiting when something other than npm has a
- * manifest to point at.
+ * Originally `detectors.ts`'s `lockfileSite`, which hardcoded `file` to
+ * `package-lock.json` — the only lockfile it ever cited, even for a
+ * repository that had a different one entirely and no `package-lock.json` on
+ * disk at all. `file` is now a parameter so this only ever cites a lockfile
+ * that is actually there; the caller is responsible for that guarantee.
+ *
+ * The search is for the install path *in quotes*, which is how npm writes it
+ * (`"node_modules/qs": {`). pnpm, yarn and bun install paths are synthesized
+ * by `readLockfile` rather than read off the page, so for those the search
+ * will usually miss and fall through to line 1 — that fallback is honest, not
+ * an artifact: the package genuinely is named somewhere in `file`, this just
+ * did not pinpoint the line. `column` is likewise never computed. `via:
+ * 'import'` is a stretch for a manifest reference — `CallSite.via` is only
+ * `'import' | 'type'` — but widening that union changes what every renderer
+ * prints, which a behaviour-neutral refactor must not do. Worth revisiting
+ * when something other than npm has a manifest to point at.
  */
-function lockfileSite(lockfile: string, installPath: string): CallSite {
+function lockfileSite(file: string, lockfile: string, installPath: string): CallSite {
   const lines = lockfile.split('\n');
   const index = lines.findIndex((l) => l.includes(`"${installPath}"`));
   return {
-    file: 'package-lock.json',
+    file,
     line: index === -1 ? 1 : index + 1,
     column: 1,
     text: installPath,
@@ -86,6 +95,13 @@ function npmInventory(): EcosystemInventory {
 
     async manifestSite(repoDir, pkg) {
       const lock = await readLockfile(repoDir);
+      // Nothing was parsed, so there is nothing to cite. Citing
+      // package-lock.json regardless used to fabricate evidence pointing at a
+      // file that was never on disk for a pnpm/yarn/bun repository — a false
+      // citation, which is worse than none.
+      const kind = lock.kind;
+      if (kind === null) return null;
+
       let installPath = pkg.name;
       for (const entry of lock.tree.values()) {
         if (entry.name === pkg.name && entry.version === pkg.version) {
@@ -93,13 +109,13 @@ function npmInventory(): EcosystemInventory {
           break;
         }
       }
-      let raw = '';
+      let raw: string;
       try {
-        raw = await readFile(path.join(repoDir, 'package-lock.json'), 'utf8');
+        raw = await readFile(path.join(repoDir, kind), 'utf8');
       } catch {
         return null;
       }
-      return lockfileSite(raw, installPath);
+      return lockfileSite(kind, raw, installPath);
     },
   };
 }
@@ -109,7 +125,7 @@ function npmInventory(): EcosystemInventory {
 // exactly like one that was never written: `applies` finds nothing, the scan
 // reports zero findings, and that reads identically to a clean repository. See
 // the module doc for the bug this array exists to stop from recurring.
-export const INVENTORIES: EcosystemInventory[] = [npmInventory()];
+const INVENTORIES: EcosystemInventory[] = [npmInventory()];
 
 /**
  * Every inventory that claims this repository.
