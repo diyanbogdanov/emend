@@ -10,6 +10,14 @@
  * Sources are tried in order of decreasing certainty — node_modules, then the
  * lockfile, then the range — and which one answered is recorded on each entry so
  * a guess is never reported as a reading.
+ *
+ * **npm-only, and it runs first.** `readRepo` assumes `package.json` and
+ * throws when one is not there — before `ecosystems.ts` or any other
+ * per-ecosystem seam gets a chance to run. A Python or Rust repository fails
+ * right here, with an npm-flavoured error, and never reaches the "not
+ * examined" coverage line those seams were built to report. Registering
+ * adapters into every seam will not be enough for a second ecosystem until
+ * this module is generalised too — that generalisation is not attempted here.
  */
 
 import { readFile, access } from 'node:fs/promises';

@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import ts from 'typescript';
-import { inventoriesFor } from './ecosystems.ts';
+import { inventoriesFor, type EcosystemInventory } from './ecosystems.ts';
 import { diffSpecs } from './specdiff.ts';
 import { packageOfSpecifier } from './callsites.ts';
 import { remediationTarget, type InstalledPackage, type VulnerablePackage } from './osv.ts';
@@ -554,18 +554,33 @@ export interface VulnerabilityOptions {
  * not established.
  */
 export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
+  // runDetectors calls applies() immediately before detect() on this same
+  // object, so the claiming inventories are cached here for detect() to reuse
+  // instead of re-probing every inventory's applies() — each of which parses
+  // a lockfile — a second time. A caller that invokes detect() on its own
+  // (tests here do) just computes it fresh; nothing relies on applies() having
+  // run first. Scoped to this Detector instance rather than to repoDir:
+  // detectorsFor builds a fresh vulnerabilityDetector() per scan, so this
+  // cache is born and discarded with the scan and can never outlive it to see
+  // a lockfile a later bumpDependency changed.
+  let claiming: EcosystemInventory[] | null = null;
+  async function claimingInventories(repoDir: string): Promise<EcosystemInventory[]> {
+    if (claiming === null) claiming = await inventoriesFor(repoDir);
+    return claiming;
+  }
+
   return {
     id: 'vulnerability',
 
     async applies(ctx: DetectorContext): Promise<boolean> {
       // Any ecosystem that claims this repository, not only npm. Gating on one
       // lockfile is how a whole language went unscreened while looking checked.
-      return (await inventoriesFor(ctx.repoDir)).length > 0;
+      return (await claimingInventories(ctx.repoDir)).length > 0;
     },
 
     async detect(ctx: DetectorContext): Promise<{ findings: Finding[]; notes: string[] }> {
       const notes: string[] = [];
-      const inventories = await inventoriesFor(ctx.repoDir);
+      const inventories = await claimingInventories(ctx.repoDir);
       const packages: InstalledPackage[] = [];
       for (const inventory of inventories) {
         const result = await inventory.read(ctx.repoDir);

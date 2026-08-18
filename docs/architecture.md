@@ -378,19 +378,23 @@ Ollama or vLLM. The recommended defaults are open-weight.
 ```
 src/
   types.ts        the plain-data vocabulary every stage consumes and produces
+  paths.ts        Emend's own package root, resolved so it survives being bundled
 
   ── detection ───────────────────────────────────────────────
   registry.ts     npm metadata, tarball download + cache
   lockfile.ts     package-lock.json -> resolved versions + install tree
   vendor.ts       reconstruct node_modules from the lockfile, no install
   inventory.ts    repo -> installed dependency versions
+  ecosystems.ts   per-ecosystem dependency inventory (npm today; where Python/Rust register)
   workspaces.ts   every manifest directory a monorepo declares
   surface.ts      .d.ts -> public API surface (breadth-first, canonical paths)
+  typescript/typedeps.ts materialises an npm package's type dependencies on disk, for TypeScript's own resolver
   diff.ts         surface x surface -> classified changes
   specs.ts        resolve a vendor's OpenAPI description, with provenance
   specfetch.ts    fetch and cache it
   github.ts       find the description in the vendor's OWN GitHub organisation
   specdiff.ts     description x description -> route changes
+  versions.ts     how an ecosystem orders its versions (semver; PEP 440 for PyPI)
   osv.ts          known vulnerabilities
   advisory.ts     advisory metadata and reachability
   pins.ts         version literals a repo writes down twice
@@ -414,8 +418,10 @@ src/
   reviewharness.ts read-only repo-wide and behaviour reviews
   quality.ts      deprecation gaps left behind by a migration
   freshness.ts    upgrades simply sitting there, with nothing that touches you
+  features.ts     capabilities a bump adds that you don't use yet
 
   ── output ──────────────────────────────────────────────────
+  languages.ts    what Emend can do for an ecosystem, derived from the seams themselves
   pr.ts           evidence-rich PR rendering + gh integration
   store.ts        node:sqlite persistence
   server.ts       dashboard + webhook endpoint

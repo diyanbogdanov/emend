@@ -235,8 +235,9 @@ export async function scanRepo(
     try {
       // 'npm' is transitional, not an unnoticed assumption: every dependency
       // reaching this point was read from package.json, so it is genuinely the
-      // only correct ecosystem today. Spec C threads each dependency's real
-      // ecosystem through here once inventories drive this pipeline too.
+      // only correct ecosystem today. This will read the dependency's actual
+      // ecosystem once dependency inventory is driven per-ecosystem here,
+      // rather than assumed npm.
       const client = clientFor('npm');
       if (!client) {
         return {
@@ -302,8 +303,9 @@ export async function scanRepo(
 
       // 'npm' is transitional, not an unnoticed assumption: every dependency
       // reaching this point was read from package.json, so it is genuinely the
-      // only correct ecosystem today. Spec C threads each dependency's real
-      // ecosystem through here once inventories drive this pipeline too.
+      // only correct ecosystem today. This will read the dependency's actual
+      // ecosystem once dependency inventory is driven per-ecosystem here,
+      // rather than assumed npm.
       const extractor = extractorFor('npm');
       if (!extractor) {
         // No registered extractor is not "nothing changed" — an empty surface

@@ -477,8 +477,9 @@ async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol
   const toDir = await fetchPackageDir(finding.pkg, finding.toVersion);
   // 'npm' is transitional, not an unnoticed assumption: a finding only exists
   // because analyze.ts already extracted this package's surface, so npm is
-  // genuinely the only correct ecosystem today. Spec C threads the finding's
-  // real ecosystem through here once inventories drive the fix pipeline too.
+  // genuinely the only correct ecosystem today. This will read the finding's
+  // actual ecosystem once dependency inventory is driven per-ecosystem here,
+  // rather than assumed npm.
   const extractor = extractorFor('npm');
   if (!extractor) {
     // Silently returning {} would read as "the target version exports
