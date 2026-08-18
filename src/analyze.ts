@@ -28,7 +28,7 @@ import {
   resolveTargetVersion,
 } from './registry.ts';
 import { compareVersions } from './versions.ts';
-import { extractSurface } from './surface.ts';
+import { extractorFor } from './surface.ts';
 import { diffSurfaces, consumerImpacting } from './diff.ts';
 import { findCallSites } from './callsites.ts';
 import { materializeRepoDeps } from './vendor.ts';
@@ -282,13 +282,35 @@ export async function scanRepo(
 
       progress(`  ${dep.name}: ${from} -> ${to}`);
 
+      // 'npm' is transitional, not an unnoticed assumption: every dependency
+      // reaching this point was read from package.json, so it is genuinely the
+      // only correct ecosystem today. Spec C threads each dependency's real
+      // ecosystem through here once inventories drive this pipeline too.
+      const extractor = extractorFor('npm');
+      if (!extractor) {
+        // No registered extractor is not "nothing changed" — an empty surface
+        // would diff that way. It is "nobody looked", which is what
+        // `unanalyzable` exists to say.
+        return {
+          report: {
+            pkg: dep.name,
+            status: 'unanalyzable',
+            fromVersion: from,
+            toVersion: to,
+            findings: [],
+            unlocatedBreaking: 0,
+            note: 'no surface extractor recognises this ecosystem',
+          },
+        };
+      }
+
       const [fromDir, toDir] = await Promise.all([
         fetchPackageDir(dep.name, from),
         fetchPackageDir(dep.name, to),
       ]);
       const [fromSurface, toSurface] = await Promise.all([
-        extractSurface(fromDir, dep.name, from),
-        extractSurface(toDir, dep.name, to),
+        extractor.extract(fromDir, dep.name, from),
+        extractor.extract(toDir, dep.name, to),
       ]);
 
       const diff = diffSurfaces(fromSurface, toSurface);

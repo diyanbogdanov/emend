@@ -13,7 +13,7 @@ import { existsSync } from 'node:fs';
 
 import path from 'node:path';
 import { fetchPackageDir } from './registry.ts';
-import { extractSurface } from './surface.ts';
+import { extractorFor } from './surface.ts';
 import { planFinding } from './plan.ts';
 import { findWorkspaces } from './workspaces.ts';
 import { readRepo } from './inventory.ts';
@@ -475,7 +475,21 @@ async function reviewMigration(
  */
 async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol>> {
   const toDir = await fetchPackageDir(finding.pkg, finding.toVersion);
-  const toSurface = await extractSurface(toDir, finding.pkg, finding.toVersion);
+  // 'npm' is transitional, not an unnoticed assumption: a finding only exists
+  // because analyze.ts already extracted this package's surface, so npm is
+  // genuinely the only correct ecosystem today. Spec C threads the finding's
+  // real ecosystem through here once inventories drive the fix pipeline too.
+  const extractor = extractorFor('npm');
+  if (!extractor) {
+    // Silently returning {} would read as "the target version exports
+    // nothing" rather than "nothing was checked" — every finding below would
+    // then look deterministically unplannable, for a reason invisible to
+    // whoever reads the result. Throwing matches this file's other
+    // precondition failure (fixPackage's missing-finding check, further
+    // down): fail loud rather than launder an unknown into an answer.
+    throw new Error(`no surface extractor recognises 'npm' for ${finding.pkg}`);
+  }
+  const toSurface = await extractor.extract(toDir, finding.pkg, finding.toVersion);
   return toSurface.symbols;
 }
 
