@@ -14,6 +14,8 @@ import os from 'node:os';
 import { emendPath } from './paths.ts';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
+import { inventoriesFor } from './ecosystems.ts';
+import { describeCoverage } from './languages.ts';
 import { reintroduced } from './remediate.ts';
 import { offersPagination } from './httpsites.ts';
 import { fixFinding, needsSourceRepair, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
@@ -384,7 +386,13 @@ function severityLabel(sev: string): string {
  */
 type CurrentVersions = Map<string, string>;
 
-function printScan(report: ScanReport, showAll: boolean, current: CurrentVersions = new Map()): void {
+function printScan(
+  report: ScanReport,
+  showAll: boolean,
+  current: CurrentVersions = new Map(),
+  /** OSV ecosystems the scan actually found an inventory for. */
+  ecosystems: string[] = [],
+): void {
   const { counts } = report;
   console.log('');
   console.log(c.bold(`  Emend scan — ${report.repo}`));
@@ -541,6 +549,13 @@ function printScan(report: ScanReport, showAll: boolean, current: CurrentVersion
       `           ${counts.packagesAnalyzed} package(s) analyzed, ${counts.packagesSkipped} skipped (skipped ≠ clean)`,
     ),
   );
+  // Named per ecosystem, not folded into the counts above: a language absent
+  // from every seam's registry has nothing to count, and a summary that only
+  // reports what it found would look identical to one that looked everywhere
+  // and found nothing. See languages.ts.
+  for (const ecosystem of ecosystems) {
+    console.log(c.dim(`           ${describeCoverage(ecosystem)}`));
+  }
 
   if (report.warnings.length > 0) {
     console.log('');
@@ -594,7 +609,13 @@ async function cmdScan(args: Args): Promise<number> {
   if (args.flags.get('json') === true) {
     console.log(JSON.stringify(report, null, 2));
   } else {
-    printScan(report, args.flags.get('all') === true, await publishedVersions(report, contracts));
+    const ecosystems = (await inventoriesFor(repoDir)).map((i) => i.osvEcosystem);
+    printScan(
+      report,
+      args.flags.get('all') === true,
+      await publishedVersions(report, contracts),
+      ecosystems,
+    );
   }
 
   const store = new Store();

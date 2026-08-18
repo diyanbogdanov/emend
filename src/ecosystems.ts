@@ -166,3 +166,8 @@ export async function inventoriesFor(
   }
   return claimed;
 }
+
+/** The inventory that reads this OSV ecosystem, if one is registered. */
+export function inventoryFor(osvEcosystem: string): EcosystemInventory | undefined {
+  return INVENTORIES.find((i) => i.osvEcosystem === osvEcosystem);
+}
