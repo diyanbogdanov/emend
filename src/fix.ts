@@ -21,7 +21,7 @@ import { scanPins, resolvedVersions, planPinRepair } from './pins.ts';
 import { planOverride, planRemediation, type Remediation } from './remediate.ts';
 import { applyLintPatch, repairableFiles, type LintFinding } from './lint.ts';
 import { readLockfile } from './lockfile.ts';
-import { compareVersions } from './registry.ts';
+import { compareVersions } from './versions.ts';
 import {
   prepareWorkspace,
   applyEdits,

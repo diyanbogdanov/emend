@@ -26,8 +26,8 @@ import {
   fetchPackument,
   fetchPackageDir,
   resolveTargetVersion,
-  compareVersions,
 } from './registry.ts';
+import { compareVersions } from './versions.ts';
 import { extractSurface } from './surface.ts';
 import { diffSurfaces, consumerImpacting } from './diff.ts';
 import { findCallSites } from './callsites.ts';

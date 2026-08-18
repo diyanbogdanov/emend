@@ -17,7 +17,7 @@
  * actually moved. Predicting semver resolution is a worse job than doing it.
  */
 
-import { compareVersions } from './registry.ts';
+import { compareVersions } from './versions.ts';
 
 interface LockPackages {
   packages?: Record<string, { version?: unknown; dependencies?: Record<string, unknown> }>;

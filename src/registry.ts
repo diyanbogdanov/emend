@@ -11,6 +11,7 @@ import { promisify } from 'node:util';
 import { mkdir, rm, writeFile, readdir, readFile, access, symlink, rename, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { compareVersions, isPrerelease } from './versions.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -55,29 +56,6 @@ export async function fetchPackument(pkg: string): Promise<Packument> {
     throw new Error(`registry ${res.status} for ${pkg} (${url})`);
   }
   return (await res.json()) as Packument;
-}
-
-/** Numeric-aware semver compare. Returns <0, 0, >0. Prerelease sorts before release. */
-export function compareVersions(a: string, b: string): number {
-  // Docker tags are often written `v18`, and `parseInt('v1')` is NaN — which
-  // fell through to 0, so every major version compared as zero and `v2.0.0`
-  // equalled `v1.0.0`.
-  const [aCore = '', aPre = ''] = a.replace(/^v/, '').split('-', 2);
-  const [bCore = '', bPre = ''] = b.replace(/^v/, '').split('-', 2);
-  const aParts = aCore.split('.').map((n) => Number.parseInt(n, 10) || 0);
-  const bParts = bCore.split('.').map((n) => Number.parseInt(n, 10) || 0);
-  for (let i = 0; i < 3; i++) {
-    const diff = (aParts[i] ?? 0) - (bParts[i] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  if (aPre === bPre) return 0;
-  if (aPre === '') return 1; // release > prerelease
-  if (bPre === '') return -1;
-  return aPre < bPre ? -1 : 1;
-}
-
-export function isPrerelease(v: string): boolean {
-  return v.includes('-');
 }
 
 /**
