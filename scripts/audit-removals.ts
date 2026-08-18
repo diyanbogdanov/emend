@@ -21,7 +21,8 @@
  */
 import ts from 'typescript';
 import path from 'node:path';
-import { fetchPackageDir, fetchPackument, resolveTargetVersion, compareVersions } from '../src/registry.ts';
+import { fetchPackageDir, fetchPackument, resolveTargetVersion } from '../src/registry.ts';
+import { compareVersions } from '../src/versions.ts';
 import { extractSurface, resolveTypesEntry } from '../src/surface.ts';
 import { diffSurfaces } from '../src/diff.ts';
 
