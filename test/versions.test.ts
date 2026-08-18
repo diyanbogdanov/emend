@@ -56,3 +56,10 @@ test('semver still claims what no other scheme wants', () => {
   };
   assert.equal(schemeFor('npm', [pep440, semverFloor()]).id, 'semver');
 });
+
+test('a registry with no floor says so rather than guessing', () => {
+  // The `!` on a last-element fallback made this return undefined typed as a
+  // VersionScheme, so the failure surfaced as a TypeError somewhere downstream
+  // instead of naming the ecosystem nothing could order.
+  assert.throws(() => schemeFor('crates.io', []), /no version scheme claims/);
+});

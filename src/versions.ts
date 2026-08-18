@@ -17,7 +17,15 @@
 export interface VersionScheme {
   id: string;
   handles(ecosystem: string): boolean;
+  /**
+   * `<0` if `a` sorts before `b`, `0` if they are equivalent, `>0` if `a`
+   * sorts after `b` — the standard comparator contract. `osv.ts` reads the
+   * sign itself at six call sites, not just which side is bigger, so every
+   * implementation of this must honour it exactly. A prerelease sorts below
+   * the release it precedes.
+   */
   compare(a: string, b: string): number;
+  /** Whether `version` is a prerelease under this scheme. */
   isPrerelease(version: string): boolean;
 }
 
@@ -46,17 +54,30 @@ function semverScheme(): VersionScheme {
   };
 }
 
-/** The scheme every ecosystem falls back to. Exported so tests can compose a registry. */
+/**
+ * The scheme every ecosystem falls back to. Exported so tests can compose a
+ * registry.
+ *
+ * Returns a fresh instance, not the one inside `SCHEMES`: nothing on
+ * `VersionScheme` is `readonly`, so handing out the shared instance would let
+ * a test's mutation corrupt production's copy of it.
+ */
 export function semverFloor(): VersionScheme {
   return semverScheme();
 }
 
 // Ordered: the first scheme that claims an ecosystem wins, and semver claims
-// everything, so it must stay last.
+// everything, so it must stay last. A new scheme goes before it in this array
+// — skip that and its ecosystem quietly compares as semver instead (see the
+// module doc above for what that costs PyPI).
 const SCHEMES: VersionScheme[] = [semverScheme()];
 
 /**
- * The scheme for this ecosystem. Never undefined — semver is the floor.
+ * The scheme for this ecosystem.
+ *
+ * The default registry always answers, because semver claims every
+ * ecosystem. A caller-supplied registry with no catch-all floor throws
+ * instead of guessing.
  *
  * The registry is a parameter so the routing can be tested through this
  * function rather than around it.
@@ -65,14 +86,32 @@ export function schemeFor(
   ecosystem: string,
   registry: VersionScheme[] = SCHEMES,
 ): VersionScheme {
-  return registry.find((s) => s.handles(ecosystem)) ?? registry[registry.length - 1]!;
+  const found = registry.find((s) => s.handles(ecosystem));
+  if (found) return found;
+  // Reached only by a registry with no catch-all floor. Guessing an order for
+  // an unknown ecosystem is exactly how versions get silently mis-ranked, which
+  // is what this seam exists to prevent — so it is said rather than assumed.
+  throw new Error(`no version scheme claims ecosystem '${ecosystem}'`);
 }
 
-/** npm-default convenience, so callers without an ecosystem in hand are unchanged. */
+/**
+ * npm-default convenience, so callers without an ecosystem in hand are
+ * unchanged. Current callers: `registry.ts`, `fix.ts`, `remediate.ts`,
+ * `analyze.ts`, `scripts/audit-removals.ts` — all genuinely npm-only today.
+ * A caller that learns a second ecosystem must switch to
+ * `schemeFor(ecosystem).compare` rather than keep calling this under the same
+ * name; that is exactly how the bug this seam exists to prevent comes back.
+ */
 export function compareVersions(a: string, b: string): number {
   return schemeFor('npm').compare(a, b);
 }
 
+/**
+ * npm-default convenience; only `registry.ts` calls this today, to filter
+ * prereleases out of `resolveTargetVersion` and `resolveRange`. The same
+ * warning as `compareVersions` applies: a caller that learns a second
+ * ecosystem must switch to `schemeFor(ecosystem).isPrerelease`.
+ */
 export function isPrerelease(version: string): boolean {
   return schemeFor('npm').isPrerelease(version);
 }
