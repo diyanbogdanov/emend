@@ -414,9 +414,6 @@ export async function scanRepo(
   // in full and `api.Dockerfile` matches the same entry.
   const walked = walkDir(repoDir, [
     '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',
-    // Go, so its advisories' affected symbols can be looked for. A detector
-    // cannot be offered files the walk never collected.
-    '.go',
     '.sh', '.bash', 'Dockerfile', 'Containerfile',
   ]).map((f) => path.relative(repoDir, f));
 
@@ -430,7 +427,7 @@ export async function scanRepo(
   // When there *was* a cap, it dropped by walk order: on n8n it hid 8 of 8
   // Dockerfiles and 7 of 9 shell scripts, and `--lint` read as clean. The
   // partition below survives from that era and now only orders the list.
-  const configFiles = walked.filter((f) => /(Dockerfile|Containerfile)|\.(sh|bash|go)$/.test(f));
+  const configFiles = walked.filter((f) => /(Dockerfile|Containerfile)|\.(sh|bash)$/.test(f));
   const codeFiles = walked.filter((f) => !configFiles.includes(f));
   const sourceFiles = [...configFiles, ...codeFiles];
   const pinScan = await scanPins(

@@ -7,6 +7,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Removed
+
+- Go vulnerability scanning and symbol-level reachability. Go was Emend's second
+  OSV ecosystem; it is removed ahead of Python and Rust support, which are built
+  on a language seam rather than on branches in the detector.
+
 ## [0.1.1] — 2026-08-14
 
 ### Fixed

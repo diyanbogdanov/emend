@@ -401,7 +401,6 @@ src/
   ── localisation ────────────────────────────────────────────
   callsites.ts    repo -> where package symbols are used (type resolution)
   httpsites.ts    repo -> outbound HTTP calls, and which are unreadable
-  goreach.ts      Go: symbol-level reachability, which its advisories name
   impact.ts       the mirror image — what reshaping a symbol the repo OWNS costs
 
   ── repair ──────────────────────────────────────────────────

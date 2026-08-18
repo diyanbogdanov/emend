@@ -128,14 +128,14 @@ test('the analyzer is chosen by the file, not assumed to be TypeScript', () => {
   assert.equal(analyzerFor('src/app.ts')?.id, 'typescript');
   assert.equal(analyzerFor('src/app.tsx')?.id, 'typescript');
   assert.equal(analyzerFor('src/app.mjs')?.id, 'typescript');
-  assert.equal(analyzerFor('main.go'), undefined);
+  assert.equal(analyzerFor('main.py'), undefined);
   assert.equal(analyzerFor('Dockerfile'), undefined);
 });
 
 test('the TypeScript analyzer says which files it can answer for', () => {
   const ts = typescriptAnalyzer();
   assert.equal(ts.handles('a.ts'), true);
-  assert.equal(ts.handles('a.go'), false);
+  assert.equal(ts.handles('a.py'), false);
 });
 
 // ---------------------------------------------------------------------------

@@ -300,10 +300,10 @@ test('an advisory with only a git range offers no installable fix', () => {
     id: 'GHSA-gitonly',
     affected: [
       {
-        package: { name: 'thing', ecosystem: 'Go' },
+        package: { name: 'thing', ecosystem: 'crates.io' },
         ranges: [{ type: 'GIT', events: [{ introduced: '0' }, { fixed: 'abc123def456' }] }],
       },
     ],
   };
-  assert.equal(fixedVersionFor(gitOnly, 'thing', 'Go', '1.0.0'), null);
+  assert.equal(fixedVersionFor(gitOnly, 'thing', 'crates.io', '1.0.0'), null);
 });
