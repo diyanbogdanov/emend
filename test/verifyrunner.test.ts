@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { runnerFor, runPhase, type VerifyRunner } from '../src/verify.ts';
+import { runnerFor, runPhase, parserFor, countDiagnostics, type VerifyRunner } from '../src/verify.ts';
+import type { CommandResult } from '../src/types.ts';
 
 function fakeRunner(id: string, claims: boolean): VerifyRunner {
   return {
@@ -79,4 +80,30 @@ test('an unclaimed repository is skipped, never silently passed', async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("parserFor('npm') counts the same as countDiagnostics on the same input", () => {
+  // parserFor is the seam a caller is meant to go through; countDiagnostics is
+  // the npm parser's own implementation, registered under it. If these ever
+  // disagreed, fix.ts's afterBump/afterRepair numbers would depend on which of
+  // the two happened to be called, for no reason a reader could see.
+  const result: CommandResult = {
+    command: 'tsc --noEmit',
+    ok: false,
+    exitCode: 1,
+    stdout: 'src/schema.ts(28,15): error TS2554: Expected 1 arguments, but got 2.\n',
+    stderr: '',
+  };
+  const parser = parserFor('npm');
+  assert.ok(parser);
+  assert.equal(parser.count(result), countDiagnostics(result));
+});
+
+test("parserFor('cargo') is undefined, not tsc's patterns applied to cargo's output", () => {
+  // A runner id nothing registered must be absent here rather than fall
+  // through to a pattern that cannot see its output: cargo's own diagnostics
+  // (`--message-format=json`) match neither of countDiagnostics's patterns, so
+  // routing an unregistered id through them anyway would silently undercount
+  // — usually to 0 — rather than report honestly that nothing measured it.
+  assert.equal(parserFor('cargo'), undefined);
 });

@@ -30,7 +30,7 @@ import {
   workspaceDiff,
   type Workspace,
 } from './apply.ts';
-import { runPhase, runTypecheck, compare, countDiagnostics, verificationPassed } from './verify.ts';
+import { runPhase, runnerFor, parserFor, compare, verificationPassed } from './verify.ts';
 
 import {
   revertHunks,
@@ -641,6 +641,19 @@ function verificationErrors(report: VerificationReport): string {
 }
 
 /**
+ * Diagnostics in `result`, through whichever parser `runnerId` registers.
+ *
+ * 0 when there is none — an unregistered runner id, including `undefined`
+ * (no runner claimed the repository at all), is the same "not measured" case
+ * `countDiagnostics` already returns 0 for on a format neither of its own
+ * patterns matches. There is no second, guessing parser to fall back to.
+ */
+function diagnosticsFor(runnerId: string | undefined, result: CommandResult): number {
+  const parser = runnerId ? parserFor(runnerId) : undefined;
+  return parser ? parser.count(result) : 0;
+}
+
+/**
  * Fix every finding for one package in a single workspace.
  *
  * A version bump is atomic: you cannot upgrade zod to 4.x and address only one
@@ -702,9 +715,20 @@ export async function fixPackage(
     // new version and none of the repair, which is what "what the upgrade broke"
     // means. One line further on, the deterministic edits have already started
     // fixing it.
-    const errorsFromUpgrade = options.countUpgradeErrors
-      ? countDiagnostics(await runTypecheck(ws.dir))
-      : null;
+    //
+    // The runner id is kept for afterRepair below rather than re-resolved
+    // there: afterBump and afterRepair are a before/after pair, and counting
+    // them through two different runners' parsers would make the delta
+    // meaningless.
+    let upgradeRunnerId: string | undefined;
+    let errorsFromUpgrade: number | null = null;
+    if (options.countUpgradeErrors) {
+      const runner = await runnerFor(ws.dir);
+      upgradeRunnerId = runner?.id;
+      errorsFromUpgrade = runner
+        ? diagnosticsFor(runner.id, (await runner.run(ws.dir, { skipTests: true })).typecheck)
+        : 0;
+    }
     if (errorsFromUpgrade !== null) {
       progress(`  the upgrade breaks ${errorsFromUpgrade} location(s) before repair`);
     }
@@ -883,6 +907,17 @@ export async function fixPackage(
       if (review.findings.length > 0) reviewNotes = review.findings;
     }
 
+    const upgradeErrors =
+      errorsFromUpgrade !== null
+        ? {
+            afterBump: errorsFromUpgrade,
+            // The end of the line, whichever pass got it there — deterministic
+            // edits, the harness, tightening, the review. All of them are
+            // repair, and the question is how much of the damage is left.
+            afterRepair: diagnosticsFor(upgradeRunnerId, verification.post.typecheck),
+          }
+        : null;
+
     const result: PackageFixResult = {
       pkg,
       fromVersion,
@@ -899,17 +934,7 @@ export async function fixPackage(
       workspaceMode: ws.mode,
       ...(harnessRecord ? { harness: harnessRecord } : {}),
       ...(reviewNotes ? { reviewNotes } : {}),
-      ...(errorsFromUpgrade !== null
-        ? {
-            upgradeErrors: {
-              afterBump: errorsFromUpgrade,
-              // The end of the line, whichever pass got it there — deterministic
-              // edits, the harness, tightening, the review. All of them are
-              // repair, and the question is how much of the damage is left.
-              afterRepair: countDiagnostics(verification.post.typecheck),
-            },
-          }
-        : {}),
+      ...(upgradeErrors ? { upgradeErrors } : {}),
     };
 
     if (!options.keepWorkspace) {
