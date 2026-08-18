@@ -380,3 +380,49 @@ export function findCallSites(
 
   return { byPackage, filesAnalyzed, warnings };
 }
+
+/**
+ * One language's answer to "where does this repository use these symbols".
+ *
+ * The negative is the load-bearing half: "not imported from this repository's
+ * source" is a claim about files that were actually parsed. A language with no
+ * resolver is absent here, so that claim is never made on its behalf.
+ */
+export interface CallSiteResolver {
+  id: string;
+  /** Whether this resolver can parse `file` well enough to search it. */
+  handles(file: string): boolean;
+  /** Where `repoDir` calls the tracked symbols of `surfaces`, narrowed to `wanted`. */
+  find(
+    repoDir: string,
+    surfaces: Map<string, ApiSurface>,
+    wanted: Map<string, Set<string>>,
+  ): CallSiteIndex;
+}
+
+const TS_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+
+// Every language a repository's call sites can be searched in. Registering one
+// here is what makes a language searchable at all — leaving one out is not a
+// crash, it is `resolverFor` returning `undefined`, which keeps "not imported
+// from this repository's source" from being said about a file nothing read.
+const RESOLVERS: CallSiteResolver[] = [
+  {
+    id: 'typescript',
+    handles: (file) => TS_EXTENSIONS.some((ext) => file.endsWith(ext)),
+    find: findCallSites,
+  },
+];
+
+/**
+ * The resolver that can search this file, if one is registered for it.
+ *
+ * Not yet called from the scan pipeline: `findCallSites` discovers its own
+ * files from `repoDir` rather than accepting a list, so there is nothing here
+ * to route per-file today. Task 8's `capabilitiesFor` is the first real
+ * caller, checking `resolverFor(sampleFile)` to decide whether an ecosystem
+ * has call-site support before claiming it does.
+ */
+export function resolverFor(file: string): CallSiteResolver | undefined {
+  return RESOLVERS.find((r) => r.handles(file));
+}
