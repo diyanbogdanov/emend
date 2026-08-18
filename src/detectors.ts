@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import ts from 'typescript';
-import { readLockfile } from './lockfile.ts';
+import { inventoriesFor } from './ecosystems.ts';
 import { diffSpecs } from './specdiff.ts';
 import { packageOfSpecifier } from './callsites.ts';
 import { remediationTarget, type InstalledPackage, type VulnerablePackage } from './osv.ts';
@@ -524,19 +524,6 @@ export async function indexImports(
   return index;
 }
 
-/** The lockfile line declaring a package, so a transitive finding still has evidence. */
-function lockfileSite(lockfile: string, installPath: string): CallSite {
-  const lines = lockfile.split('\n');
-  const index = lines.findIndex((l) => l.includes(`"${installPath}"`));
-  return {
-    file: 'package-lock.json',
-    line: index === -1 ? 1 : index + 1,
-    column: 1,
-    text: installPath,
-    via: 'import',
-  };
-}
-
 export interface VulnerabilityOptions {
   /** Injected: this detector reaches the network, and that is the caller's call. */
   scan: (packages: InstalledPackage[]) => Promise<VulnerablePackage[]>;
@@ -571,29 +558,21 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
     id: 'vulnerability',
 
     async applies(ctx: DetectorContext): Promise<boolean> {
-      // The installed tree is the input. Without one there is nothing to ask
-      // about, and answering that must not cost a request.
-      const lock = await readLockfile(ctx.repoDir);
-      return lock.tree.size > 0;
+      // Any ecosystem that claims this repository, not only npm. Gating on one
+      // lockfile is how a whole language went unscreened while looking checked.
+      return (await inventoriesFor(ctx.repoDir)).length > 0;
     },
 
     async detect(ctx: DetectorContext): Promise<{ findings: Finding[]; notes: string[] }> {
       const notes: string[] = [];
-      const lock = await readLockfile(ctx.repoDir);
-      if (lock.unsupported) {
-        notes.push(`${lock.unsupported} could not be read, so its packages were not checked`);
-      }
-
-      // The whole tree, not the direct dependencies. Most vulnerabilities in a
-      // real repository are transitive, and screening only what package.json
-      // names would miss the majority of them.
-      const byName = new Map<string, string>();
+      const inventories = await inventoriesFor(ctx.repoDir);
       const packages: InstalledPackage[] = [];
-      for (const entry of lock.tree.values()) {
-        const key = `${entry.name}@${entry.version}`;
-        if (byName.has(key)) continue;
-        byName.set(key, entry.installPath);
-        packages.push({ name: entry.name, ecosystem: 'npm', version: entry.version });
+      for (const inventory of inventories) {
+        const result = await inventory.read(ctx.repoDir);
+        if (result.unsupported) {
+          notes.push(`${result.unsupported} could not be read, so its packages were not checked`);
+        }
+        packages.push(...result.packages);
       }
       if (packages.length === 0) return { findings: [], notes };
 
@@ -621,7 +600,6 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
       }
       const ordered = facts.size > 0 ? rankVulnerable(vulnerable, facts) : vulnerable;
 
-      const lockRaw = (await ctx.read('package-lock.json')) ?? '';
       // One pass over the source tree, then a lookup per package.
       const imports = await indexImports(ctx.sourceFiles, ctx.read);
       const findings: Finding[] = [];
@@ -632,7 +610,9 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
         const sites: CallSite[] = [...(imports.get(pkg.name) ?? [])];
         const imported = sites.length > 0;
         if (!imported) {
-          sites.push(lockfileSite(lockRaw, byName.get(`${pkg.name}@${pkg.version}`) ?? pkg.name));
+          const owner = inventories.find((i) => i.osvEcosystem === pkg.ecosystem);
+          const site = owner ? await owner.manifestSite(ctx.repoDir, pkg) : null;
+          if (site) sites.push(site);
         }
 
         // Deduplicated: separate advisories routinely alias the same CVE, and
