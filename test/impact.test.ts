@@ -123,7 +123,7 @@ test('a repository that cannot be built yields nothing rather than a guess', asy
 // ---------------------------------------------------------------------------
 
 test('the analyzer is chosen by the file, not assumed to be TypeScript', () => {
-  // Go, Python and Java each have their own answer to "who references this", and
+  // Python and Rust each have their own answer to "who references this", and
   // each will be its own analyzer. Nothing above this line may assume otherwise.
   assert.equal(analyzerFor('src/app.ts')?.id, 'typescript');
   assert.equal(analyzerFor('src/app.tsx')?.id, 'typescript');

@@ -52,8 +52,6 @@ export interface OsvRange {
 export interface OsvAffected {
   package?: { name?: string; ecosystem?: string };
   ranges?: OsvRange[];
-  /** Carries per-ecosystem extras; nothing reads them today. */
-  ecosystem_specific?: { imports?: Array<{ path?: string; symbols?: string[] }> };
 }
 
 export interface OsvRecord {

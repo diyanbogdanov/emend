@@ -12,6 +12,10 @@ test('a leading v does not make every major version zero', () => {
 });
 
 test('prerelease sorts below the release it precedes', () => {
+  // Untested until now: `fixedVersionFor` and `covers` in osv.ts compare an
+  // installed version straight against an advisory's `fixed` bound, with no
+  // prerelease filtering first — this ordering decides whether an installed
+  // prerelease is read as already fixed or still vulnerable.
   assert.ok(compareVersions('1.0.0-rc.1', '1.0.0') < 0);
   assert.ok(compareVersions('1.0.0', '1.0.0-rc.1') > 0);
   assert.equal(compareVersions('1.0.0-rc.1', '1.0.0-rc.1'), 0);

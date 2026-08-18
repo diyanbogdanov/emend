@@ -207,7 +207,7 @@ test('an advisory that does not actually cover the installed version is dropped'
 });
 
 test('the ecosystem travels with the query, which is the multi-language seam', () => {
-  // OSV keys on ecosystem, so Python, Go and Java cost an inventory reader
+  // OSV keys on ecosystem, so Python and Rust cost an inventory reader
   // rather than a new pipeline. Nothing here may assume npm.
   const bodies: string[] = [];
   const fetch: Fetcher = async (url, init) => {
