@@ -12,6 +12,7 @@
 import path from 'node:path';
 import ts from 'typescript';
 import type { ApiSurface, CallSite } from './types.ts';
+import { findPythonCallSites } from './python/callsites.ts';
 
 /**
  * Source files admitted to the TypeScript program.
@@ -399,15 +400,30 @@ export interface CallSiteResolver {
   ecosystems: string[];
   /** Whether this resolver can parse `file` well enough to search it. */
   handles(file: string): boolean;
-  /** Where `repoDir` calls the tracked symbols of `surfaces`, narrowed to `wanted`. */
+  /**
+   * Where `repoDir` calls the tracked symbols of `surfaces`, narrowed to
+   * `wanted`.
+   *
+   * Returns a bare `CallSiteIndex` or a `Promise` of one: the TypeScript
+   * resolver builds its whole program synchronously and returns directly;
+   * the Python resolver (`python/callsites.ts`) cannot — its parser loads a
+   * WASM grammar, and `web-tree-sitter` only offers an async API for that —
+   * so forcing one shape onto the other would mean either wrapping every
+   * synchronous call in a needless `Promise.resolve`, or blocking Python's
+   * parser on a synchronous load it cannot do. No caller dispatches through
+   * this interface today (see `resolverFor`'s doc), so nothing yet depends on
+   * which shape a given resolver picks — a future caller awaits `find`,
+   * which resolves either kind alike.
+   */
   find(
     repoDir: string,
     surfaces: Map<string, ApiSurface>,
     wanted: Map<string, Set<string>>,
-  ): CallSiteIndex;
+  ): CallSiteIndex | Promise<CallSiteIndex>;
 }
 
 const TS_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+const PY_EXTENSIONS = ['.py', '.pyi'];
 
 // Every language a repository's call sites can be searched in. Registering one
 // here is what makes a language searchable at all — leaving one out is not a
@@ -422,6 +438,12 @@ const RESOLVERS: CallSiteResolver[] = [
     ecosystems: ['npm'],
     handles: (file) => TS_EXTENSIONS.some((ext) => file.endsWith(ext)),
     find: findCallSites,
+  },
+  {
+    id: 'python',
+    ecosystems: ['PyPI'],
+    handles: (file) => PY_EXTENSIONS.some((ext) => file.endsWith(ext)),
+    find: findPythonCallSites,
   },
 ];
 

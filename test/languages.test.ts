@@ -19,9 +19,12 @@ test('an ecosystem with no extractor reports the gap rather than hiding it', () 
 test('the coverage line names what was not examined, and why', () => {
   // The requirement: a reader must not be able to mistake "not examined" for
   // "examined and clean".
-  const line = describeCoverage('PyPI');
+  // Not PyPI: Task 9 registered a Python call-site resolver, so PyPI now
+  // clears every tier (see the capabilities test above) and is no longer an
+  // example of "something was not examined". crates.io still is, on every tier.
+  const line = describeCoverage('crates.io');
   assert.match(line, /not examined/);
-  assert.match(line, /PyPI/);
+  assert.match(line, /crates\.io/);
   assert.doesNotMatch(line, /clean|no issues|nothing found/i);
 });
 

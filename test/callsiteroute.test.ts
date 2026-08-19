@@ -11,6 +11,8 @@ test('TypeScript claims the extensions it can type-check', () => {
 test('a file no resolver claims is undefined, not zero call sites', () => {
   // Zero call sites renders as "not imported from this repository's source".
   // For a file nobody parsed, that sentence is false.
-  assert.equal(resolverFor('app/main.py'), undefined);
+  // Not `.py`: Task 9 registered a Python resolver (see pythoncallsites.test.ts),
+  // so `.py` now claims and is no longer an example of "nothing claims this
+  // file". `.rs` still is, on every extension.
   assert.equal(resolverFor('src/lib.rs'), undefined);
 });

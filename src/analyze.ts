@@ -453,9 +453,12 @@ export async function scanRepo(
   // of "does this repository still work", and a detector cannot be offered files
   // the walk never collected — `--lint` silently found nothing until this list
   // included them. `walkDir` matches by suffix, so a bare `Dockerfile` is named
-  // in full and `api.Dockerfile` matches the same entry.
+  // in full and `api.Dockerfile` matches the same entry. `.py`/`.pyi` are the
+  // same fix for the same bug: without them, no Python file ever reached a
+  // detector, no matter what `python/callsites.ts` could find in one.
   const walked = walkDir(repoDir, [
     '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',
+    '.py', '.pyi',
     '.sh', '.bash', 'Dockerfile', 'Containerfile',
   ]).map((f) => path.relative(repoDir, f));
 
