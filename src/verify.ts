@@ -349,7 +349,14 @@ export function compare(baseline: VerifyPhase, post: VerifyPhase): VerificationR
       `Typecheck passes after the change, but the tests did not run (${post.test.skipReason ?? 'reason not recorded'}) — behaviour is NOT verified, only types.`;
   } else {
     outcome = 'verified';
-    summary = 'Baseline passed and the post-change run passed: typecheck and tests are green.';
+    // Which of the two actually ran matters. This branch is reached whenever the
+    // tests passed, including when the typecheck was skipped — and it used to say
+    // "typecheck and tests are green" regardless, asserting a step that never ran.
+    // `typecheck-only` above was always careful about the mirror case; this side
+    // was not.
+    summary = post.typecheck.skipped
+      ? `Tests pass after the change, but types were not checked (${post.typecheck.skipReason ?? 'reason not recorded'}).`
+      : 'Baseline passed and the post-change run passed: typecheck and tests are green.';
   }
 
   return { outcome, baseline, post, summary };
