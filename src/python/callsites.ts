@@ -139,6 +139,51 @@ function collectImports(root: Node): Imports {
 }
 
 /**
+ * Whether `modulePath` is `pkg` itself or one of its submodules — matched on
+ * whole path segments, never a string prefix: `pkg.startsWith('requests')`
+ * would wrongly claim `requests_toolbelt` and `requestsauth` as part of
+ * `requests`. Every import form funnels through this one check, so `from
+ * pkg.sub import Name` is recognised exactly where `from pkg import Name`
+ * already was.
+ */
+function belongsToPackage(modulePath: string, pkg: string): boolean {
+  return modulePath === pkg || modulePath.startsWith(`${pkg}.`);
+}
+
+/**
+ * The module a qualified call's receiver names, when that receiver is an
+ * import binding at all.
+ *
+ * One hop covers the common case: `r` in `r.send(...)` resolves straight
+ * through `imports.modules`, whether that came from `import requests as r`
+ * or plain `import requests`. A submodule imported without an alias needs a
+ * second shape: `import werkzeug.datastructures` binds only the top-level
+ * name `werkzeug`, not `werkzeug.datastructures` — Python has no name bound
+ * to the submodule itself — so the symbol is reached as
+ * `werkzeug.datastructures.Headers(...)`, where the receiver is a two-level
+ * attribute chain (an `attribute` node, not an `identifier`). That chain
+ * resolves only when it exactly matches what was imported, because there is
+ * no shorthand for reaching a submodule this way: nothing shorter, nothing
+ * renamed.
+ *
+ * Anything else — a local variable, a function's return value — is not an
+ * import binding and yields undefined, same as before this function existed.
+ */
+function receiverModule(object: Node | null, imports: Imports): string | undefined {
+  if (!object) return undefined;
+  if (object.type === 'identifier') return imports.modules.get(object.text);
+  if (object.type !== 'attribute') return undefined;
+  // `object.text` is the exact source slice for this node, e.g.
+  // "werkzeug.datastructures" — already the literal dotted path, the same
+  // way `collectImports` reads a `dotted_name`'s `.text` for the same reason.
+  const text = object.text;
+  const dot = text.indexOf('.');
+  const root = dot === -1 ? text : text.slice(0, dot);
+  const bound = imports.modules.get(root);
+  return bound === text ? bound : undefined;
+}
+
+/**
  * One file's call sites for `pkg`'s tracked `symbols`, bucketed by the exact
  * canonical path each site matched — the shape `findPythonCallSites` needs to
  * assemble `CallSiteIndex.byPackage` from one parse of one file, whatever
@@ -167,6 +212,13 @@ function bucketedSites(
     if (dot !== -1) methodWanted.set(s.slice(dot + 1), s);
   }
 
+  // Computed once per file/package pair, not per call site: whether *any*
+  // star import or *any* referenced module belongs to `pkg`, so `from
+  // pkg.sub import *` and a method lead through `from pkg.sub import Name`
+  // get the same submodule treatment as their flat forms.
+  const starImportsPkg = [...imports.starImported].some((m) => belongsToPackage(m, pkg));
+  const referencesPkg = [...imports.referenced].some((m) => belongsToPackage(m, pkg));
+
   const record = (canonical: string, at: Node): void => {
     const { row, column } = at.startPosition;
     const list = buckets.get(canonical) ?? [];
@@ -190,9 +242,9 @@ function bucketedSites(
         const local = fn.text;
         const binding = imports.names.get(local);
         const resolved =
-          binding && binding.module === pkg
+          binding && belongsToPackage(binding.module, pkg)
             ? binding.exported
-            : imports.starImported.has(pkg)
+            : starImportsPkg
               ? local
               : undefined;
         if (resolved !== undefined && bareWanted.has(resolved)) record(resolved, fn);
@@ -200,19 +252,23 @@ function bucketedSites(
         const object = fn.childForFieldName('object');
         const member = fn.childForFieldName('attribute')?.text;
         if (member) {
-          // A qualified call through a known module alias: `r.send(...)`
-          // where `r` is bound to the tracked module. Exact — the binding is
-          // proof `r` *is* the module, so `member` is one of its top-level
-          // exports, not a guess about some unrelated object's own method.
-          if (object?.type === 'identifier' && imports.modules.get(object.text) === pkg) {
-            if (bareWanted.has(member)) record(member, fn);
+          // A qualified call through a known import binding: `r.send(...)`
+          // after `import requests as r`, or the literal chain
+          // `werkzeug.datastructures.Headers(...)` after the unaliased
+          // `import werkzeug.datastructures` — see `receiverModule`. Exact —
+          // the binding is proof the receiver *is* the module, so `member`
+          // is one of its top-level exports, not a guess about some
+          // unrelated object's own method.
+          const resolvedModule = receiverModule(object, imports);
+          if (resolvedModule && belongsToPackage(resolvedModule, pkg) && bareWanted.has(member)) {
+            record(member, fn);
           }
           // A method-style match: `.member(...)` on whatever the receiver
           // is. This cannot be resolved further without a type checker — see
           // the module doc — so it matches by name alone, gated on the file
-          // importing the module at all.
+          // importing the module (or one of its submodules) at all.
           const canonical = methodWanted.get(member);
-          if (canonical && imports.referenced.has(pkg)) record(canonical, fn);
+          if (canonical && referencesPkg) record(canonical, fn);
         }
       }
     }
