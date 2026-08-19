@@ -1,5 +1,5 @@
 import type { RepoInfo } from './types.ts';
-import { inventoriesFor } from './ecosystems.ts';
+import { inventoriesFor, registeredManifests } from './ecosystems.ts';
 
 /**
  * What this repository declares it depends on.
@@ -14,9 +14,11 @@ export async function readRepo(repoDir: string): Promise<RepoInfo> {
   const claimed = await inventoriesFor(repoDir);
   const first = claimed[0];
   if (!first) {
+    // Named from the registry, not a hardcoded wishlist: naming a Python
+    // filename before any Python adapter exists would be exactly the "nobody
+    // looked" claim this codebase refuses to make elsewhere.
     throw new Error(
-      `no recognised manifest in ${repoDir} — looked for package.json, ` +
-        'pyproject.toml, requirements.txt, uv.lock, poetry.lock, pdm.lock and Pipfile.lock',
+      `no recognised manifest in ${repoDir} — looked for ${registeredManifests().join(', ')}`,
     );
   }
   // The first claimant, deliberately. A polyglot repository has more than one,
@@ -24,5 +26,21 @@ export async function readRepo(repoDir: string): Promise<RepoInfo> {
   // `name` and `workspaces` belong to whichever ecosystem happened to win —
   // a worse answer than picking one and saying so. Revisit when a real polyglot
   // repository demands it, with evidence rather than symmetry.
-  return first.declared(repoDir);
+  const info = await first.declared(repoDir);
+
+  // The rest of `claimed` is real work `inventoriesFor` already did, discarded
+  // by picking `first` above. Cannot fire while npm is the only registered
+  // ecosystem, but the second claimant (a Python adapter) is committed work
+  // later in this plan, not a hypothetical — a polyglot repository deserves to
+  // know an ecosystem went unanalysed rather than silently see npm's answer
+  // presented as the whole picture.
+  if (claimed.length > 1) {
+    const skipped = claimed.slice(1).map((i) => i.id);
+    info.warnings.push(
+      `${claimed.length} ecosystems claim this repository (${claimed
+        .map((i) => i.id)
+        .join(', ')}) — only ${first.id}'s declared dependencies were analysed; ${skipped.join(', ')} skipped`,
+    );
+  }
+  return info;
 }

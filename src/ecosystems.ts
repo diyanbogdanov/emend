@@ -41,6 +41,15 @@ export interface EcosystemInventory {
    * first silently wins and the second is never consulted.
    */
   osvEcosystem: string;
+  /**
+   * The manifest filenames this inventory looks for.
+   *
+   * Declared rather than inferred because `applies` is a predicate and cannot be
+   * asked what it examined. It exists so `readRepo` can tell a user what was
+   * actually looked for — naming files no adapter reads would be the "nobody
+   * looked" claim this codebase refuses to make.
+   */
+  manifests: string[];
   applies(repoDir: string): Promise<boolean>;
   read(repoDir: string): Promise<InventoryResult>;
   /**
@@ -136,6 +145,13 @@ function npmInventory(): EcosystemInventory {
   return {
     id: 'npm',
     osvEcosystem: 'npm',
+    // What `applies` below actually checks: a bare `package.json`, or any of
+    // the four lockfiles `readLockfile` can parse. `bun.lockb` is excluded on
+    // purpose — `readLockfile` recognises it too, but only to report it as
+    // unsupported; finding it alone (no package.json, no parseable lockfile)
+    // does not make `applies` return true, so it is not actually looked for
+    // in the sense this list promises.
+    manifests: ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock'],
 
     async applies(repoDir) {
       // A `package.json` alone is enough to have declared dependencies worth
@@ -177,15 +193,27 @@ function npmInventory(): EcosystemInventory {
      * the lockfile, then the range — and which one answered is recorded on each
      * entry so a guess is never reported as a reading.
      *
-     * Moved here unchanged from `inventory.ts`'s `readRepo`, which used to read
-     * `package.json` and throw when absent — this may now assume `applies()`
-     * already confirmed the manifest is there; the throw for "nothing claims
-     * this repository at all" is the router's job.
+     * Moved here from `inventory.ts`'s `readRepo`. `applies()` now covers
+     * "nothing claims this repository at all" — the router throws for that —
+     * but not "the manifest it found does not parse"; `applies()` checks
+     * existence, never validity, so that failure is still this method's to
+     * report.
      */
     async declared(repoDir) {
       const warnings: string[] = [];
       const manifestPath = path.join(repoDir, 'package.json');
-      const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as RepoManifest;
+
+      // `applies()` only checks that `package.json` exists, never that it
+      // parses — an unresolved merge-conflict marker is an ordinary real-world
+      // state, needing no broken repo, just a bad commit. Re-thrown with the
+      // path so the error names which manifest failed, the same context the
+      // pre-router `readRepo` always gave.
+      let manifest: RepoManifest;
+      try {
+        manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as RepoManifest;
+      } catch (err) {
+        throw new Error(`unreadable package.json at ${manifestPath}: ${(err as Error).message}`);
+      }
 
       const hasNodeModules = await exists(path.join(repoDir, 'node_modules'));
       const lock = await readLockfile(repoDir);
@@ -380,4 +408,16 @@ export async function inventoriesFor(
 /** The inventory that reads this OSV ecosystem, if one is registered. */
 export function inventoryFor(osvEcosystem: string): EcosystemInventory | undefined {
   return INVENTORIES.find((i) => i.osvEcosystem === osvEcosystem);
+}
+
+/**
+ * Every manifest filename any registered inventory looks for.
+ *
+ * For `readRepo`'s "nothing claims this repository" message: derived so it
+ * names exactly what is registered today and extends itself the moment a new
+ * ecosystem does — a list kept by hand next to that message would drift the
+ * first time an adapter landed and nobody remembered to update the string.
+ */
+export function registeredManifests(): string[] {
+  return INVENTORIES.flatMap((i) => i.manifests);
 }

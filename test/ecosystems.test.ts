@@ -18,6 +18,7 @@ test('a repository with no npm lockfile is still claimed by whoever understands 
     const cargo: EcosystemInventory = {
       id: 'cargo',
       osvEcosystem: 'crates.io',
+      manifests: ['Cargo.toml', 'Cargo.lock'],
       applies: async (d) => d === dir,
       read: async () => ({
         packages: [{ name: 'serde', ecosystem: 'crates.io', version: '1.0.0' }],
@@ -59,6 +60,7 @@ test('inventoriesFor filters out a declining inventory, not just returns a claim
     const claiming: EcosystemInventory = {
       id: 'claiming',
       osvEcosystem: 'claiming-eco',
+      manifests: ['claiming.manifest'],
       applies: async () => true,
       read: async () => ({ packages: [], unsupported: null }),
       declared: async (d) => ({ dir: d, name: 'claiming', dependencies: [], scripts: {}, warnings: [], workspaces: [''] }),
@@ -67,6 +69,7 @@ test('inventoriesFor filters out a declining inventory, not just returns a claim
     const declining: EcosystemInventory = {
       id: 'declining',
       osvEcosystem: 'declining-eco',
+      manifests: ['declining.manifest'],
       applies: async () => false,
       read: async () => ({ packages: [], unsupported: null }),
       declared: async (d) => ({ dir: d, name: 'declining', dependencies: [], scripts: {}, warnings: [], workspaces: [''] }),
@@ -137,6 +140,30 @@ test('the npm inventory supplies the declared view', async () => {
       info.dependencies.map((d) => [d.name, d.declared]),
       [['zod', '^3.22.0']],
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the "no recognised manifest" message names only what the registry actually looks for', async () => {
+  // The message used to hardcode a wishlist of Python filenames — pyproject.toml,
+  // requirements.txt and the rest — before any Python adapter existed to read
+  // them. `INVENTORIES` holds only `npmInventory()` today, so claiming to have
+  // looked for pyproject.toml was exactly the "nobody looked" claim this
+  // codebase refuses to make elsewhere. The message must be built from the
+  // registry, not a hand-kept copy of it, so it can only ever name what some
+  // registered inventory actually checks for.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-declared-registry-'));
+  try {
+    let message = '';
+    try {
+      await readRepo(dir);
+      assert.fail('expected readRepo to reject');
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    assert.match(message, /package\.json/);
+    assert.doesNotMatch(message, /pyproject\.toml/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
