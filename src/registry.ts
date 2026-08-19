@@ -12,6 +12,7 @@ import { mkdir, rm, writeFile, readdir, access, rename, stat } from 'node:fs/pro
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { compareVersions, isPrerelease } from './versions.ts';
+import { pypiClient } from './python/pypi.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -455,7 +456,7 @@ function npmClient(): RegistryClient {
 // Registering one here is what makes an ecosystem resolvable at all — leaving
 // one out is not a crash, it is `clientFor` returning `undefined`, which
 // callers must handle explicitly rather than assume away.
-const CLIENTS: RegistryClient[] = [npmClient()];
+const CLIENTS: RegistryClient[] = [npmClient(), pypiClient()];
 
 export function clientFor(ecosystem: string): RegistryClient | undefined {
   return CLIENTS.find((c) => c.handles(ecosystem));
