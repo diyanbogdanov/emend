@@ -343,15 +343,20 @@ export interface InstalledDependency {
    * not present it as a fact read from the repository.
    *
    * `pinned` means the manifest itself named this exact version with no
-   * resolver involved — currently only a `requirements.txt` line pinned with
-   * `==`/`===` (see `python/manifests.ts`). Not `range`: nothing was inferred,
-   * the manifest states the version outright. Not `lockfile` either: no
-   * resolver walked the whole dependency graph to produce it, unlike
-   * `uv.lock`/`poetry.lock`/`pdm.lock`/`Pipfile.lock`, and `python/manifests.ts`
-   * draws that line deliberately — see its module doc. `resolvedVersions` in
-   * `pins.ts` accepts only `node_modules`/`lockfile` as authoritative enough to
-   * arbitrate a version-pin conflict; `pinned` is deliberately not in that set,
-   * for the same reason `range` is not.
+   * resolver involved — a `requirements.txt` line pinned with `==`/`===`
+   * (see `python/manifests.ts`), or a `package.json` specifier with no range
+   * operator, like `"4.17.21"` rather than `"^4.17.21"` (see `ecosystems.ts`'s
+   * `exactPin`). Not `range`: nothing was inferred, the manifest states the
+   * version outright. Not `lockfile` either: no resolver walked the whole
+   * dependency graph to produce it, unlike
+   * `uv.lock`/`poetry.lock`/`pdm.lock`/`Pipfile.lock`/`package-lock.json`/
+   * `pnpm-lock.yaml`/`yarn.lock`/`bun.lock`, and both adapters draw that line
+   * deliberately — see their module docs. `resolvedVersions` in `pins.ts`
+   * accepts only `node_modules`/`lockfile` as authoritative enough to
+   * arbitrate a version-pin conflict; `pinned` is deliberately not in that
+   * set, for the same reason `range` is not — a pin is a fact about what the
+   * manifest asks for, not a fact confirmed by resolution, and may name a
+   * version that does not exist or cannot satisfy the rest of the graph.
    */
   source: 'node_modules' | 'lockfile' | 'range' | 'none' | 'pinned';
   /**

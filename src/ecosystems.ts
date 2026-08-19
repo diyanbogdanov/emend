@@ -141,9 +141,26 @@ async function exists(p: string): Promise<boolean> {
 }
 
 /**
+ * The exact version a package.json specifier names outright, or null if it is
+ * a range, a wildcard, a dist-tag, or not a registry specifier at all.
+ *
+ * A bare `4.17.21`, or the same prefixed with `=` or `v`, names one version
+ * with no resolver involved — the same shapes `resolveRange` (registry.ts)
+ * treats as a pin rather than a comparator. Anchored to the whole trimmed
+ * specifier on purpose: `^4.17.21` and `npm:lodash-es@^4.17.21` both contain
+ * the digits `4.17.21`, but neither *is* that version, so an unanchored
+ * search — which is exactly what `versionFromRange` below does — would
+ * wrongly call both exact.
+ */
+function exactPin(declared: string): string | null {
+  const m = /^(?:=|v)?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(declared.trim());
+  return m?.[1] ?? null;
+}
+
+/**
  * Best-effort concrete version from a semver range, the fallback when neither
- * node_modules nor the lockfile answered. Marked distinctly by the caller so we
- * never imply we read it from disk.
+ * node_modules, the lockfile, nor `exactPin` above answered. Marked distinctly
+ * by the caller so we never imply we read it from disk.
  */
 function versionFromRange(range: string): string | null {
   const m = range.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
@@ -233,8 +250,10 @@ function npmInventory(): EcosystemInventory {
      * which does not exist.
      *
      * Sources are tried in order of decreasing certainty — node_modules, then
-     * the lockfile, then the range — and which one answered is recorded on each
-     * entry so a guess is never reported as a reading.
+     * the lockfile, then the manifest specifier itself, which resolves to
+     * `'pinned'` when it names one exact version and `'range'` when it does
+     * not (`exactPin` vs. `versionFromRange` above) — and which one answered
+     * is recorded on each entry so a guess is never reported as a reading.
      *
      * Moved here from `inventory.ts`'s `readRepo`. `applies()` now covers
      * "nothing claims this repository at all" — the router throws for that —
@@ -300,7 +319,8 @@ function npmInventory(): EcosystemInventory {
             }
 
             // Precedence is by decreasing certainty: what is actually on disk, then
-            // what the lockfile says would be installed, then a guess from the range.
+            // what the lockfile says would be installed, then what the specifier
+            // itself states — exactly, if it names one version, or a guess if not.
             let installed: string | null = null;
             let source: InstalledDependency['source'] = 'none';
 
@@ -332,8 +352,20 @@ function npmInventory(): EcosystemInventory {
               }
             }
             if (!installed) {
-              installed = versionFromRange(declared);
-              if (installed) source = 'range';
+              // An exact specifier (`"4.17.21"`, `"=4.17.21"`, `"v4.17.21"`) is a
+              // fact the manifest states outright, not an inference — distinct
+              // from `versionFromRange` below, which extracts a version out of a
+              // real range and may name one that was never published. See
+              // `InstalledDependency.source`'s own doc for why this still is not
+              // `'lockfile'`: no resolver walked the graph to produce it.
+              const pin = exactPin(declared);
+              if (pin) {
+                installed = pin;
+                source = 'pinned';
+              } else {
+                installed = versionFromRange(declared);
+                if (installed) source = 'range';
+              }
             }
 
             byName.set(name, {

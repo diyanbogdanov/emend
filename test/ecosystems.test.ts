@@ -224,6 +224,177 @@ test('the npm inventory supplies the declared view', async () => {
   }
 });
 
+test('declared() reports an exact package.json pin as installed, not as an inferred range', async () => {
+  // The bug this guards: "lodash": "4.17.21" is an exact pin, not a range —
+  // but with no node_modules and no lockfile to resolve it, declared() used to
+  // fall through to versionFromRange and report source: 'range', which
+  // InstalledDependency.source's own doc says "may name a version that was
+  // never published — callers must not present it as a fact read from the
+  // repository". That understates what package.json actually states, and (via
+  // resolvedVersions() in pins.ts, which does not trust 'range') excluded an
+  // exactly-pinned dependency from pin-conflict detection it should
+  // participate in. Asserted here via readRepo/RepoInfo, the same end-to-end
+  // path pin-conflict detection and every other caller of declared() reads.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-npm-declared-pin-'));
+  try {
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', dependencies: { lodash: '4.17.21' } }),
+    );
+    const info = await readRepo(dir);
+    assert.deepEqual(info.dependencies, [
+      {
+        name: 'lodash',
+        ecosystem: 'npm',
+        declared: '4.17.21',
+        dev: false,
+        installed: '4.17.21',
+        // Not 'lockfile': no resolver produced this, the manifest states it
+        // outright. Not 'range': nothing was inferred. See
+        // InstalledDependency.source's own doc.
+        source: 'pinned',
+        declaredIn: [''],
+      },
+    ]);
+    // A pin is not a guess, so it must not trigger the "inferred from range" caveat.
+    assert.deepEqual(info.warnings, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('declared() treats "=" and "v" prefixes as exact pins too', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-npm-declared-pinprefix-'));
+  try {
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({
+        name: 'x',
+        dependencies: { 'eq-pin': '=4.17.21', 'v-pin': 'v4.17.21' },
+      }),
+    );
+    const info = await readRepo(dir);
+    assert.deepEqual(
+      info.dependencies.map((d) => [d.name, d.installed, d.source]).sort(),
+      [
+        ['eq-pin', '4.17.21', 'pinned'],
+        ['v-pin', '4.17.21', 'pinned'],
+      ],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('declared() does not mistake a range, wildcard, tag or alias for a pin', async () => {
+  // Each of these contains version-shaped digits somewhere, which is exactly
+  // why exactPin anchors to the whole specifier rather than searching for a
+  // substring — an unanchored check would wrongly call every one of these
+  // exact. caret/tilde/gte/alias still resolve to a guessed version via the
+  // pre-existing versionFromRange fallback; xrange/globstar/star/tag resolve
+  // to nothing, because no x.y.z triplet appears anywhere in them either.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-npm-declared-notpin-'));
+  try {
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({
+        name: 'x',
+        dependencies: {
+          caret: '^4.17.21',
+          tilde: '~4.17.21',
+          gte: '>=4.17.21',
+          xrange: '4.x',
+          globstar: '4.17.*',
+          star: '*',
+          tag: 'latest',
+          alias: 'npm:lodash-es@^4.17.21',
+        },
+      }),
+    );
+    const info = await readRepo(dir);
+    assert.deepEqual(
+      info.dependencies.map((d) => [d.name, d.installed, d.source]).sort(),
+      [
+        ['alias', '4.17.21', 'range'],
+        ['caret', '4.17.21', 'range'],
+        ['globstar', null, 'none'],
+        ['gte', '4.17.21', 'range'],
+        ['star', null, 'none'],
+        ['tag', null, 'none'],
+        ['tilde', '4.17.21', 'range'],
+        ['xrange', null, 'none'],
+      ],
+    );
+    // None of the above is a pin, so 'pinned' must not appear anywhere.
+    assert.ok(!info.dependencies.some((d) => d.source === 'pinned'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('declared() never treats a URL, git+, file: or workspace: specifier as a pin', async () => {
+  // These are excluded from `dependencies` entirely, before exactPin ever
+  // sees them — local and git dependencies have no registry version to diff
+  // against (the existing `continue` a few lines above in declared()). Each
+  // value here ends in digits that look exactly like a pin, so this is the
+  // check that a pin classifier reached for greedily (e.g. by moving after
+  // that exclusion, or by matching a substring) would fail.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-npm-declared-nonregistry-'));
+  try {
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({
+        name: 'x',
+        dependencies: {
+          fromUrl: 'https://example.com/lodash-4.17.21.tgz',
+          fromGit: 'git+https://github.com/lodash/lodash.git#4.17.21',
+          fromFile: 'file:../local-lodash',
+          fromWorkspace: 'workspace:4.17.21',
+        },
+      }),
+    );
+    const info = await readRepo(dir);
+    assert.deepEqual(info.dependencies, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a lockfile wins over an exact package.json pin, which is not consulted for the version', async () => {
+  // Mirrors "a lockfile wins over requirements.txt" on the Python side: the
+  // lockfile (4.17.20) deliberately disagrees with the pin (4.17.21) so the
+  // two are distinguishable in the result — if precedence broke and the pin
+  // were consulted, this would read '4.17.21'/'pinned' instead.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-npm-declared-pinorder-'));
+  try {
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', dependencies: { lodash: '4.17.21' } }),
+    );
+    writeFileSync(
+      path.join(dir, 'package-lock.json'),
+      JSON.stringify({
+        name: 'x',
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'x' },
+          'node_modules/lodash': {
+            version: '4.17.20',
+            resolved: 'https://registry.npmjs.org/lodash/-/lodash-4.17.20.tgz',
+          },
+        },
+      }),
+    );
+    const info = await readRepo(dir);
+    assert.deepEqual(
+      info.dependencies.map((d) => [d.name, d.installed, d.source]),
+      [['lodash', '4.17.20', 'lockfile']],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the "no recognised manifest" message names only what the registry actually looks for', async () => {
   // The message used to hardcode a wishlist of Python filenames — pyproject.toml,
   // requirements.txt and the rest — before any Python adapter existed to read
