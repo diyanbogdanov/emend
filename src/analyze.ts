@@ -429,6 +429,14 @@ export async function scanRepo(
   // repository tracking packages from more than one ecosystem needs each
   // resolver run against its own packages, through `locateCallSites`, rather
   // than one resolver called on everything.
+  //
+  // Keyed by bare package name, which presumes every entry in `deps` shares
+  // one ecosystem — true only because readRepo (inventory.ts) returns just its
+  // first claimant's dependencies ("The first claimant, deliberately", there).
+  // Two ecosystems declaring the same name here would overwrite one entry
+  // with the other's, reporting one package's breaking changes against the
+  // other's source. Guarded by "readRepo returns dependencies from a single
+  // ecosystem..." in test/ecosystems.test.ts.
   const surfaces = new Map<string, ApiSurface>();
   const wanted = new Map<string, Set<string>>();
   const ecosystemOf = new Map<string, string>();

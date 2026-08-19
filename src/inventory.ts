@@ -26,6 +26,14 @@ export async function readRepo(repoDir: string): Promise<RepoInfo> {
   // `name` and `workspaces` belong to whichever ecosystem happened to win —
   // a worse answer than picking one and saying so. Revisit when a real polyglot
   // repository demands it, with evidence rather than symmetry.
+  //
+  // analyze.ts's call-site stage leans on this: its surfaces/wanted/ecosystemOf
+  // maps are keyed by bare package name, so they can hold only one ecosystem
+  // per name. Merging claimants here would let two ecosystems sharing a name
+  // (e.g. "requests", real on both npm and PyPI) overwrite one entry with the
+  // other's, reporting one package's breaking changes against the other's
+  // source. Guarded by "readRepo returns dependencies from a single
+  // ecosystem..." in test/ecosystems.test.ts.
   const info = await first.declared(repoDir);
 
   // The rest of `claimed` is real work `inventoriesFor` already did, discarded

@@ -721,6 +721,46 @@ test('readRepo routes a Python repository through pythonInventory, end to end', 
   }
 });
 
+test('readRepo returns dependencies from a single ecosystem, even when more than one claims the repository', async () => {
+  // analyze.ts's call-site stage keys its surfaces/wanted/ecosystemOf maps by
+  // bare package name and depends on every dependency sharing one ecosystem --
+  // true only because readRepo returns just its first claimant's declared()
+  // ("The first claimant, deliberately", above). Were readRepo ever to merge
+  // claimants, two ecosystems declaring the same name ("requests" is real on
+  // both npm and PyPI) would overwrite one entry with the other's in those
+  // maps, reporting one package's breaking changes against the other's source.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-polyglot-collision-'));
+  try {
+    // Both npm and Python claim this repository, and both declare "requests".
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', dependencies: { requests: '^1.0.0' } }),
+    );
+    writeFileSync(
+      path.join(dir, 'uv.lock'),
+      'version = 1\nrequires-python = ">=3.11"\n\n[[package]]\nname = "requests"\nversion = "2.31.0"\nsource = { registry = "https://pypi.org/simple" }\n',
+    );
+
+    const info = await readRepo(dir);
+
+    const ecosystems = new Set(info.dependencies.map((d) => d.ecosystem));
+    assert.equal(
+      ecosystems.size,
+      1,
+      `readRepo returned dependencies from ${ecosystems.size} ecosystem(s) (${[...ecosystems].join(', ')}); ` +
+        `analyze.ts keys its call-site maps by bare package name and can hold only one ecosystem per ` +
+        `name, so this reports one package's breaking changes against another's source.`,
+    );
+    // Specifically the first claimant (npm) -- not merged, not Python's.
+    assert.deepEqual(
+      info.dependencies.map((d) => [d.name, d.ecosystem]),
+      [['requests', 'npm']],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an unreadable lockfile is reported as unsupported, by both declared() and read()', async () => {
   // The negative path for `readBestManifest`'s "existence, not content quality,
   // decides which manifest is best": uv.lock exists, so it is the one read —
