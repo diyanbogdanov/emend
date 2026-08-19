@@ -58,21 +58,39 @@ const TIER_REASON: Record<keyof Capabilities, string> = {
 const TIERS = Object.keys(TIER_LABEL) as (keyof Capabilities)[];
 
 /**
- * One line per ecosystem, naming the tiers that did not run.
+ * One line per ecosystem, naming what this scan actually did — not merely
+ * what Emend is capable of.
  *
- * Phrased so silence never reads as a clean result: an unexamined tier is named
- * as unexamined, with the reason, rather than omitted.
+ * `capabilitiesFor` answers "is an adapter registered for this ecosystem?",
+ * which is a fact about the codebase, true whether or not this particular
+ * scan found a single package to run those adapters on. Rendering that fact
+ * as "fully examined ... all ran" regardless of what happened was exactly the
+ * bug this parameter exists to close: a repository whose dependencies were
+ * all unresolved ranges hit that sentence having analysed zero packages.
+ * `analyzed` — the same count already printed on the line above this one —
+ * is what tells "registered" and "ran" apart.
+ *
+ * Phrased so silence never reads as a clean result: an unexamined tier is
+ * named as unexamined, with the reason, rather than omitted; an ecosystem
+ * with every tier registered but nothing for them to run on says so plainly
+ * rather than borrowing the sentence meant for the case that actually ran.
  */
-export function describeCoverage(ecosystem: string): string {
+export function describeCoverage(ecosystem: string, analyzed: number): string {
   const caps = capabilitiesFor(ecosystem);
   const missing = TIERS.filter((tier) => !caps[tier]);
 
-  if (missing.length === 0) {
-    return `${ecosystem}: fully examined — ${TIERS.map((t) => TIER_LABEL[t]).join(', ')} all ran.`;
+  if (missing.length > 0) {
+    const gaps = missing
+      .map((tier) => `${TIER_LABEL[tier]} not examined (${TIER_REASON[tier]})`)
+      .join(', ');
+    return `${ecosystem}: ${gaps}.`;
   }
 
-  const gaps = missing
-    .map((tier) => `${TIER_LABEL[tier]} not examined (${TIER_REASON[tier]})`)
-    .join(', ');
-  return `${ecosystem}: ${gaps}.`;
+  // Every tier is registered. Whether any of them actually ran on something
+  // is the separate question capabilities alone cannot answer — see above.
+  if (analyzed === 0) {
+    return `${ecosystem}: no dependencies were analysed.`;
+  }
+
+  return `${ecosystem}: examined ${analyzed} package(s) — ${TIERS.map((t) => TIER_LABEL[t]).join(', ')} all ran.`;
 }
