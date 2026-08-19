@@ -24,6 +24,7 @@ import path from 'node:path';
 import { readFile, access } from 'node:fs/promises';
 import { readLockfile } from './lockfile.ts';
 import { findWorkspaces } from './workspaces.ts';
+import { pythonInventory } from './python/inventory.ts';
 import type { InstalledPackage } from './osv.ts';
 import type { CallSite, InstalledDependency, RepoInfo } from './types.ts';
 
@@ -386,7 +387,16 @@ function npmInventory(): EcosystemInventory {
 // screening — an unregistered ecosystem's repository is not only unscreened,
 // `readRepo` throws for it rather than guessing. See the module doc for the
 // bug this array exists to stop from recurring.
-const INVENTORIES: EcosystemInventory[] = [npmInventory()];
+//
+// Order here does not pick a winner for `inventoriesFor`, which returns every
+// claimant — a polyglot repository is still fully screened regardless of this
+// list's order. It does pick one for `readRepo`, which takes only the first
+// claimant (see that function's own doc for why): with npm first, a
+// repository both npm and Python claim has its declared dependencies read as
+// an npm project. That is a real, not yet demonstrated, gap the moment a
+// polyglot repository needs Python's answer instead — revisit with evidence
+// rather than reordering speculatively.
+const INVENTORIES: EcosystemInventory[] = [npmInventory(), pythonInventory()];
 
 /**
  * Every inventory that claims this repository.
