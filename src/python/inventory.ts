@@ -137,17 +137,18 @@ export function pythonInventory(): EcosystemInventory {
       const best = await readBestManifest(repoDir);
       if (!best) return { packages: [], unsupported: null };
 
-      // Every entry in a resolved manifest, not just direct dependencies —
-      // uv.lock, poetry.lock, pdm.lock and Pipfile.lock all record the whole
-      // resolved tree, so this needs no separate transitive walk the way a
-      // manifest-only format would. `requirements.txt` has no resolved
-      // versions at all (`best.manifest.versions` is empty for it, by
-      // `readPythonManifest`'s contract) — screening a range as if it were an
-      // installed version would mean asking OSV about a version nobody
-      // confirmed is actually on disk, which is the exact fabrication
+      // Every entry in `versions`, not just direct dependencies — uv.lock,
+      // poetry.lock, pdm.lock and Pipfile.lock all record the whole resolved
+      // tree there, so this needs no separate transitive walk the way a
+      // manifest-only format would. A `requirements.txt` contributes only the
+      // subset of `versions` its own `==`/`===` pins produced (see
+      // `manifests.ts`); a range never lands in `versions` at all, so
+      // screening it as if it were an installed version — asking OSV about a
+      // version nobody confirmed is actually on disk, the exact fabrication
       // `InstalledDependency.source`'s `'range'` case exists to flag on the
-      // `declared()` side. `read()` has no such provenance field to flag it
-      // with, so the honest answer here is nothing rather than a guess.
+      // `declared()` side — cannot happen here either. `read()` has no such
+      // provenance field to flag a range with, so a range's honest answer
+      // here is to be absent rather than guessed.
       const packages: InstalledPackage[] = [];
       for (const [name, version] of best.manifest.versions) {
         packages.push({ name, ecosystem: 'PyPI', version });
@@ -176,44 +177,67 @@ export function pythonInventory(): EcosystemInventory {
 
       const dependencies: InstalledDependency[] = [];
 
-      if (best.manifest.resolved) {
-        for (const [name, version] of best.manifest.versions) {
-          dependencies.push({
-            name,
-            ecosystem: 'PyPI',
-            // The lockfile records the resolution, not the range that
-            // produced it — that lives in pyproject.toml, which this adapter
-            // does not parse (see the module doc) — so the resolved version
-            // is the truest string available for `declared`.
-            declared: version,
-            // Simplification: uv.lock and poetry.lock do record which group
-            // (dev, test, …) a package belongs to; this reads neither. Every
-            // dependency is reported as a runtime one, which over-reports
-            // rather than under-reports — a dev dependency screened for
-            // vulnerabilities unnecessarily is the safe direction to be
-            // wrong in, unlike the reverse.
-            dev: false,
-            installed: version,
-            source: 'lockfile',
-            declaredIn: [''],
-          });
-        }
-      } else {
-        for (const [name, range] of best.manifest.declared) {
-          dependencies.push({
-            name,
-            ecosystem: 'PyPI',
-            declared: range,
-            dev: false,
-            // A range "may name a version that was never published —
-            // callers must not present it as a fact read from the
-            // repository" (`InstalledDependency.source`'s own doc), so
-            // `installed` stays null rather than guessing.
-            installed: null,
-            source: 'range',
-            declaredIn: [''],
-          });
-        }
+      // Every entry in `versions` is a resolution and every entry in
+      // `declared` is a range — true within a single manifest regardless of
+      // kind (see `PythonManifest`'s own doc) — so both maps are read
+      // unconditionally rather than picking one based on `best.kind`. That
+      // used to be a whole-file choice (`best.manifest.resolved`), which is
+      // exactly what could not survive a `requirements.txt` that pins some
+      // dependencies and ranges others: a single boolean cannot say "some of
+      // both".
+      //
+      // `source` for a resolution still depends on `best.kind`: the four real
+      // lockfiles are a resolver's output, `requirements.txt` is not — see
+      // `InstalledDependency.source`'s own doc for why `pinned` is a
+      // different claim from `lockfile`.
+      const resolvedSource: InstalledDependency['source'] =
+        best.kind === 'requirements.txt' ? 'pinned' : 'lockfile';
+
+      for (const [name, version] of best.manifest.versions) {
+        dependencies.push({
+          name,
+          ecosystem: 'PyPI',
+          // Neither a lockfile nor a `==` pin carries the range that produced
+          // it — a lockfile's range lives in pyproject.toml, which this
+          // adapter does not parse (see the module doc), and a pin has no
+          // separate range at all — so the resolved version is the truest
+          // string available for `declared` either way.
+          declared: version,
+          // Simplification: uv.lock and poetry.lock do record which group
+          // (dev, test, …) a package belongs to; this reads neither. Every
+          // dependency is reported as a runtime one, which over-reports
+          // rather than under-reports — a dev dependency screened for
+          // vulnerabilities unnecessarily is the safe direction to be
+          // wrong in, unlike the reverse.
+          dev: false,
+          installed: version,
+          source: resolvedSource,
+          declaredIn: [''],
+        });
+      }
+
+      for (const [name, range] of best.manifest.declared) {
+        dependencies.push({
+          name,
+          ecosystem: 'PyPI',
+          declared: range,
+          dev: false,
+          // A range "may name a version that was never published —
+          // callers must not present it as a fact read from the
+          // repository" (`InstalledDependency.source`'s own doc), so
+          // `installed` stays null rather than guessing.
+          installed: null,
+          source: 'range',
+          declaredIn: [''],
+        });
+      }
+
+      // Fires only when this manifest actually left something unresolved —
+      // never for the four lockfiles, whose `declared` is always empty, and
+      // not for a `requirements.txt` that turned out to be nothing but exact
+      // pins. `declared.size` is the honest gate: a whole-file `resolved`
+      // flag could only say "ranges" or "not", never "some".
+      if (best.manifest.declared.size > 0) {
         warnings.push(
           `${best.kind} declares ranges, not resolved versions — installed versions ` +
             'could not be confirmed and are not guessed',

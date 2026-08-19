@@ -30,7 +30,6 @@ const fixture = (name: string): string =>
 test('uv.lock yields resolved versions', () => {
   const parsed = readPythonManifest('uv.lock', fixture('uv.lock'));
   assert.equal(parsed.kind, 'uv.lock');
-  assert.equal(parsed.resolved, true);
   // Confirmed by reading test/fixtures/python/uv.lock directly: `requests` is
   // not a dependency of this particular project, `httpx` is, at this version.
   assert.equal(parsed.versions.get('httpx'), '0.28.1');
@@ -43,7 +42,6 @@ test('uv.lock yields resolved versions', () => {
 test('poetry.lock yields resolved versions', () => {
   const parsed = readPythonManifest('poetry.lock', fixture('poetry.lock'));
   assert.equal(parsed.kind, 'poetry.lock');
-  assert.equal(parsed.resolved, true);
   // Confirmed by reading test/fixtures/python/poetry.lock directly.
   assert.equal(parsed.versions.get('requests'), '2.31.0');
 });
@@ -51,7 +49,6 @@ test('poetry.lock yields resolved versions', () => {
 test('pdm.lock yields resolved versions', () => {
   const parsed = readPythonManifest('pdm.lock', fixture('pdm.lock'));
   assert.equal(parsed.kind, 'pdm.lock');
-  assert.equal(parsed.resolved, true);
   // Confirmed by reading test/fixtures/python/pdm.lock directly.
   assert.equal(parsed.versions.get('requests'), '2.32.5');
 });
@@ -59,7 +56,6 @@ test('pdm.lock yields resolved versions', () => {
 test('Pipfile.lock yields resolved versions', () => {
   const parsed = readPythonManifest('Pipfile.lock', fixture('Pipfile.lock'));
   assert.equal(parsed.kind, 'Pipfile.lock');
-  assert.equal(parsed.resolved, true);
   // Confirmed by reading test/fixtures/python/Pipfile.lock directly: `requests`
   // is pinned in the "develop" group there, not "default" — proving both
   // groups are actually read, not just the first one tried.
@@ -71,7 +67,6 @@ test('requirements.txt yields ranges, never presented as resolutions', () => {
   // version that was never published — callers must not present it as a fact read
   // from the repository."
   const parsed = readPythonManifest('requirements.txt', 'requests>=2.31.0\nurllib3~=2.0\n');
-  assert.equal(parsed.resolved, false);
   assert.equal(parsed.declared.get('requests'), '>=2.31.0');
   assert.equal(parsed.versions.size, 0);
 });
@@ -79,11 +74,17 @@ test('requirements.txt yields ranges, never presented as resolutions', () => {
 test('a comment, a blank line and an editable install are all skipped', () => {
   // Real requirements.txt files are full of these. Treating `-e .` as a package
   // named `-e` would put a nonsense entry into a vulnerability query.
+  //
+  // `requests==2.31.0` lands in `versions`, not `declared`: it is an exact pin
+  // (see the pin-parsing tests below), not a range. `declared` stays empty,
+  // proving the comment/blank/editable lines produced nothing at all rather
+  // than merely losing to `requests` for the same map.
   const parsed = readPythonManifest(
     'requirements.txt',
     '# pinned for CI\n\n-e .\n-r other.txt\nrequests==2.31.0\n',
   );
-  assert.deepEqual([...parsed.declared.keys()], ['requests']);
+  assert.deepEqual([...parsed.versions.keys()], ['requests']);
+  assert.equal(parsed.declared.size, 0);
 });
 
 test('a bare package name with no specifier is still declared, with an empty range', () => {
@@ -92,6 +93,9 @@ test('a bare package name with no specifier is still declared, with an empty ran
   // Dropping unpinned lines would under-report a real repository's dependencies.
   const parsed = readPythonManifest('requirements.txt', 'cryptography\n');
   assert.equal(parsed.declared.get('cryptography'), '');
+  // No operator at all is the one shape furthest from a pin; confirms it does
+  // not somehow end up in `versions`.
+  assert.equal(parsed.versions.size, 0);
 });
 
 test('an inline trailing comment does not leak into the specifier', () => {
@@ -104,6 +108,74 @@ test('an inline trailing comment does not leak into the specifier', () => {
     'jinja2 >= 3.1.0  # Jinja2 native macro support fixed in 3.1.0\n',
   );
   assert.equal(parsed.declared.get('jinja2'), '>= 3.1.0');
+});
+
+// --- exact pins vs. ranges in requirements.txt --------------------------
+//
+// `requests==2.31.0` is a resolution `readPythonManifest` can hand back with
+// the same confidence as a lockfile entry — nothing here is guessed, the
+// manifest states the version outright. Each shape PEP 440 allows for an
+// equality specifier is checked on its own, because a parser handling one
+// correctly is no evidence it handles the others: `analyze.ts` was silently
+// discarding every one of these as an unresolved range before this task.
+
+test('an exact == pin is a resolution, not a range', () => {
+  const parsed = readPythonManifest('requirements.txt', 'requests==2.31.0\n');
+  assert.equal(parsed.versions.get('requests'), '2.31.0');
+  assert.equal(parsed.declared.size, 0);
+});
+
+test('a == pin resolves regardless of spacing around the operator', () => {
+  const parsed = readPythonManifest('requirements.txt', 'requests == 2.31.0\n');
+  assert.equal(parsed.versions.get('requests'), '2.31.0');
+});
+
+test('a == pin with extras resolves under the bare package name', () => {
+  const parsed = readPythonManifest('requirements.txt', 'requests[socks]==2.31.0\n');
+  assert.equal(parsed.versions.get('requests'), '2.31.0');
+  assert.equal(parsed.versions.has('requests[socks]'), false);
+});
+
+test('a wildcard == pin is a range, not a resolution', () => {
+  // PEP 440's `.* ` suffix is a prefix match naming a family of versions —
+  // `2.31.0` and `2.31.5` both satisfy `==2.31.*` — the opposite of what
+  // `==`'s ordinary, non-wildcard case means, so this is excluded from
+  // `versions` even though it starts with the same operator.
+  const parsed = readPythonManifest('requirements.txt', 'requests==2.31.*\n');
+  assert.equal(parsed.versions.size, 0);
+  assert.equal(parsed.declared.get('requests'), '==2.31.*');
+});
+
+test('an arbitrary-equality (===) pin resolves the same as ==', () => {
+  const parsed = readPythonManifest('requirements.txt', 'requests===2.31.0\n');
+  assert.equal(parsed.versions.get('requests'), '2.31.0');
+});
+
+test('>= and ~= specifiers stay ranges, never resolutions', () => {
+  const parsed = readPythonManifest('requirements.txt', 'requests>=2.31.0\nurllib3~=2.0\n');
+  assert.equal(parsed.versions.size, 0);
+  assert.equal(parsed.declared.get('requests'), '>=2.31.0');
+  assert.equal(parsed.declared.get('urllib3'), '~=2.0');
+});
+
+test('a == pin resolves even with an environment marker attached', () => {
+  const parsed = readPythonManifest(
+    'requirements.txt',
+    'requests==2.31.0 ; python_version < "3.9"\n',
+  );
+  assert.equal(parsed.versions.get('requests'), '2.31.0');
+});
+
+test('one requirements.txt can resolve some names and only range others', () => {
+  // The shape a single whole-file `resolved` flag could not represent: two
+  // lines in the same file, one an exact pin, one a range. This is the
+  // reproduction from the task that found this parser's bug — a real
+  // requirements.txt is rarely pinned uniformly throughout.
+  const parsed = readPythonManifest('requirements.txt', 'requests==2.31.0\nurllib3>=2.0.2\n');
+  assert.equal(parsed.versions.size, 1);
+  assert.equal(parsed.declared.size, 1);
+  assert.equal(parsed.versions.get('requests'), '2.31.0');
+  assert.equal(parsed.declared.get('urllib3'), '>=2.0.2');
 });
 
 test('an unrecognised shape reports unsupported rather than nothing', () => {

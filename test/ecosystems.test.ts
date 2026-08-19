@@ -266,6 +266,57 @@ test('declared() reports a requirements.txt range as a range, never as an instal
   }
 });
 
+test('declared() reports an exact == pin as installed, not as an unresolved range', async () => {
+  // The bug this guards: three exactly-pinned dependencies used to be
+  // discarded entirely (installed: null, source: 'range') because
+  // requirements.txt was treated as ranges-only regardless of what its lines
+  // actually specified.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-py-declared-pin-'));
+  try {
+    writeFileSync(path.join(dir, 'requirements.txt'), 'requests==2.31.0\n');
+    const info = await pythonInventory().declared(dir);
+    assert.deepEqual(info.dependencies, [
+      {
+        name: 'requests',
+        ecosystem: 'PyPI',
+        declared: '2.31.0',
+        dev: false,
+        installed: '2.31.0',
+        // Not 'lockfile': no resolver produced this, the manifest states it
+        // outright. Not 'range': nothing was inferred. See
+        // InstalledDependency.source's own doc.
+        source: 'pinned',
+        declaredIn: [''],
+      },
+    ]);
+    // Nothing here is a range, so the "declares ranges" caveat must not fire.
+    assert.deepEqual(info.warnings, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('declared() on a mixed requirements.txt resolves the pin and ranges the rest, with one caveat', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-py-declared-mixed-'));
+  try {
+    writeFileSync(path.join(dir, 'requirements.txt'), 'requests==2.31.0\nurllib3>=2.0.2\n');
+    const info = await pythonInventory().declared(dir);
+    assert.deepEqual(
+      info.dependencies.map((d) => [d.name, d.installed, d.source]).sort(),
+      [
+        ['requests', '2.31.0', 'pinned'],
+        ['urllib3', null, 'range'],
+      ],
+    );
+    // One warning, naming the file once — not one per unresolved package —
+    // and it must fire, since urllib3's range genuinely could not be resolved.
+    assert.equal(info.warnings.length, 1);
+    assert.match(info.warnings[0] ?? '', /requirements\.txt declares ranges/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a lockfile wins over requirements.txt, which is not consulted at all', async () => {
   // The risk the task text calls out by name: mixing a resolution for one
   // package with a range for another would report one installed version
@@ -324,14 +375,34 @@ test('read() offers the whole resolved tree, ecosystem-tagged PyPI', async () =>
 });
 
 test('read() offers nothing for a requirements.txt-only repository, rather than a guessed version', async () => {
-  // A known consequence of never guessing: a repository with no lockfile gets
-  // no vulnerability screening from this inventory at all, because there is
-  // no resolved version to screen — see src/python/inventory.ts's read() doc.
+  // A known consequence of never guessing: a repository with no lockfile and
+  // only ranges gets no vulnerability screening from this inventory at all,
+  // because there is no resolved version to screen — see
+  // src/python/inventory.ts's read() doc.
   const dir = mkdtempSync(path.join(tmpdir(), 'emend-py-read-range-only-'));
   try {
     writeFileSync(path.join(dir, 'requirements.txt'), 'requests>=2.31.0\n');
     const result = await pythonInventory().read(dir);
     assert.deepEqual(result, { packages: [], unsupported: null });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('read() offers an exactly-pinned requirements.txt dependency for vulnerability screening', async () => {
+  // Unlike a range, an exact == pin is a resolved version by the same
+  // definition uv.lock/poetry.lock/etc. use — it belongs in `versions`, and
+  // read() screens everything in `versions` regardless of which manifest
+  // produced it. Leaving a pinned package unscreened would be the same
+  // "nobody looked" gap declared()'s fix closes, on the vulnerability side.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-py-read-pin-'));
+  try {
+    writeFileSync(path.join(dir, 'requirements.txt'), 'requests==2.31.0\n');
+    const result = await pythonInventory().read(dir);
+    assert.deepEqual(result, {
+      packages: [{ name: 'requests', ecosystem: 'PyPI', version: '2.31.0' }],
+      unsupported: null,
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

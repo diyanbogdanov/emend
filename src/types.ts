@@ -341,8 +341,19 @@ export interface InstalledDependency {
    * Where `installed` came from. `range` means it was inferred from the declared
    * semver range and may name a version that was never published — callers must
    * not present it as a fact read from the repository.
+   *
+   * `pinned` means the manifest itself named this exact version with no
+   * resolver involved — currently only a `requirements.txt` line pinned with
+   * `==`/`===` (see `python/manifests.ts`). Not `range`: nothing was inferred,
+   * the manifest states the version outright. Not `lockfile` either: no
+   * resolver walked the whole dependency graph to produce it, unlike
+   * `uv.lock`/`poetry.lock`/`pdm.lock`/`Pipfile.lock`, and `python/manifests.ts`
+   * draws that line deliberately — see its module doc. `resolvedVersions` in
+   * `pins.ts` accepts only `node_modules`/`lockfile` as authoritative enough to
+   * arbitrate a version-pin conflict; `pinned` is deliberately not in that set,
+   * for the same reason `range` is not.
    */
-  source: 'node_modules' | 'lockfile' | 'range' | 'none';
+  source: 'node_modules' | 'lockfile' | 'range' | 'none' | 'pinned';
   /**
    * Workspace directories whose manifest declares this dependency, relative to
    * the repository root. `''` is the root manifest itself.

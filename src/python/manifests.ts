@@ -44,23 +44,27 @@ export type PythonManifestKind =
 export interface PythonManifest {
   kind: PythonManifestKind;
   /**
-   * True for the four lockfiles, which record what actually resolved; false
-   * for `requirements.txt`, which records only ranges. Callers branch on this
-   * rather than on `kind` directly, so a caller that only cares "is this a
-   * fact or a guess" does not need to enumerate every kind.
-   */
-  resolved: boolean;
-  /**
-   * Package name -> exact resolved version. Populated only when `resolved` is
-   * true; empty for `requirements.txt`, which has no resolution to report.
+   * Package name -> exact resolved version. Populated by the four lockfiles,
+   * which record what a resolver actually produced, and by any
+   * `requirements.txt` entry pinned to one concrete version with `==` or
+   * `===` — a fact the manifest states outright, not a lockfile's
+   * resolution, but not a guess either. See `declared` below: a single
+   * `requirements.txt` can populate both maps at once, so there is no
+   * whole-file "is this manifest resolved" flag any more — check each map.
    */
   versions: Map<string, string>;
   /**
    * Package name -> the range/specifier text as written, e.g. `">=2.31.0"`.
-   * Populated only when `resolved` is false. A lockfile does not carry the
-   * range that produced its resolution — that lives in `pyproject.toml`,
-   * which this module does not parse — so a resolved manifest leaves this
-   * empty rather than fabricating a range it never read.
+   * Always empty for the four lockfiles — a lockfile does not carry the range
+   * that produced its resolution, that lives in `pyproject.toml`, which this
+   * module does not parse.
+   *
+   * For `requirements.txt`, holds every entry that is *not* a concrete
+   * `==`/`===` pin: a real range (`>=2.31.0`, `~=2.0`), a wildcard pin
+   * (`==2.31.*`, which names a family of versions rather than one), or an
+   * entry with no specifier at all. Each line routes independently, so one
+   * file can have some names here and others in `versions` — callers must
+   * check both rather than assuming a whole file is one or the other.
    */
   declared: Map<string, string>;
   /**
@@ -155,7 +159,7 @@ function readTomlLockfile(
   // reason: a line-matcher has no notion of "syntactically valid but empty",
   // only "found something" or "found nothing".
   const unsupported = versions.size === 0 && text.trim() !== '' ? kind : null;
-  return { kind, resolved: true, versions, declared: new Map(), unsupported };
+  return { kind, versions, declared: new Map(), unsupported };
 }
 
 interface PipfileLockEntry {
@@ -177,7 +181,6 @@ interface PipfileLockDoc {
 function readPipfileLock(text: string): PythonManifest {
   const empty: PythonManifest = {
     kind: 'Pipfile.lock',
-    resolved: true,
     versions: new Map(),
     declared: new Map(),
     unsupported: null,
@@ -223,7 +226,42 @@ function readPipfileLock(text: string): PythonManifest {
  */
 const REQUIREMENT_RE = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$/;
 
-function parseRequirementsTxt(text: string): Map<string, string> {
+/** What one `requirements.txt` sorts its entries into — see `parseRequirementsTxt`. */
+interface ParsedRequirements {
+  versions: Map<string, string>;
+  declared: Map<string, string>;
+}
+
+/**
+ * Whether `specifier` — the text after a name/extras on one requirements.txt
+ * line, e.g. `"==2.31.0"` or `">=2.0"` — names one concrete, non-wildcard
+ * version: the only shape safe to promote from a range to a resolution.
+ *
+ * Both PEP 440 equality operators count: `==` (version matching) and `===`
+ * (arbitrary equality). `==` additionally allows a trailing `.*` for prefix
+ * matching (`==2.31.*`), which is a range wearing pin syntax — excluded by
+ * checking for a literal `*` rather than by validating "digits and dots
+ * only", which would also reject legitimate pre/post/dev segments like
+ * `2.31.0rc1`. A comma joins multiple specifiers (`==2.31.0,!=2.31.1`); more
+ * than one constraint is a range's shape even when one arm is exact, so that
+ * is excluded too rather than guessing which arm should win.
+ */
+function resolvedVersion(specifier: string): string | null {
+  const match = /^(===|==)\s*(.+)$/.exec(specifier.trim());
+  const version = match?.[2]?.trim();
+  if (!version) return null;
+  if (version.includes('*') || version.includes(',')) return null;
+  return version;
+}
+
+/**
+ * Sorts every `requirements.txt` entry into a resolution or a range, per
+ * line — the two are no longer whole-file properties. `requests==2.31.0` is
+ * as much a fact as a lockfile entry; `urllib3>=2.0` on the very next line is
+ * a guess waiting to happen, and one real file can contain both.
+ */
+function parseRequirementsTxt(text: string): ParsedRequirements {
+  const versions = new Map<string, string>();
   const declared = new Map<string, string>();
 
   for (const raw of text.split('\n')) {
@@ -248,10 +286,21 @@ function parseRequirementsTxt(text: string): Map<string, string> {
     if (!match) continue;
     const [, name, rest] = match;
     if (!name) continue;
-    if (!declared.has(name)) declared.set(name, (rest ?? '').trim());
+    // First occurrence wins, across both maps: a name already recorded (as
+    // either a resolution or a range) is not reconsidered by a later,
+    // possibly-conflicting line.
+    if (versions.has(name) || declared.has(name)) continue;
+
+    const specifier = (rest ?? '').trim();
+    const pinned = resolvedVersion(specifier);
+    if (pinned !== null) {
+      versions.set(name, pinned);
+    } else {
+      declared.set(name, specifier);
+    }
   }
 
-  return declared;
+  return { versions, declared };
 }
 
 /**
@@ -270,17 +319,18 @@ export function readPythonManifest(kind: PythonManifestKind, text: string): Pyth
       return readTomlLockfile(kind, text);
     case 'Pipfile.lock':
       return readPipfileLock(text);
-    case 'requirements.txt':
+    case 'requirements.txt': {
+      const { versions, declared } = parseRequirementsTxt(text);
       return {
         kind,
-        resolved: false,
-        versions: new Map(),
-        declared: parseRequirementsTxt(text),
+        versions,
+        declared,
         // A requirements.txt line is independently a comment, an option, a
         // requirement, or noise — there is no single whole-file shape to call
         // unsupported the way a TOML block or a JSON document has. A line
         // that does not parse is simply skipped, the same as a blank one.
         unsupported: null,
       };
+    }
   }
 }
