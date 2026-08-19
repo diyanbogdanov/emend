@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { resolverFor, resolverForEcosystem } from '../src/callsites.ts';
-import { pythonSites } from '../src/python/callsites.ts';
+import { findPythonCallSites, pythonSites } from '../src/python/callsites.ts';
+import type { ApiSurface } from '../src/types.ts';
 
 test('Python files are claimed, and PyPI is claimed by ecosystem', async () => {
   assert.equal(resolverFor('app/main.py')?.id, 'python');
@@ -129,4 +133,70 @@ test('a submodule-imported method match still requires the import', async () => 
     await pythonSites('app.py', 'h = Headers()\nh.add("x")\n', 'werkzeug', ['Headers.add']),
     [],
   );
+});
+
+// ---------------------------------------------------------------------------
+// VENDORED_DIR — a repository's own copy of an installed package's source
+// must never be searched for this repository's call sites, the same bug
+// class `node_modules` exclusion prevents for npm. `pythonSites` above takes
+// a single file and cannot exercise this: it is a property of the repository
+// walk in `findPythonCallSites`, so these tests run against real files on
+// disk. One test per name, proving both halves: the site inside the
+// vendored directory is skipped, and an equivalent site outside it is not.
+// ---------------------------------------------------------------------------
+
+function minimalSurface(pkg: string): ApiSurface {
+  return { pkg, version: '1.0.0', symbols: {}, byTypeMember: {}, aliases: {}, entry: null };
+}
+
+function tempRepo(files: Record<string, string>): { dir: string; cleanup: () => void } {
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-pyvendored-'));
+  for (const [name, body] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+    writeFileSync(path.join(dir, name), body);
+  }
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+const CALL_SITE = 'from requests import send\n\nsend("https://example.com")\n';
+
+/** Files `findPythonCallSites` reports a `requests.send` call site in. */
+async function callSiteFilesFor(files: Record<string, string>): Promise<string[]> {
+  const repo = tempRepo(files);
+  try {
+    const surfaces = new Map([['requests', minimalSurface('requests')]]);
+    const wanted = new Map([['requests', new Set(['send'])]]);
+    const index = await findPythonCallSites(repo.dir, surfaces, wanted);
+    return (index.byPackage.get('requests')?.get('send') ?? []).map((s) => s.file);
+  } finally {
+    repo.cleanup();
+  }
+}
+
+for (const vendoredDir of ['.venv', 'venv', '__pycache__', 'site-packages', '.tox', '.nox', 'envs']) {
+  test(`a call site under ${vendoredDir}/ is skipped, an equivalent one outside it is not`, async () => {
+    const files = await callSiteFilesFor({
+      [`${vendoredDir}/lib/pkg/app.py`]: CALL_SITE,
+      'src/app.py': CALL_SITE,
+    });
+    assert.deepEqual(files, ['src/app.py']);
+  });
+}
+
+test('a bare `env` directory with a sibling pyvenv.cfg is treated as a virtual environment', async () => {
+  const files = await callSiteFilesFor({
+    'env/pyvenv.cfg': 'home = /usr/bin\nversion = 3.12.0\n',
+    'env/lib/pkg/app.py': CALL_SITE,
+    'src/app.py': CALL_SITE,
+  });
+  assert.deepEqual(files, ['src/app.py']);
+});
+
+test('a bare `env` directory WITHOUT pyvenv.cfg is real source, not skipped', async () => {
+  // The false-skip this module's doc warns against: `env` is also a
+  // plausible package name (`src/env/config.py`), unlike every other name in
+  // VENDORED_DIR, so a name match alone is not enough evidence that it is a
+  // virtual environment rather than this repository's own code.
+  const files = await callSiteFilesFor({ 'env/app.py': CALL_SITE });
+  assert.deepEqual(files, ['env/app.py']);
 });

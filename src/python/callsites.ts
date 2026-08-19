@@ -28,6 +28,7 @@
  * receiver's type.
  */
 
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Node, Tree } from 'web-tree-sitter';
@@ -40,17 +41,45 @@ const PY_EXTENSIONS = ['.py', '.pyi'];
 /**
  * Path segments that hold a *dependency's* Python source, never this
  * repository's own — a virtual environment, or a tool's cache of one.
- * `walkDir` (callsites.ts) already excludes `node_modules` for npm; its list
- * has no Python equivalent, because nothing needed one until now. Without
- * this, a repository with `.venv/` checked out in place (the default
- * location `python -m venv .venv` puts it) would have its call-site search
- * walk into a vendored copy of the very package being tracked, and report
- * that package's own internals as this repository's call sites.
+ * `walkDir` (callsites.ts) skips the same names for the same reason, kept as
+ * its own list there rather than imported from here — see its comment for
+ * why. Without this, a repository with `.venv/` checked out in place (the
+ * default location `python -m venv .venv` puts it) would have its call-site
+ * search walk into a vendored copy of the very package being tracked, and
+ * report that package's own internals as this repository's call sites.
+ * `.tox` and `.nox` are the same risk for tox's and nox's own per-run
+ * environments; `envs` is conda's directory of named environments (`conda
+ * create -p ./envs/name`).
+ *
+ * `env` is deliberately not in this set, unlike every name above. It is a
+ * plausible real source directory (`src/env/config.py`) in a way `.venv` or
+ * `__pycache__` never are, so a blind name match would silently hide real
+ * call sites in any repository that happens to have a package called `env` —
+ * worse than the problem this set exists to fix. `isVendored` below instead
+ * treats a bare `env` segment as a virtual environment only when `pyvenv.cfg`
+ * — the marker `venv`/`virtualenv` write at an environment's root (PEP 405)
+ * — actually sits beside it.
  */
-const VENDORED_DIR = new Set(['.venv', 'venv', '__pycache__', 'site-packages']);
+const VENDORED_DIR = new Set([
+  '.venv',
+  'venv',
+  '__pycache__',
+  'site-packages',
+  '.tox',
+  '.nox',
+  'envs',
+]);
 
 function isVendored(absPath: string): boolean {
-  return absPath.split(path.sep).some((segment) => VENDORED_DIR.has(segment));
+  const segments = absPath.split(path.sep);
+  for (const [i, segment] of segments.entries()) {
+    if (segment === 'env') {
+      if (existsSync(path.join(segments.slice(0, i + 1).join(path.sep), 'pyvenv.cfg'))) return true;
+      continue;
+    }
+    if (VENDORED_DIR.has(segment)) return true;
+  }
+  return false;
 }
 
 /**
