@@ -8,7 +8,10 @@ test('npm reports every tier as available', () => {
 });
 
 test('an ecosystem with no extractor reports the gap rather than hiding it', () => {
-  const caps = capabilitiesFor('PyPI');
+  // Not PyPI: Task 8 registered a Python extractor, so PyPI now clears the
+  // surface tier (see pythonsurface.test.ts) and is no longer an example of
+  // "nothing claims this ecosystem". crates.io still is, on every tier.
+  const caps = capabilitiesFor('crates.io');
   assert.equal(caps.surface, false);
   assert.equal(caps.callSites, false);
 });
