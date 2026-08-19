@@ -6,86 +6,17 @@
  * tool that cries regression on a red repo gets uninstalled immediately.
  */
 
-import { spawn } from 'node:child_process';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { runCommand, skipped } from './commands.ts';
+import { pythonRunner, pythonParser } from './python/verify.ts';
 import type { CommandResult, VerificationReport, VerifyOutcome } from './types.ts';
 
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
-
-export function runCommand(
-  command: string,
-  args: string[],
-  cwd: string,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-): Promise<CommandResult> {
-  return new Promise((resolve) => {
-    const label = `${command} ${args.join(' ')}`.trim();
-    const child = spawn(command, args, {
-      cwd,
-      env: { ...process.env, CI: '1', FORCE_COLOR: '0', NO_COLOR: '1' },
-      shell: false,
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill('SIGKILL');
-      resolve({
-        command: label,
-        ok: false,
-        exitCode: null,
-        stdout,
-        stderr: stderr + `\n[emend] timed out after ${timeoutMs}ms`,
-      });
-    }, timeoutMs);
-
-    child.stdout?.on('data', (d: Buffer) => {
-      stdout += d.toString();
-      if (stdout.length > 200_000) stdout = stdout.slice(-200_000);
-    });
-    child.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
-      if (stderr.length > 200_000) stderr = stderr.slice(-200_000);
-    });
-
-    child.on('error', (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({
-        command: label,
-        ok: false,
-        exitCode: null,
-        stdout,
-        stderr: stderr + `\n[emend] failed to spawn: ${err.message}`,
-      });
-    });
-
-    child.on('close', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ command: label, ok: code === 0, exitCode: code, stdout, stderr });
-    });
-  });
-}
-
-function skipped(command: string, reason: string): CommandResult {
-  return {
-    command,
-    ok: false,
-    exitCode: null,
-    stdout: '',
-    stderr: '',
-    skipped: true,
-    skipReason: reason,
-  };
-}
+// Re-exported: this used to be defined here, and src/apply.ts still imports its
+// package-manager command runner from this module. Moved to commands.ts so a
+// language runner can use it without importing verify.ts back (see that
+// module's doc) — the export path stays the same so nothing else moves.
+export { runCommand };
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -188,7 +119,17 @@ function npmRunner(): VerifyRunner {
 // results rather than a runner that quietly never ran. `compare` reads that as
 // `unverified`, never `verified` — the distinction that keeps an unproven
 // migration from reaching a pull request.
-const RUNNERS: VerifyRunner[] = [npmRunner()];
+//
+// `runnerFor` takes the first claimant, so order picks a winner where more
+// than one runner claims. `npmRunner` claims on `package.json` or
+// `tsconfig.json`; `pythonRunner` claims only when mypy or pyright is
+// configured (src/python/verify.ts's module doc explains why that gate
+// exists). A repository with both is genuinely ambiguous. npm is listed
+// first, so a polyglot repository gets its npm side verified and its Python
+// side left unclaimed — a known limitation, stated here rather than a
+// decision nobody made. `ecosystems.ts`'s `INVENTORIES` makes the identical
+// tradeoff, for the identical reason, on the screening path.
+const RUNNERS: VerifyRunner[] = [npmRunner(), pythonRunner()];
 
 export async function runnerFor(
   dir: string,
@@ -297,10 +238,16 @@ export function countDiagnostics(result: CommandResult): number {
 /**
  * How many distinct places a compiler complained.
  *
- * Per-runner because the formats differ and the failure is silent: tsc and mypy
- * both emit `file:line:col: error`, which the existing patterns already match,
- * but Rust emits structured JSON under `--message-format=json` and matches
- * neither. An unmatched format counts zero, and zero is read downstream as
+ * Per-runner because the formats differ and the failure can be silent: Rust
+ * emits structured JSON under `--message-format=json`, which matches neither
+ * pattern above. mypy was assumed to share tsc's `file:line:col: error` shape
+ * when this interface was written; checked by actually running mypy rather
+ * than trusting that assumption, its default output omits the column
+ * entirely (`file:line: error:`) unless `--show-column-numbers` is passed,
+ * which the plain `mypy .` Emend runs does not — so `COLON_DIAGNOSTIC` above
+ * matches none of it. `pythonParser` (src/python/verify.ts) has its own
+ * pattern for that reason, keyed on file and line rather than file, line and
+ * column. An unmatched format counts zero, and zero is read downstream as
  * *not measured* — so a runner without a parser must be absent here rather than
  * fall through to patterns that cannot see its output.
  */
@@ -315,7 +262,10 @@ export interface DiagnosticParser {
 // its diagnostics count as 0 rather than crash, which is why `parserFor`
 // returning `undefined` — not a fallback parser — is what tells a caller the
 // number is not measured rather than genuinely zero.
-const PARSERS: DiagnosticParser[] = [{ handles: (id) => id === 'npm', count: countDiagnostics }];
+const PARSERS: DiagnosticParser[] = [
+  { handles: (id) => id === 'npm', count: countDiagnostics },
+  pythonParser(),
+];
 
 export function parserFor(runnerId: string): DiagnosticParser | undefined {
   return PARSERS.find((p) => p.handles(runnerId));
