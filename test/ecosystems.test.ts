@@ -229,6 +229,7 @@ test('declared() reports a lockfile-resolved dependency as installed, not guesse
     assert.deepEqual(info.dependencies, [
       {
         name: 'requests',
+        ecosystem: 'PyPI',
         declared: '2.31.0',
         dev: false,
         installed: '2.31.0',
@@ -250,6 +251,7 @@ test('declared() reports a requirements.txt range as a range, never as an instal
     assert.deepEqual(info.dependencies, [
       {
         name: 'requests',
+        ecosystem: 'PyPI',
         declared: '>=2.31.0',
         dev: false,
         installed: null,

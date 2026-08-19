@@ -323,6 +323,15 @@ export interface VerificationReport {
 /** One dependency as declared and installed in the target repo. */
 export interface InstalledDependency {
   name: string;
+  /**
+   * Which ecosystem this dependency belongs to, as OSV names it: `npm`, `PyPI`.
+   *
+   * Carried on the dependency rather than inferred at each call site, because the
+   * call sites were passing a hardcoded `'npm'` and would keep doing so — and a
+   * TypeScript surface extractor handed a PyPI package returns an empty surface,
+   * which diffs as "nothing changed" and renders as a clean upgrade.
+   */
+  ecosystem: string;
   /** The version actually resolved on disk (from node_modules), when available. */
   installed: string | null;
   /** The range declared in package.json, e.g. "^3.22.0". */

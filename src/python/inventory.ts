@@ -180,6 +180,7 @@ export function pythonInventory(): EcosystemInventory {
         for (const [name, version] of best.manifest.versions) {
           dependencies.push({
             name,
+            ecosystem: 'PyPI',
             // The lockfile records the resolution, not the range that
             // produced it — that lives in pyproject.toml, which this adapter
             // does not parse (see the module doc) — so the resolved version
@@ -201,6 +202,7 @@ export function pythonInventory(): EcosystemInventory {
         for (const [name, range] of best.manifest.declared) {
           dependencies.push({
             name,
+            ecosystem: 'PyPI',
             declared: range,
             dev: false,
             // A range "may name a version that was never published —

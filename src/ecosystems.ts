@@ -296,6 +296,7 @@ function npmInventory(): EcosystemInventory {
 
             byName.set(name, {
               name,
+              ecosystem: 'npm',
               declared,
               dev,
               installed,
