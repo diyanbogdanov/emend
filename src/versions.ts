@@ -13,6 +13,8 @@
  * versions will be compared as semver and quietly mis-ranked.
  */
 
+import { pep440Scheme } from './pep440.ts';
+
 /** One ecosystem's answer to "which of these two versions is newer". */
 export interface VersionScheme {
   id: string;
@@ -67,10 +69,10 @@ export function semverFloor(): VersionScheme {
 }
 
 // Ordered: the first scheme that claims an ecosystem wins, and semver claims
-// everything, so it must stay last. A new scheme goes before it in this array
-// — skip that and its ecosystem quietly compares as semver instead (see the
-// module doc above for what that costs PyPI).
-const SCHEMES: VersionScheme[] = [semverScheme()];
+// everything, so it must stay last. PEP 440 goes ahead of it — registering a
+// scheme after the floor means it is never reached, which is the trap this
+// module's doc comment warns about.
+const SCHEMES: VersionScheme[] = [pep440Scheme(), semverScheme()];
 
 /**
  * The scheme for this ecosystem.
