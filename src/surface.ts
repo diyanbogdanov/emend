@@ -11,7 +11,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import ts from 'typescript';
 import type { ApiSurface, ApiSymbol, SymbolKind, TypeParam } from './types.ts';
-import { materializeTypeDeps } from './registry.ts';
+import { materializeTypeDeps } from './typescript/typedeps.ts';
 
 /**
  * Bounds on the walk.
@@ -832,4 +832,33 @@ export async function extractSurface(
         }
       : {}),
   };
+}
+
+/**
+ * One ecosystem's answer to "what is this package's public API".
+ *
+ * Routed by ecosystem rather than by file, because the question is asked of a
+ * downloaded package rather than of the repository. An ecosystem with no
+ * extractor is absent from this list — never present with an implementation that
+ * returns an empty surface, which would diff as "nothing changed".
+ */
+export interface SurfaceExtractor {
+  id: string;
+  /** Whether this extractor knows how to read a package from `ecosystem`. */
+  handles(ecosystem: string): boolean;
+  /** This package version's public API, as this ecosystem defines "public". */
+  extract(pkgDir: string, pkg: string, version: string): Promise<ApiSurface>;
+}
+
+// Every ecosystem a downloaded package can be read for. Registering one here is
+// what makes an ecosystem analysable at all — leaving one out is not a crash,
+// it is `extractorFor` returning `undefined`, which the caller must render as
+// `unanalyzable` rather than an extractor that quietly hands back an empty,
+// "nothing changed" surface.
+const EXTRACTORS: SurfaceExtractor[] = [
+  { id: 'typescript', handles: (eco) => eco === 'npm', extract: extractSurface },
+];
+
+export function extractorFor(ecosystem: string): SurfaceExtractor | undefined {
+  return EXTRACTORS.find((e) => e.handles(ecosystem));
 }

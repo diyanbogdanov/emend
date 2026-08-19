@@ -144,16 +144,74 @@ export interface PhaseOptions {
   skipTests?: boolean;
 }
 
+/**
+ * One language's answer to "does this repository still build, and do its tests
+ * still pass".
+ *
+ * `applies` is the routing decision and belongs to the runner, so adding a
+ * language never means editing a list somewhere else. A repository no runner
+ * claims yields `undefined` and, downstream, `unverified` — never a runner that
+ * trivially passes.
+ */
+export interface VerifyRunner {
+  id: string;
+  /** Whether this runner understands `dir` well enough to verify it. */
+  applies(dir: string): Promise<boolean>;
+  /** Typecheck, and unless `options.skipTests`, test `dir` — in this runner's own terms. */
+  run(dir: string, options: PhaseOptions): Promise<VerifyPhase>;
+}
+
+function npmRunner(): VerifyRunner {
+  return {
+    id: 'npm',
+
+    // Both, because `runTypecheck` already falls back to `npx tsc --noEmit` on a
+    // bare `tsconfig.json`. Gating on `package.json` alone would stop
+    // typechecking repositories that are typechecked today.
+    applies: async (dir) =>
+      (await exists(path.join(dir, 'package.json'))) || (await exists(path.join(dir, 'tsconfig.json'))),
+
+    async run(dir, options) {
+      return {
+        typecheck: await runTypecheck(dir),
+        test: options.skipTests
+          ? skipped('npm test', 'tests are not run by the hosted analyser; your CI runs them')
+          : await runTests(dir),
+      };
+    },
+  };
+}
+
+// Every runner a repository can be verified by. Registering one here is what
+// makes a language verified at all: leaving one out is not a crash, it is
+// `runnerFor` returning `undefined`, which `runPhase` turns into two skipped
+// results rather than a runner that quietly never ran. `compare` reads that as
+// `unverified`, never `verified` — the distinction that keeps an unproven
+// migration from reaching a pull request.
+const RUNNERS: VerifyRunner[] = [npmRunner()];
+
+export async function runnerFor(
+  dir: string,
+  registry: VerifyRunner[] = RUNNERS,
+): Promise<VerifyRunner | undefined> {
+  for (const runner of registry) {
+    if (await runner.applies(dir)) return runner;
+  }
+  return undefined;
+}
+
 export async function runPhase(
   dir: string,
   options: PhaseOptions = {},
 ): Promise<VerifyPhase> {
-  return {
-    typecheck: await runTypecheck(dir),
-    test: options.skipTests
-      ? skipped('npm test', 'tests are not run by the hosted analyser; your CI runs them')
-      : await runTests(dir),
-  };
+  const runner = await runnerFor(dir);
+  if (!runner) {
+    // Not a failure: nothing here understands this repository, and saying so is
+    // the difference between `unverified` and a false pass.
+    const why = 'no verification runner recognises this repository';
+    return { typecheck: skipped('typecheck', why), test: skipped('test', why) };
+  }
+  return runner.run(dir, options);
 }
 
 /** A phase "passes" only when nothing that actually ran failed. */
@@ -234,6 +292,33 @@ export function countDiagnostics(result: CommandResult): number {
     }
   }
   return seen.size;
+}
+
+/**
+ * How many distinct places a compiler complained.
+ *
+ * Per-runner because the formats differ and the failure is silent: tsc and mypy
+ * both emit `file:line:col: error`, which the existing patterns already match,
+ * but Rust emits structured JSON under `--message-format=json` and matches
+ * neither. An unmatched format counts zero, and zero is read downstream as
+ * *not measured* — so a runner without a parser must be absent here rather than
+ * fall through to patterns that cannot see its output.
+ */
+export interface DiagnosticParser {
+  /** Whether this parser knows how to read `runnerId`'s compiler output. */
+  handles(runnerId: string): boolean;
+  /** How many distinct diagnostics are in this result. */
+  count(result: CommandResult): number;
+}
+
+// Every format this can read. Leaving a runner out here is silent by design:
+// its diagnostics count as 0 rather than crash, which is why `parserFor`
+// returning `undefined` — not a fallback parser — is what tells a caller the
+// number is not measured rather than genuinely zero.
+const PARSERS: DiagnosticParser[] = [{ handles: (id) => id === 'npm', count: countDiagnostics }];
+
+export function parserFor(runnerId: string): DiagnosticParser | undefined {
+  return PARSERS.find((p) => p.handles(runnerId));
 }
 
 export function compare(baseline: VerifyPhase, post: VerifyPhase): VerificationReport {

@@ -380,3 +380,72 @@ export function findCallSites(
 
   return { byPackage, filesAnalyzed, warnings };
 }
+
+/**
+ * One language's answer to "where does this repository use these symbols".
+ *
+ * The negative is the load-bearing half: "not imported from this repository's
+ * source" is a claim about files that were actually parsed. A language with no
+ * resolver is absent here, so that claim is never made on its behalf.
+ */
+export interface CallSiteResolver {
+  id: string;
+  /**
+   * OSV ecosystems this resolver finds call sites for — `['npm']` for the
+   * TypeScript resolver. `resolverForEcosystem` reads this directly, so it
+   * must name every ecosystem the resolver actually serves, not just the file
+   * extensions `handles` happens to accept.
+   */
+  ecosystems: string[];
+  /** Whether this resolver can parse `file` well enough to search it. */
+  handles(file: string): boolean;
+  /** Where `repoDir` calls the tracked symbols of `surfaces`, narrowed to `wanted`. */
+  find(
+    repoDir: string,
+    surfaces: Map<string, ApiSurface>,
+    wanted: Map<string, Set<string>>,
+  ): CallSiteIndex;
+}
+
+const TS_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+
+// Every language a repository's call sites can be searched in. Registering one
+// here is what makes a language searchable at all — leaving one out is not a
+// crash, it is `resolverFor` returning `undefined`, which keeps "not imported
+// from this repository's source" from being said about a file nothing read.
+// `ecosystems` must list every ecosystem this resolver actually serves:
+// `resolverForEcosystem` (below) and `capabilitiesFor` (languages.ts) trust it
+// directly, with no file or repository in hand to check it against.
+const RESOLVERS: CallSiteResolver[] = [
+  {
+    id: 'typescript',
+    ecosystems: ['npm'],
+    handles: (file) => TS_EXTENSIONS.some((ext) => file.endsWith(ext)),
+    find: findCallSites,
+  },
+];
+
+/**
+ * The resolver that can search this file, if one is registered for it.
+ *
+ * Not yet called from the scan pipeline: `findCallSites` discovers its own
+ * files from `repoDir` rather than accepting a list, so there is nothing here
+ * to route per-file today.
+ */
+export function resolverFor(file: string): CallSiteResolver | undefined {
+  return RESOLVERS.find((r) => r.handles(file));
+}
+
+/**
+ * The resolver that finds call sites for this OSV ecosystem, if one is
+ * registered.
+ *
+ * A different question from `resolverFor`: that one asks "can you parse this
+ * file", routed by extension, for a file that is actually on disk. This one
+ * asks "do you serve this ecosystem at all", with neither a file nor a
+ * repository in hand — which is what `capabilitiesFor` (languages.ts) needs
+ * answered to report coverage before, or instead of, running a scan.
+ */
+export function resolverForEcosystem(ecosystem: string): CallSiteResolver | undefined {
+  return RESOLVERS.find((r) => r.ecosystems.includes(ecosystem));
+}

@@ -15,13 +15,12 @@
 
 import { createHash } from 'node:crypto';
 import ts from 'typescript';
-import { readLockfile } from './lockfile.ts';
+import { inventoriesFor, type EcosystemInventory } from './ecosystems.ts';
 import { diffSpecs } from './specdiff.ts';
 import { packageOfSpecifier } from './callsites.ts';
 import { remediationTarget, type InstalledPackage, type VulnerablePackage } from './osv.ts';
 import { ordinal, rankVulnerable, type AdvisoryFacts } from './advisory.ts';
 import type { LintAdapter } from './lint.ts';
-import { goInventory } from './goreach.ts';
 import { extractPins, findPinConflicts, resolvedVersions, PIN_FILES } from './pins.ts';
 import {
   checkAgainstSpec,
@@ -525,29 +524,9 @@ export async function indexImports(
   return index;
 }
 
-/** The lockfile line declaring a package, so a transitive finding still has evidence. */
-function lockfileSite(lockfile: string, installPath: string): CallSite {
-  const lines = lockfile.split('\n');
-  const index = lines.findIndex((l) => l.includes(`"${installPath}"`));
-  return {
-    file: 'package-lock.json',
-    line: index === -1 ? 1 : index + 1,
-    column: 1,
-    text: installPath,
-    via: 'import',
-  };
-}
-
 export interface VulnerabilityOptions {
   /** Injected: this detector reaches the network, and that is the caller's call. */
   scan: (packages: InstalledPackage[]) => Promise<VulnerablePackage[]>;
-  /**
-   * Where a Go module's *affected symbols* are actually called.
-   *
-   * Injected because it takes another OSV request per advisory — the GHSA record
-   * carries no symbols and the `GO-xxxx` record it aliases does.
-   */
-  goSymbols?: (pkg: VulnerablePackage, ctx: DetectorContext) => Promise<CallSite[]>;
   /**
    * Optional second opinion: numeric severity, and how likely exploitation is.
    *
@@ -575,47 +554,41 @@ export interface VulnerabilityOptions {
  * not established.
  */
 export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
+  // runDetectors calls applies() immediately before detect() on this same
+  // object, so the claiming inventories are cached here for detect() to reuse
+  // instead of re-probing every inventory's applies() — each of which parses
+  // a lockfile — a second time. A caller that invokes detect() on its own
+  // (tests here do) just computes it fresh; nothing relies on applies() having
+  // run first. Scoped to this Detector instance rather than to repoDir:
+  // detectorsFor builds a fresh vulnerabilityDetector() per scan, so this
+  // cache is born and discarded with the scan and can never outlive it to see
+  // a lockfile a later bumpDependency changed.
+  let claiming: EcosystemInventory[] | null = null;
+  async function claimingInventories(repoDir: string): Promise<EcosystemInventory[]> {
+    if (claiming === null) claiming = await inventoriesFor(repoDir);
+    return claiming;
+  }
+
   return {
     id: 'vulnerability',
 
     async applies(ctx: DetectorContext): Promise<boolean> {
-      // The installed tree is the input. Without one there is nothing to ask
-      // about, and answering that must not cost a request.
-      //
-      // Every ecosystem, not only npm: gating on `package-lock.json` meant a Go
-      // module was never scanned at all, however many `go.sum` entries it had.
-      const lock = await readLockfile(ctx.repoDir);
-      if (lock.tree.size > 0) return true;
-      return (await ctx.read('go.sum')) !== null || (await ctx.read('go.mod')) !== null;
+      // Any ecosystem that claims this repository, not only npm. Gating on one
+      // lockfile is how a whole language went unscreened while looking checked.
+      return (await claimingInventories(ctx.repoDir)).length > 0;
     },
 
     async detect(ctx: DetectorContext): Promise<{ findings: Finding[]; notes: string[] }> {
       const notes: string[] = [];
-      const lock = await readLockfile(ctx.repoDir);
-      if (lock.unsupported) {
-        notes.push(`${lock.unsupported} could not be read, so its packages were not checked`);
-      }
-
-      // A second ecosystem costs an inventory reader and nothing else, which was
-      // the claim about OSV being ecosystem-keyed. Go also carries affected
-      // symbols, which npm does not — see `goreach.ts`.
-      const goPackages = goInventory(
-        (await ctx.read('go.sum')) ?? '',
-        (await ctx.read('go.mod')) ?? '',
-      );
-
-      // The whole tree, not the direct dependencies. Most vulnerabilities in a
-      // real repository are transitive, and screening only what package.json
-      // names would miss the majority of them.
-      const byName = new Map<string, string>();
+      const inventories = await claimingInventories(ctx.repoDir);
       const packages: InstalledPackage[] = [];
-      for (const entry of lock.tree.values()) {
-        const key = `${entry.name}@${entry.version}`;
-        if (byName.has(key)) continue;
-        byName.set(key, entry.installPath);
-        packages.push({ name: entry.name, ecosystem: 'npm', version: entry.version });
+      for (const inventory of inventories) {
+        const result = await inventory.read(ctx.repoDir);
+        if (result.unsupported) {
+          notes.push(`${result.unsupported} could not be read, so its packages were not checked`);
+        }
+        packages.push(...result.packages);
       }
-      packages.push(...goPackages);
       if (packages.length === 0) return { findings: [], notes };
 
       let vulnerable: VulnerablePackage[];
@@ -642,35 +615,47 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
       }
       const ordered = facts.size > 0 ? rankVulnerable(vulnerable, facts) : vulnerable;
 
-      const lockRaw = (await ctx.read('package-lock.json')) ?? '';
       // One pass over the source tree, then a lookup per package.
       const imports = await indexImports(ctx.sourceFiles, ctx.read);
+
+      // One manifest parse per claiming inventory, not one per non-imported
+      // package: manifestSites re-reads and re-parses a whole lockfile, and
+      // asking per package turned a 50,000-package lockfile's one-time parse
+      // cost into a per-finding one.
+      const sitesByKey = new Map<string, CallSite>();
+      for (const inventory of inventories) {
+        const owned = ordered.filter((p) => p.ecosystem === inventory.osvEcosystem);
+        if (owned.length === 0) continue;
+        for (const [key, site] of await inventory.manifestSites(ctx.repoDir, owned)) {
+          // First-registered inventory wins a shared OSV ecosystem key,
+          // matching the uniqueness assumption documented on osvEcosystem.
+          if (!sitesByKey.has(key)) sitesByKey.set(key, site);
+        }
+      }
+
       const findings: Finding[] = [];
 
       for (const pkg of ordered) {
         const target = remediationTarget(pkg);
 
         const sites: CallSite[] = [...(imports.get(pkg.name) ?? [])];
-        // Go advisories name the affected functions, so reachability there can
-        // be a symbol rather than a module. Nothing else offers this.
-        let symbolSites: CallSite[] = [];
-        if (pkg.ecosystem === 'Go' && options.goSymbols) {
-          symbolSites = await options.goSymbols(pkg, ctx);
-          sites.push(...symbolSites);
-        }
         const imported = sites.length > 0;
         if (!imported) {
-          sites.push(lockfileSite(lockRaw, byName.get(`${pkg.name}@${pkg.version}`) ?? pkg.name));
+          // Absent when no registered inventory understands this package's
+          // OSV ecosystem, or when the owning inventory had nothing to cite
+          // for this repository at all (no lockfile present, or it could not
+          // be read) — the finding stands without a manifest site rather
+          // than with a fabricated one.
+          const site = sitesByKey.get(`${pkg.name}@${pkg.version}`);
+          if (site) sites.push(site);
         }
 
         // Deduplicated: separate advisories routinely alias the same CVE, and
         // listing it twice reads as two problems.
         const named = [...new Set(pkg.vulnerabilities.map((v) => v.cve ?? v.id))].join(', ');
-        const reach = symbolSites.length > 0
-          ? `the affected symbol appears at ${symbolSites.length} site(s) — a strong lead, not proof, because resolving a method receiver needs a Go type checker`
-          : imported
-            ? `imported at ${sites.length} site(s) in this repository`
-            : 'not imported from this repository’s source — it runs because a dependency calls it';
+        const reach = imported
+          ? `imported at ${sites.length} site(s) in this repository`
+          : 'not imported from this repository’s source — it runs because a dependency calls it';
         const leaves =
           target.leaves.length > 0
             ? ` ${target.leaves.length} has no published fix and survives the upgrade: ${target.leaves.join(', ')}.`

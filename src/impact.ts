@@ -10,10 +10,10 @@
  *
  * **Multi-language by construction.** "Who references this symbol" has a real
  * answer in every language and a different implementation in each — TypeScript
- * has a type checker, Go has one, Python has approximations. So the answer type
+ * has a type checker, Rust has one, Python has approximations. So the answer type
  * (`SymbolImpact`) is language-neutral and the finding of it sits behind
  * `ImpactAnalyzer`, the same seam `LintAdapter` uses for linters and OSV's
- * `ecosystem` uses for inventories. Adding Go here costs an analyzer, not a
+ * `ecosystem` uses for inventories. Adding a language here costs an analyzer, not a
  * rewrite of anything above it.
  *
  * **What a reference establishes.** For TypeScript, exactly what it says: the

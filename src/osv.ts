@@ -19,7 +19,7 @@
  * per package instead would cost one request per dependency.
  */
 
-import { compareVersions } from './registry.ts';
+import { schemeFor, type VersionScheme } from './versions.ts';
 import type { Fetcher } from './specfetch.ts';
 
 const API = 'https://api.osv.dev/v1';
@@ -52,11 +52,6 @@ export interface OsvRange {
 export interface OsvAffected {
   package?: { name?: string; ecosystem?: string };
   ranges?: OsvRange[];
-  /**
-   * Per-ecosystem extras. For Go this carries the affected *symbols*, which is
-   * what makes symbol-level reachability possible there and nowhere else.
-   */
-  ecosystem_specific?: { imports?: Array<{ path?: string; symbols?: string[] }> };
 }
 
 export interface OsvRecord {
@@ -113,9 +108,9 @@ export interface VulnerablePackage extends InstalledPackage {
 const INSTALLABLE_RANGE = new Set(['SEMVER', 'ECOSYSTEM']);
 
 /** `0` is OSV's "from the beginning", which sorts below every real version. */
-function atLeast(version: string, floor: string): boolean {
+function atLeast(version: string, floor: string, scheme: VersionScheme): boolean {
   if (floor === '0') return true;
-  return compareVersions(version, floor) >= 0;
+  return scheme.compare(version, floor) >= 0;
 }
 
 /**
@@ -148,7 +143,7 @@ export function fixedVersionFor(
       let openedAt: string | null = null;
       for (const event of range.events ?? []) {
         if (event.introduced !== undefined) {
-          openedAt = atLeast(installed, event.introduced) ? event.introduced : null;
+          openedAt = atLeast(installed, event.introduced, schemeFor(ecosystem)) ? event.introduced : null;
           continue;
         }
         // A window only matters if the installed version opened it.
@@ -156,13 +151,13 @@ export function fixedVersionFor(
 
         if (event.fixed !== undefined) {
           // Inside the window: the fix closes it. Past it: not affected here.
-          if (compareVersions(installed, event.fixed) < 0) return event.fixed;
+          if (schemeFor(ecosystem).compare(installed, event.fixed) < 0) return event.fixed;
           openedAt = null;
           continue;
         }
         if (event.last_affected !== undefined) {
           // Affected with no published fix, which is a real answer.
-          if (compareVersions(installed, event.last_affected) <= 0) return null;
+          if (schemeFor(ecosystem).compare(installed, event.last_affected) <= 0) return null;
           openedAt = null;
         }
       }
@@ -181,12 +176,12 @@ function covers(record: OsvRecord, name: string, ecosystem: string, installed: s
       if (!INSTALLABLE_RANGE.has(range.type ?? '')) continue;
       let open = false;
       for (const event of range.events ?? []) {
-        if (event.introduced !== undefined) open = atLeast(installed, event.introduced);
+        if (event.introduced !== undefined) open = atLeast(installed, event.introduced, schemeFor(ecosystem));
         else if (event.fixed !== undefined && open) {
-          if (compareVersions(installed, event.fixed) < 0) return true;
+          if (schemeFor(ecosystem).compare(installed, event.fixed) < 0) return true;
           open = false;
         } else if (event.last_affected !== undefined && open) {
-          if (compareVersions(installed, event.last_affected) <= 0) return true;
+          if (schemeFor(ecosystem).compare(installed, event.last_affected) <= 0) return true;
           open = false;
         }
       }
@@ -343,24 +338,7 @@ export function remediationTarget(pkg: VulnerablePackage): RemediationTarget {
       continue;
     }
     clears++;
-    if (version === null || compareVersions(vuln.fixedIn, version) > 0) version = vuln.fixedIn;
+    if (version === null || schemeFor(pkg.ecosystem).compare(vuln.fixedIn, version) > 0) version = vuln.fixedIn;
   }
   return { version, clears, leaves };
-}
-
-/**
- * The record that actually carries a Go advisory's affected symbols.
- *
- * Measured: the GHSA record for a Go module has no `ecosystem_specific`, and the
- * `GO-xxxx` record it aliases does. One extra request per advisory, and only for
- * Go — the same shape as following an `x-origin` to the source that knows more.
- */
-export async function goSymbolRecord(
-  fetch: Fetcher,
-  aliases: string[],
-): Promise<OsvRecord | null> {
-  const id = aliases.find((a) => a.startsWith('GO-'));
-  if (!id) return null;
-  const record = (await getJson(fetch, `${API}/vulns/${encodeURIComponent(id)}`)) as OsvRecord | null;
-  return record?.id ? record : null;
 }

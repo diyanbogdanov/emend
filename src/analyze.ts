@@ -23,12 +23,12 @@ import {
 } from './detectors.ts';
 import { walkDir } from './callsites.ts';
 import {
-  fetchPackument,
   fetchPackageDir,
   resolveTargetVersion,
-  compareVersions,
+  clientFor,
 } from './registry.ts';
-import { extractSurface } from './surface.ts';
+import { compareVersions } from './versions.ts';
+import { extractorFor } from './surface.ts';
 import { diffSurfaces, consumerImpacting } from './diff.ts';
 import { findCallSites } from './callsites.ts';
 import { materializeRepoDeps } from './vendor.ts';
@@ -233,13 +233,32 @@ export async function scanRepo(
     }
 
     try {
-      const packument = await fetchPackument(dep.name);
+      // 'npm' is transitional, not an unnoticed assumption: every dependency
+      // reaching this point was read from package.json, so it is genuinely the
+      // only correct ecosystem today. This will read the dependency's actual
+      // ecosystem once dependency inventory is driven per-ecosystem here,
+      // rather than assumed npm.
+      const client = clientFor('npm');
+      if (!client) {
+        return {
+          report: {
+            pkg: dep.name,
+            status: 'error',
+            fromVersion: from,
+            toVersion: null,
+            findings: [],
+            unlocatedBreaking: 0,
+            note: `no registry client claims ecosystem 'npm'`,
+          },
+        };
+      }
+      const packageVersions = await client.versions(dep.name);
       const pinned = options.targets?.[dep.name];
       // A pin that was never published is a typo, and silently falling back to
       // `latest` would migrate somewhere the caller did not ask for while
       // reporting success. The benchmark would read that as the model
       // over-editing.
-      if (pinned && !packument.versions?.[pinned]) {
+      if (pinned && !packageVersions.versions.includes(pinned)) {
         return {
           report: {
             pkg: dep.name,
@@ -252,7 +271,7 @@ export async function scanRepo(
           },
         };
       }
-      const to = pinned ?? resolveTargetVersion(packument);
+      const to = pinned ?? resolveTargetVersion(packageVersions);
       if (!to) {
         return {
           report: {
@@ -282,13 +301,36 @@ export async function scanRepo(
 
       progress(`  ${dep.name}: ${from} -> ${to}`);
 
+      // 'npm' is transitional, not an unnoticed assumption: every dependency
+      // reaching this point was read from package.json, so it is genuinely the
+      // only correct ecosystem today. This will read the dependency's actual
+      // ecosystem once dependency inventory is driven per-ecosystem here,
+      // rather than assumed npm.
+      const extractor = extractorFor('npm');
+      if (!extractor) {
+        // No registered extractor is not "nothing changed" — an empty surface
+        // would diff that way. It is "nobody looked", which is what
+        // `unanalyzable` exists to say.
+        return {
+          report: {
+            pkg: dep.name,
+            status: 'unanalyzable',
+            fromVersion: from,
+            toVersion: to,
+            findings: [],
+            unlocatedBreaking: 0,
+            note: 'no surface extractor recognises this ecosystem',
+          },
+        };
+      }
+
       const [fromDir, toDir] = await Promise.all([
         fetchPackageDir(dep.name, from),
         fetchPackageDir(dep.name, to),
       ]);
       const [fromSurface, toSurface] = await Promise.all([
-        extractSurface(fromDir, dep.name, from),
-        extractSurface(toDir, dep.name, to),
+        extractor.extract(fromDir, dep.name, from),
+        extractor.extract(toDir, dep.name, to),
       ]);
 
       const diff = diffSurfaces(fromSurface, toSurface);
@@ -414,9 +456,6 @@ export async function scanRepo(
   // in full and `api.Dockerfile` matches the same entry.
   const walked = walkDir(repoDir, [
     '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',
-    // Go, so its advisories' affected symbols can be looked for. A detector
-    // cannot be offered files the walk never collected.
-    '.go',
     '.sh', '.bash', 'Dockerfile', 'Containerfile',
   ]).map((f) => path.relative(repoDir, f));
 
@@ -430,7 +469,7 @@ export async function scanRepo(
   // When there *was* a cap, it dropped by walk order: on n8n it hid 8 of 8
   // Dockerfiles and 7 of 9 shell scripts, and `--lint` read as clean. The
   // partition below survives from that era and now only orders the list.
-  const configFiles = walked.filter((f) => /(Dockerfile|Containerfile)|\.(sh|bash|go)$/.test(f));
+  const configFiles = walked.filter((f) => /(Dockerfile|Containerfile)|\.(sh|bash)$/.test(f));
   const codeFiles = walked.filter((f) => !configFiles.includes(f));
   const sourceFiles = [...configFiles, ...codeFiles];
   const pinScan = await scanPins(
