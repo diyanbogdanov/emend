@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isUpToDate } from '../src/analyze.ts';
+import { isUpToDate, surfaceDetector } from '../src/analyze.ts';
 
 /**
  * `isUpToDate` is Stage 1's gate: it decides whether a dependency is even
@@ -29,4 +29,21 @@ test('an npm package behaves as before: semver still gates it', () => {
   assert.equal(isUpToDate('npm', '1.0.0', '2.0.0'), false);
   // A prerelease is not an upgrade over the release it precedes.
   assert.equal(isUpToDate('npm', '1.0.0', '1.0.0-rc.1'), true);
+});
+
+/**
+ * `surfaceDetector` is what keeps a Python finding from carrying an
+ * npm-flavoured `detector` — a wrong answer even though nothing downstream
+ * currently branches on the literal string (see analyze.ts's comment on this
+ * function for what was checked before making the value ecosystem-aware).
+ */
+
+test('an npm finding keeps the exact label it always had', () => {
+  assert.equal(surfaceDetector('npm'), 'npm-surface');
+});
+
+test('a PyPI finding is labelled by its own ecosystem, not npm', () => {
+  // OSV spells it `PyPI` (capital P), but every other detector id in this
+  // codebase is lower-case kebab-case — `pypi-surface`, not `PyPI-surface`.
+  assert.equal(surfaceDetector('PyPI'), 'pypi-surface');
 });

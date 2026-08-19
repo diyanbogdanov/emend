@@ -13,8 +13,9 @@
  * npm, pnpm, yarn and bun are all parsed. None of them needs a YAML parser: the facts
  * Emend wants — package name, resolved version — live in the *keys* of these
  * files (`zod@3.25.76:`, `"zod@npm:^3.24.0":`), which are matchable line by
- * line. A real YAML parser would be Emend's first runtime dependency and would
- * buy nothing, since the nested values are exactly the parts not needed here.
+ * line. Pulling in the YAML parser Emend already depends on (specdiff.ts,
+ * for OpenAPI specs) would still buy nothing here, since the nested values
+ * are exactly the parts not needed.
  *
  * Being deliberately shallow has a cost worth stating: these parsers understand
  * the shapes in circulation today and will not silently adapt to a new lockfile

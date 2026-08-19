@@ -179,6 +179,28 @@ export function isUpToDate(ecosystem: string, from: string, to: string): boolean
   return schemeFor(ecosystem).compare(to, from) <= 0;
 }
 
+/**
+ * The `detector` value a surface-diff finding carries, from the dependency's
+ * own ecosystem rather than a constant `'npm-surface'` — a Python finding
+ * mislabelled `npm-surface` is a wrong answer, even if nothing downstream
+ * currently branches on the exact string (checked: `detector` gates the
+ * `cmdFix` routing and `needsSourceRepair` in fix.ts, but only against the
+ * *other* detectors' own names — `version-pin`, `vulnerability`,
+ * `external-lint`, `freshness`, `http-contract` — so any value here that
+ * avoids colliding with those keeps working exactly as before).
+ *
+ * Lower-cased because OSV spells PyPI with a capital P (`dep.ecosystem`,
+ * types.ts) while every other detector id in this codebase (`version-pin`,
+ * `http-contract`, the pre-existing `npm-surface` itself, ...) is
+ * lower-case kebab-case; `PyPI-surface` would be the one shouting exception.
+ *
+ * Exported (only) so a test can hold this mapping honest, without standing
+ * up a registry fetch to reach it — the same reason `isUpToDate` above is.
+ */
+export function surfaceDetector(ecosystem: string): string {
+  return `${ecosystem.toLowerCase()}-surface`;
+}
+
 interface Analyzed {
   report: PackageReport;
   surface?: ApiSurface;
@@ -429,6 +451,10 @@ export async function scanRepo(
       if (!a.impacting) continue;
       const bucket = index.byPackage.get(a.report.pkg);
       if (!bucket) continue;
+      // Falls back to npm only for a pairing that should be impossible:
+      // `ecosystemOf` is built from the same `deps` that produced `analyzed`,
+      // so every `a.report.pkg` is a name it already carries an entry for.
+      const detector = surfaceDetector(ecosystemOf.get(a.report.pkg) ?? 'npm');
 
       const findings: Finding[] = [];
       let unlocated = 0;
@@ -441,7 +467,7 @@ export async function scanRepo(
         callSiteCount += sites.length;
         findings.push({
           id: findingId(a.report.pkg, a.report.fromVersion ?? '', a.report.toVersion ?? '', change),
-          detector: 'npm-surface',
+          detector,
           pkg: a.report.pkg,
           fromVersion: a.report.fromVersion ?? '',
           toVersion: a.report.toVersion ?? '',
