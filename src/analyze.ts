@@ -29,7 +29,7 @@ import {
 import { compareVersions } from './versions.ts';
 import { extractorFor } from './surface.ts';
 import { diffSurfaces, consumerImpacting } from './diff.ts';
-import { findCallSites } from './callsites.ts';
+import { locateCallSites } from './callsites.ts';
 import { materializeRepoDeps } from './vendor.ts';
 import type {
   ApiSurface,
@@ -382,9 +382,16 @@ export async function scanRepo(
     }
   });
 
-  // Stage 2: one TypeScript program over the repo, resolving every package at once.
+  // Stage 2: locate call sites, dispatched per ecosystem through the
+  // `CallSiteResolver` seam (callsites.ts). The TypeScript resolver can never
+  // see a `.py` file and the Python resolver can never see a `.ts` one, so a
+  // repository tracking packages from more than one ecosystem needs each
+  // resolver run against its own packages, through `locateCallSites`, rather
+  // than one resolver called on everything.
   const surfaces = new Map<string, ApiSurface>();
   const wanted = new Map<string, Set<string>>();
+  const ecosystemOf = new Map<string, string>();
+  for (const d of deps) ecosystemOf.set(d.name, d.ecosystem);
   for (const a of analyzed) {
     if (a.surface && a.impacting && a.impacting.length > 0) {
       surfaces.set(a.report.pkg, a.surface);
@@ -395,7 +402,7 @@ export async function scanRepo(
   let callSiteCount = 0;
   if (surfaces.size > 0) {
     progress(`locating call sites across ${surfaces.size} package(s)`);
-    const index = findCallSites(repoDir, surfaces, wanted);
+    const index = await locateCallSites(repoDir, surfaces, wanted, ecosystemOf);
     warnings.push(...index.warnings);
     progress(`  analyzed ${index.filesAnalyzed} source file(s)`);
 

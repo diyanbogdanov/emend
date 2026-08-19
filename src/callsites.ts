@@ -410,10 +410,10 @@ export interface CallSiteResolver {
    * WASM grammar, and `web-tree-sitter` only offers an async API for that —
    * so forcing one shape onto the other would mean either wrapping every
    * synchronous call in a needless `Promise.resolve`, or blocking Python's
-   * parser on a synchronous load it cannot do. No caller dispatches through
-   * this interface today (see `resolverFor`'s doc), so nothing yet depends on
-   * which shape a given resolver picks — a future caller awaits `find`,
-   * which resolves either kind alike.
+   * parser on a synchronous load it cannot do. `locateCallSites` (below) is
+   * the caller: it dispatches per ecosystem through `resolverForEcosystem`
+   * and `await`s every resolver's `find` uniformly, which resolves either
+   * kind alike.
    */
   find(
     repoDir: string,
@@ -466,8 +466,84 @@ export function resolverFor(file: string): CallSiteResolver | undefined {
  * file", routed by extension, for a file that is actually on disk. This one
  * asks "do you serve this ecosystem at all", with neither a file nor a
  * repository in hand — which is what `capabilitiesFor` (languages.ts) needs
- * answered to report coverage before, or instead of, running a scan.
+ * answered to report coverage before, or instead of, running a scan, and what
+ * `locateCallSites` (below) needs to route each tracked package to the
+ * resolver that can actually read its files.
  */
 export function resolverForEcosystem(ecosystem: string): CallSiteResolver | undefined {
   return RESOLVERS.find((r) => r.ecosystems.includes(ecosystem));
+}
+
+/**
+ * Locates call sites for every tracked package, dispatched through each
+ * package's own ecosystem resolver (`resolverForEcosystem`) and merged into
+ * one index. This is the scan pipeline's actual entry point into the
+ * `CallSiteResolver` seam above — `analyze.ts` calls this, never a single
+ * resolver directly, which is what makes registering a resolver in
+ * `RESOLVERS` load-bearing rather than decorative.
+ *
+ * A single resolver cannot serve two languages: the TypeScript resolver
+ * builds a `ts.Program` and can never see a `.py` file; the Python resolver
+ * walks `.py`/`.pyi` files and can never see a `.ts` one. Calling one
+ * resolver on every tracked package regardless of ecosystem is not a partial
+ * answer, it is a wrong one — every package outside that resolver's own
+ * ecosystem silently gets zero call sites, which reads as "not called from
+ * this repository" when the truth is "never searched at all".
+ *
+ * `ecosystemOf` supplies the fact `surfaces`/`wanted` do not carry
+ * themselves — both are keyed by package name alone, the shape every
+ * `CallSiteResolver.find` accepts, so the ecosystem has to travel beside
+ * them rather than inside them.
+ *
+ * The merge stays honest in both directions a careless one could hide:
+ * `filesAnalyzed` is the sum across every resolver that ran — a `.ts` file
+ * and a `.py` file are disjoint sets, so summing double-counts nothing —
+ * and `warnings` is the concatenation of every resolver's own warnings,
+ * because dropping one resolver's warnings here would hide exactly the
+ * coverage gaps this codebase exists to report. A package whose ecosystem no
+ * resolver claims is not silently dropped either: it is named in its own
+ * warning and still gets an (empty) bucket, so its impacting changes count
+ * as unlocated rather than vanishing into a false "clean".
+ */
+export async function locateCallSites(
+  repoDir: string,
+  surfaces: Map<string, ApiSurface>,
+  wanted: Map<string, Set<string>>,
+  ecosystemOf: Map<string, string>,
+): Promise<CallSiteIndex> {
+  const byPackage = new Map<string, Map<string, CallSite[]>>();
+  const warnings: string[] = [];
+  let filesAnalyzed = 0;
+
+  const groups = new Map<string, { surfaces: Map<string, ApiSurface>; wanted: Map<string, Set<string>> }>();
+  for (const [pkg, surface] of surfaces) {
+    const ecosystem = ecosystemOf.get(pkg) ?? '';
+    let group = groups.get(ecosystem);
+    if (!group) {
+      group = { surfaces: new Map(), wanted: new Map() };
+      groups.set(ecosystem, group);
+    }
+    group.surfaces.set(pkg, surface);
+    const w = wanted.get(pkg);
+    if (w) group.wanted.set(pkg, w);
+  }
+
+  for (const [ecosystem, group] of groups) {
+    const resolver = resolverForEcosystem(ecosystem);
+    if (!resolver) {
+      const pkgs = [...group.surfaces.keys()];
+      warnings.push(
+        `no call-site resolver claims ecosystem '${ecosystem || '(unknown)'}'; ` +
+          `${pkgs.length} package(s) (${pkgs.join(', ')}) were not searched for call sites`,
+      );
+      for (const pkg of pkgs) byPackage.set(pkg, new Map());
+      continue;
+    }
+    const index = await resolver.find(repoDir, group.surfaces, group.wanted);
+    filesAnalyzed += index.filesAnalyzed;
+    warnings.push(...index.warnings);
+    for (const [pkg, bucket] of index.byPackage) byPackage.set(pkg, bucket);
+  }
+
+  return { byPackage, filesAnalyzed, warnings };
 }
