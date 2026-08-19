@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 import { mkdir, rm, writeFile, readdir, access, rename, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
-import { compareVersions, isPrerelease } from './versions.ts';
+import { compareVersions, isPrerelease, schemeFor } from './versions.ts';
 import { pypiClient } from './python/pypi.ts';
 
 const execFileAsync = promisify(execFile);
@@ -77,13 +77,19 @@ export async function fetchPackument(pkg: string): Promise<Packument> {
  * Deliberately not "highest version" — packages publish prereleases and
  * back-ported patches to older majors under other tags, and neither is what the
  * user would actually receive.
+ *
+ * `ecosystem` picks the ordering `isPrerelease`/`sort` fall back through:
+ * PyPI's `1.0.dev1`/`1.0a1` carry no `-`, so the npm-only scheme would call
+ * them plain releases and could propose one as the target. Required, not
+ * defaulted — a caller that knows what it is resolving must say so.
  */
-export function resolveTargetVersion(pack: PackageVersions): string | null {
+export function resolveTargetVersion(pack: PackageVersions, ecosystem: string): string | null {
   const latest = pack.latest;
   if (latest && pack.versions.includes(latest)) return latest;
+  const scheme = schemeFor(ecosystem);
   const stable = pack.versions
-    .filter((v) => !isPrerelease(v))
-    .sort(compareVersions);
+    .filter((v) => !scheme.isPrerelease(v))
+    .sort(scheme.compare);
   return stable.at(-1) ?? null;
 }
 
@@ -194,7 +200,11 @@ async function fetchPackageDirUncached(
 export function resolveRange(pack: PackageVersions, range: string): string | null {
   const published = pack.versions.filter((v) => !isPrerelease(v));
   if (published.length === 0) return null;
-  const latest = resolveTargetVersion(pack);
+  // 'npm' fixed, not a parameter: this function's whole contract (a semver
+  // range like `^1.2.3`) is npm's own, the same reason `typedeps.ts` — this
+  // function's only caller — resolves type dependencies against `clientFor('npm')`
+  // regardless of the repository's own ecosystem.
+  const latest = resolveTargetVersion(pack, 'npm');
 
   const spec = (range ?? '').trim();
   if (spec === '' || spec === '*' || spec === 'x' || spec === 'latest') return latest;

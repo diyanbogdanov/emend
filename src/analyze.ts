@@ -26,7 +26,7 @@ import {
   resolveTargetVersion,
   clientFor,
 } from './registry.ts';
-import { compareVersions } from './versions.ts';
+import { schemeFor } from './versions.ts';
 import { extractorFor } from './surface.ts';
 import { diffSurfaces, consumerImpacting } from './diff.ts';
 import { locateCallSites } from './callsites.ts';
@@ -160,6 +160,25 @@ function withoutSignatures(surface: ApiSurface): ApiSurface {
   return { ...surface, symbols };
 }
 
+/**
+ * Whether `to` is not a genuine upgrade over `from`, under `ecosystem`'s own
+ * version ordering — Stage 1's gate for skipping a dependency as up-to-date
+ * before spending a registry fetch and a surface diff on it.
+ *
+ * Ecosystem-aware on purpose, not the bare `compareVersions`: PEP 440 ranks
+ * `1.0.post1` strictly above `1.0`, while semver — which the bare wrapper
+ * always applies — sees no `-` in either and calls them equal. A PyPI package
+ * sitting on `1.0` with `1.0.post1` published would be marked up-to-date and
+ * never analysed, silently, if this used the npm-only comparator like every
+ * other ecosystem-blind call in this pipeline used to.
+ *
+ * Exported (only) so a test can hold this gate itself honest, without
+ * standing up a registry fetch to reach it.
+ */
+export function isUpToDate(ecosystem: string, from: string, to: string): boolean {
+  return schemeFor(ecosystem).compare(to, from) <= 0;
+}
+
 interface Analyzed {
   report: PackageReport;
   surface?: ApiSurface;
@@ -265,7 +284,7 @@ export async function scanRepo(
           },
         };
       }
-      const to = pinned ?? resolveTargetVersion(packageVersions);
+      const to = pinned ?? resolveTargetVersion(packageVersions, dep.ecosystem);
       if (!to) {
         return {
           report: {
@@ -279,7 +298,7 @@ export async function scanRepo(
           },
         };
       }
-      if (compareVersions(to, from) <= 0) {
+      if (isUpToDate(dep.ecosystem, from, to)) {
         return {
           report: {
             pkg: dep.name,

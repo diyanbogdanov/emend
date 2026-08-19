@@ -12,7 +12,7 @@ test('the latest tag wins when it names a version that was published', () => {
   // `dist-tags` and `dist.tarball`; a crates.io client satisfying an interface
   // demanding those would have to fabricate them.
   const pack: PackageVersions = { name: 'serde', versions: ['1.0.0', '1.0.1'], latest: '1.0.1' };
-  assert.equal(resolveTargetVersion(pack), '1.0.1');
+  assert.equal(resolveTargetVersion(pack, 'npm'), '1.0.1');
 });
 
 test('a latest tag naming an unpublished version falls back to the highest stable', () => {
@@ -20,7 +20,7 @@ test('a latest tag naming an unpublished version falls back to the highest stabl
   // at a version that was unpublished, and returning it would propose an
   // upgrade target that cannot be installed.
   const pack: PackageVersions = { name: 'serde', versions: ['1.0.0', '1.0.1'], latest: '9.9.9' };
-  assert.equal(resolveTargetVersion(pack), '1.0.1');
+  assert.equal(resolveTargetVersion(pack, 'npm'), '1.0.1');
 });
 
 test('with no latest tag, prereleases are skipped rather than winning on height', () => {
@@ -28,5 +28,14 @@ test('with no latest tag, prereleases are skipped rather than winning on height'
   // precedes, and proposing `2.0.0-rc.1` as an upgrade target is not what a
   // bare install would give you.
   const pack: PackageVersions = { name: 'serde', versions: ['1.0.0', '2.0.0-rc.1'], latest: null };
-  assert.equal(resolveTargetVersion(pack), '1.0.0');
+  assert.equal(resolveTargetVersion(pack, 'npm'), '1.0.0');
+});
+
+test('the ecosystem picks the ordering: a PyPI post-release is not a prerelease', () => {
+  // PEP 440's `.postN` outranks the plain release it follows, and semver
+  // (npm's scheme) has no concept of it at all. With no `latest` tag, the
+  // fallback sort must use PyPI's own ordering to land on `1.0.post1`, not
+  // stop at `1.0` the way the npm-only comparator used to for every ecosystem.
+  const pack: PackageVersions = { name: 'six', versions: ['1.0', '1.0.post1'], latest: null };
+  assert.equal(resolveTargetVersion(pack, 'PyPI'), '1.0.post1');
 });
