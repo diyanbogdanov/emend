@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { inventoriesFor, type EcosystemInventory } from '../src/ecosystems.ts';
+import { readRepo } from '../src/inventory.ts';
 
 test('a repository with no npm lockfile is still claimed by whoever understands it', async () => {
   // The bug this guards: `applies` gated on package-lock.json, so a repository
@@ -22,6 +23,7 @@ test('a repository with no npm lockfile is still claimed by whoever understands 
         packages: [{ name: 'serde', ecosystem: 'crates.io', version: '1.0.0' }],
         unsupported: null,
       }),
+      declared: async (d) => ({ dir: d, name: 'cargo', dependencies: [], scripts: {}, warnings: [], workspaces: [''] }),
       manifestSites: async () => new Map(),
     };
 
@@ -59,6 +61,7 @@ test('inventoriesFor filters out a declining inventory, not just returns a claim
       osvEcosystem: 'claiming-eco',
       applies: async () => true,
       read: async () => ({ packages: [], unsupported: null }),
+      declared: async (d) => ({ dir: d, name: 'claiming', dependencies: [], scripts: {}, warnings: [], workspaces: [''] }),
       manifestSites: async () => new Map(),
     };
     const declining: EcosystemInventory = {
@@ -66,6 +69,7 @@ test('inventoriesFor filters out a declining inventory, not just returns a claim
       osvEcosystem: 'declining-eco',
       applies: async () => false,
       read: async () => ({ packages: [], unsupported: null }),
+      declared: async (d) => ({ dir: d, name: 'declining', dependencies: [], scripts: {}, warnings: [], workspaces: [''] }),
       manifestSites: async () => new Map(),
     };
 
@@ -100,6 +104,39 @@ test('a pnpm-only repository is cited by its own lockfile, not a fabricated pack
     // page, so the quoted search misses and falls through to line 1 — an
     // honest "named in this file, line not pinpointed" rather than an artifact.
     assert.equal(site?.line, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a repository no inventory claims is told what was looked for', async () => {
+  // `readRepo` threw `no readable package.json at ...` for every non-npm
+  // repository, before any seam could be consulted. The message named npm
+  // specifically, which is the wrong claim once more than one ecosystem exists.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-declared-none-'));
+  try {
+    await assert.rejects(() => readRepo(dir), /no recognised manifest/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the npm inventory supplies the declared view', async () => {
+  // `declared()` answers a different question from `read()`: direct dependencies
+  // with the ranges the manifest states, rather than the whole transitive tree
+  // flattened for vulnerability screening.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-declared-npm-'));
+  try {
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', dependencies: { zod: '^3.22.0' } }),
+    );
+    const info = await readRepo(dir);
+    assert.equal(info.name, 'x');
+    assert.deepEqual(
+      info.dependencies.map((d) => [d.name, d.declared]),
+      [['zod', '^3.22.0']],
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

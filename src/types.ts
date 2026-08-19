@@ -345,6 +345,27 @@ export interface InstalledDependency {
   declaredIn: string[];
 }
 
+/**
+ * What a repository declares about itself: name, direct dependencies, scripts.
+ *
+ * Defined here rather than in `inventory.ts`, where it lived until
+ * `EcosystemInventory.declared()` (ecosystems.ts) needed to name it in its own
+ * return type. `inventory.ts` imports `ecosystems.ts` to route `readRepo`
+ * through the registered adapters, so `ecosystems.ts` cannot import this type
+ * back from `inventory.ts` without a cycle — it has to live in the shared
+ * vocabulary instead.
+ */
+export interface RepoInfo {
+  dir: string;
+  name: string;
+  dependencies: InstalledDependency[];
+  scripts: Record<string, string>;
+  /** Non-fatal problems worth telling the user about. */
+  warnings: string[];
+  /** Manifest directories read, relative to the root. `''` is the root. */
+  workspaces: string[];
+}
+
 export type PackageStatus = 'analyzed' | 'unanalyzable' | 'up-to-date' | 'error';
 
 export interface PackageReport {
