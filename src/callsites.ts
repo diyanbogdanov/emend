@@ -126,9 +126,42 @@ export function buildProgram(
   return ts.createProgram(fileNames, options);
 }
 
+/**
+ * Skipped by name and never descended into — a stronger exclusion than
+ * `isVendored` (python/callsites.ts) applies for Python call-site search,
+ * which still visits a vendored directory's files one by one and filters
+ * them out after the fact. This list answers a different question — "don't
+ * collect this at all" versus "don't search this for call sites" — for
+ * every caller of this shared, language-agnostic walk, not just Python's.
+ *
+ * A second list rather than an import of `VENDORED_DIR`: the two happen to
+ * share most of their names today, but nothing here needs to be
+ * Python-aware, and coupling this walk to a Python-specific module just to
+ * avoid repeating seven short strings is not a trade worth making.
+ *
+ * `.venv`, `venv`, `__pycache__`, `site-packages`, `.tox`, `.nox` and `envs`
+ * carry the same names and the same reasoning as `VENDORED_DIR` — see its
+ * comment. `env` is excluded from this blind list for the same reason it is
+ * excluded there: it is a plausible real source directory name, so the walk
+ * below only skips it when a sibling `pyvenv.cfg` actually marks it as a
+ * virtual environment.
+ */
+const VENDORED_DIR_NAMES = [
+  '.venv',
+  'venv',
+  '__pycache__',
+  'site-packages',
+  '.tox',
+  '.nox',
+  'envs',
+];
+
 export function walkDir(dir: string, exts: string[]): string[] {
   const out: string[] = [];
-  const skip = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', 'out']);
+  const skip = new Set([
+    'node_modules', '.git', 'dist', 'build', 'coverage', '.next', 'out',
+    ...VENDORED_DIR_NAMES,
+  ]);
   const stack = [dir];
   while (stack.length > 0) {
     const current = stack.pop();
@@ -147,7 +180,11 @@ export function walkDir(dir: string, exts: string[]): string[] {
     // readDirectory with depth 1 returns files only; recurse into subdirectories.
     try {
       for (const sub of ts.sys.getDirectories(current)) {
-        if (skip.has(sub)) continue;
+        if (sub === 'env') {
+          if (ts.sys.fileExists(path.join(current, sub, 'pyvenv.cfg'))) continue;
+        } else if (skip.has(sub)) {
+          continue;
+        }
         stack.push(path.join(current, sub));
       }
     } catch {

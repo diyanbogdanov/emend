@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { locateCallSites, resolverFor } from '../src/callsites.ts';
+import { locateCallSites, resolverFor, walkDir } from '../src/callsites.ts';
 import type { ApiSurface } from '../src/types.ts';
 
 test('TypeScript claims the extensions it can type-check', () => {
@@ -112,5 +112,59 @@ test('a package whose ecosystem no resolver claims is named in a warning, not si
     assert.ok(index.warnings.some((w) => w.includes('crates.io') && w.includes('some-crate')));
   } finally {
     repo.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// walkDir's own skip set. Stronger than `isVendored` (python/callsites.ts,
+// see pythoncallsites.test.ts): this shared, language-agnostic walk never
+// descends into these directories at all, for every caller — the TypeScript
+// program builder above and analyze.ts's generic source-file collection —
+// not just Python's call-site search, which still visits a vendored
+// directory's files and filters them out one by one.
+// ---------------------------------------------------------------------------
+
+function relFiles(dir: string, found: string[]): string[] {
+  return found.map((f) => path.relative(dir, f).split(path.sep).join('/')).sort();
+}
+
+test('walkDir never descends into a repository\'s own vendored Python environment', () => {
+  const repo = tempRepo({
+    '.venv/lib/pkg/mod.py': 'x = 1\n',
+    'venv/lib/pkg/mod.py': 'x = 1\n',
+    '__pycache__/mod.py': 'x = 1\n',
+    'site-packages/pkg/mod.py': 'x = 1\n',
+    '.tox/py312/lib/mod.py': 'x = 1\n',
+    '.nox/py312/lib/mod.py': 'x = 1\n',
+    'envs/myenv/lib/mod.py': 'x = 1\n',
+    'src/app.py': 'x = 1\n',
+  });
+  try {
+    assert.deepEqual(relFiles(repo.dir, walkDir(repo.dir, ['.py'])), ['src/app.py']);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('walkDir only skips a bare env/ directory when pyvenv.cfg marks it a virtual environment', () => {
+  // `env` is a plausible real source directory (`src/env/config.py`), unlike
+  // every other name above, so a name match alone is not enough — the same
+  // false-skip risk python/callsites.ts's VENDORED_DIR guards against.
+  const withMarker = tempRepo({
+    'env/pyvenv.cfg': 'home = /usr/bin\n',
+    'env/lib/mod.py': 'x = 1\n',
+    'src/app.py': 'x = 1\n',
+  });
+  try {
+    assert.deepEqual(relFiles(withMarker.dir, walkDir(withMarker.dir, ['.py'])), ['src/app.py']);
+  } finally {
+    withMarker.cleanup();
+  }
+
+  const withoutMarker = tempRepo({ 'env/app.py': 'x = 1\n' });
+  try {
+    assert.deepEqual(relFiles(withoutMarker.dir, walkDir(withoutMarker.dir, ['.py'])), ['env/app.py']);
+  } finally {
+    withoutMarker.cleanup();
   }
 });
