@@ -135,7 +135,23 @@ export function pythonInventory(): EcosystemInventory {
 
     async read(repoDir) {
       const best = await readBestManifest(repoDir);
-      if (!best) return { packages: [], unsupported: null };
+      if (!best) {
+        // Only pyproject.toml is present — the same case declared() already
+        // warns about (see that branch below), and for the same reason: this
+        // adapter never parses pyproject.toml's own `[project.dependencies]`
+        // (module doc), so it cannot tell a repository that genuinely declares
+        // nothing from one whose real dependencies simply have no lockfile
+        // yet. Unlike npm's read(), there is no cheaper manifest to re-check
+        // here — warning unconditionally is the only honest option available.
+        return {
+          packages: [],
+          unsupported: null,
+          incomplete:
+            'found pyproject.toml but none of uv.lock, poetry.lock, pdm.lock, Pipfile.lock or ' +
+            'requirements.txt — commit one so installed versions can be resolved and screened ' +
+            'for vulnerabilities',
+        };
+      }
 
       // Every entry in `versions`, not just direct dependencies — uv.lock,
       // poetry.lock, pdm.lock and Pipfile.lock all record the whole resolved
@@ -153,7 +169,7 @@ export function pythonInventory(): EcosystemInventory {
       for (const [name, version] of best.manifest.versions) {
         packages.push({ name, ecosystem: 'PyPI', version });
       }
-      return { packages, unsupported: best.manifest.unsupported };
+      return { packages, unsupported: best.manifest.unsupported, incomplete: null };
     },
 
     async declared(repoDir) {

@@ -32,6 +32,22 @@ export interface InventoryResult {
   packages: InstalledPackage[];
   /** A manifest found but not parseable, for an honest warning. Never silent. */
   unsupported: string | null;
+  /**
+   * Why `packages` came back empty despite this ecosystem applying, when that
+   * emptiness is not a fact about the repository. `applies()` can claim a
+   * repository on a manifest alone, with no lockfile requirement — necessary
+   * so a repository before its first install is still recognised — but that
+   * means `read()` can be asked for a tree with nothing to resolve it from.
+   * Reporting `packages: []` alone there is indistinguishable from a
+   * repository that genuinely has nothing installed, and the vulnerability
+   * detector would render it as a clean scan.
+   *
+   * Distinct from `unsupported`: nothing here failed to parse, there was
+   * simply nothing to read. `null` whenever `packages` is a complete answer,
+   * including when it is genuinely empty because the repository declares no
+   * dependencies at all.
+   */
+  incomplete: string | null;
 }
 
 export interface EcosystemInventory {
@@ -179,7 +195,33 @@ function npmInventory(): EcosystemInventory {
         seen.add(key);
         packages.push({ name: entry.name, ecosystem: 'npm', version: entry.version });
       }
-      return { packages, unsupported: lock.unsupported };
+
+      // No lockfile of any recognised kind was found — `lock.kind === null`
+      // and it was not even an unsupported one (bun.lockb, or a pnpm/yarn/bun
+      // file that parsed to nothing), so `packages` is empty because there was
+      // nothing to resolve it from, not because this repository has nothing
+      // installed. Re-parse package.json (the same file `applies()` already
+      // required to exist) to tell those two apart: zero declared dependencies
+      // really is a clean, complete answer, but one or more declared
+      // dependencies with no lockfile means real packages went unscreened.
+      // Only the root manifest is consulted — a workspace whose root is empty
+      // but whose sub-packages are not would slip past this, same as it would
+      // slip past any check that stops at `applies()`'s own manifest.
+      let incomplete: string | null = null;
+      if (packages.length === 0 && lock.kind === null && !lock.unsupported) {
+        const manifest = await readManifest(path.join(repoDir, 'package.json'));
+        const declaredCount =
+          Object.keys(manifest?.dependencies ?? {}).length +
+          Object.keys(manifest?.devDependencies ?? {}).length;
+        if (declaredCount > 0) {
+          incomplete =
+            'package.json declares dependencies but no lockfile was found (package-lock.json, ' +
+            'pnpm-lock.yaml, yarn.lock or bun.lock) — commit one so installed versions can be ' +
+            'resolved and screened for vulnerabilities';
+        }
+      }
+
+      return { packages, unsupported: lock.unsupported, incomplete };
     },
 
     /**

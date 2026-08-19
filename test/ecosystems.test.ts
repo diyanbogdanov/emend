@@ -24,6 +24,7 @@ test('a repository with no npm lockfile is still claimed by whoever understands 
       read: async () => ({
         packages: [{ name: 'serde', ecosystem: 'crates.io', version: '1.0.0' }],
         unsupported: null,
+        incomplete: null,
       }),
       declared: async (d) => ({ dir: d, name: 'cargo', dependencies: [], scripts: {}, warnings: [], workspaces: [''] }),
       manifestSites: async () => new Map(),
@@ -63,7 +64,7 @@ test('inventoriesFor filters out a declining inventory, not just returns a claim
       osvEcosystem: 'claiming-eco',
       manifests: ['claiming.manifest'],
       applies: async () => true,
-      read: async () => ({ packages: [], unsupported: null }),
+      read: async () => ({ packages: [], unsupported: null, incomplete: null }),
       declared: async (d) => ({ dir: d, name: 'claiming', dependencies: [], scripts: {}, warnings: [], workspaces: [''] }),
       manifestSites: async () => new Map(),
     };
@@ -72,7 +73,7 @@ test('inventoriesFor filters out a declining inventory, not just returns a claim
       osvEcosystem: 'declining-eco',
       manifests: ['declining.manifest'],
       applies: async () => false,
-      read: async () => ({ packages: [], unsupported: null }),
+      read: async () => ({ packages: [], unsupported: null, incomplete: null }),
       declared: async (d) => ({ dir: d, name: 'declining', dependencies: [], scripts: {}, warnings: [], workspaces: [''] }),
       manifestSites: async () => new Map(),
     };
@@ -108,6 +109,83 @@ test('a pnpm-only repository is cited by its own lockfile, not a fabricated pack
     // page, so the quoted search misses and falls through to line 1 — an
     // honest "named in this file, line not pinpointed" rather than an artifact.
     assert.equal(site?.line, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- read()'s `incomplete`: a manifest with nothing to resolve it from -----
+//
+// The bug this guards: `applies()` claims a repository on package.json alone,
+// with no lockfile requirement — necessary so readRepo still works before a
+// repository's first install. But read() feeds the vulnerability detector,
+// and a package.json with real dependencies and no lockfile resolves zero
+// packages the same way a genuinely dependency-free repository does. Without
+// `incomplete`, both report {packages: [], unsupported: null} —
+// indistinguishable from having been screened and found clean.
+
+test('read() marks itself incomplete when package.json declares dependencies but no lockfile exists', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-eco-npm-nolock-'));
+  try {
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', dependencies: { lodash: '4.17.15' } }),
+    );
+
+    const [npm] = await inventoriesFor(dir);
+    assert.equal(npm?.id, 'npm');
+    const result = await npm?.read(dir);
+    assert.deepEqual(result?.packages, []);
+    assert.equal(result?.unsupported, null);
+    assert.match(result?.incomplete ?? '', /no lockfile/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('read() is not incomplete when a lockfile resolved the tree', async () => {
+  // The no-regression case: a repository that was actually screened must not
+  // carry a caveat saying it was not.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-eco-npm-lock-'));
+  try {
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', dependencies: { lodash: '4.17.15' } }),
+    );
+    writeFileSync(
+      path.join(dir, 'package-lock.json'),
+      JSON.stringify({
+        name: 'x',
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'x' },
+          'node_modules/lodash': { version: '4.17.15' },
+        },
+      }),
+    );
+
+    const [npm] = await inventoriesFor(dir);
+    const result = await npm?.read(dir);
+    assert.deepEqual(result?.packages, [{ name: 'lodash', ecosystem: 'npm', version: '4.17.15' }]);
+    assert.equal(result?.incomplete, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('read() is not incomplete when package.json genuinely declares no dependencies', async () => {
+  // Distinct from the case above: nothing was declared, so there is nothing a
+  // lockfile could have resolved either. Flagging this as incomplete would be
+  // the opposite dishonesty this task exists to prevent — manufacturing doubt
+  // about a repository that has none.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-eco-npm-empty-'));
+  try {
+    writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x' }));
+
+    const [npm] = await inventoriesFor(dir);
+    const result = await npm?.read(dir);
+    assert.deepEqual(result?.packages, []);
+    assert.equal(result?.incomplete, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -357,6 +435,27 @@ test('declared() with only pyproject.toml reports no dependencies, with a warnin
   }
 });
 
+test('read() with only pyproject.toml marks itself incomplete, the same exposure npm has', async () => {
+  // The same gap as ecosystems.ts's npm `incomplete` tests, on the Python
+  // side: applies() claims this repository on pyproject.toml alone, and
+  // read() would otherwise answer {packages: [], unsupported: null} — silent,
+  // and indistinguishable from a repository with no dependencies at all.
+  // Unlike npm's read(), there is no cheaper manifest here to re-check for
+  // "genuinely zero": this adapter never parses pyproject.toml's own
+  // [project.dependencies] (module doc), so — like declared()'s warning just
+  // above — this fires unconditionally whenever only pyproject.toml exists.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-py-read-pyproject-'));
+  try {
+    writeFileSync(path.join(dir, 'pyproject.toml'), '[project]\nname = "demo"\n');
+    const result = await pythonInventory().read(dir);
+    assert.deepEqual(result.packages, []);
+    assert.equal(result.unsupported, null);
+    assert.match(result.incomplete ?? '', /pyproject\.toml/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('read() offers the whole resolved tree, ecosystem-tagged PyPI', async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'emend-py-read-'));
   try {
@@ -368,6 +467,7 @@ test('read() offers the whole resolved tree, ecosystem-tagged PyPI', async () =>
     assert.deepEqual(result, {
       packages: [{ name: 'requests', ecosystem: 'PyPI', version: '2.31.0' }],
       unsupported: null,
+      incomplete: null,
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -378,12 +478,15 @@ test('read() offers nothing for a requirements.txt-only repository, rather than 
   // A known consequence of never guessing: a repository with no lockfile and
   // only ranges gets no vulnerability screening from this inventory at all,
   // because there is no resolved version to screen — see
-  // src/python/inventory.ts's read() doc.
+  // src/python/inventory.ts's read() doc. Not `incomplete`: requirements.txt
+  // was found and parsed fine, and declared() already warns separately that
+  // its ranges could not be resolved — this is the accepted "never guess"
+  // limitation, not the "nobody looked" gap this task's `incomplete` guards.
   const dir = mkdtempSync(path.join(tmpdir(), 'emend-py-read-range-only-'));
   try {
     writeFileSync(path.join(dir, 'requirements.txt'), 'requests>=2.31.0\n');
     const result = await pythonInventory().read(dir);
-    assert.deepEqual(result, { packages: [], unsupported: null });
+    assert.deepEqual(result, { packages: [], unsupported: null, incomplete: null });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -402,6 +505,7 @@ test('read() offers an exactly-pinned requirements.txt dependency for vulnerabil
     assert.deepEqual(result, {
       packages: [{ name: 'requests', ecosystem: 'PyPI', version: '2.31.0' }],
       unsupported: null,
+      incomplete: null,
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -462,7 +566,7 @@ test('an unreadable lockfile is reported as unsupported, by both declared() and 
     assert.match(info.warnings[0] ?? '', /uv\.lock/);
 
     const result = await pythonInventory().read(dir);
-    assert.deepEqual(result, { packages: [], unsupported: 'uv.lock' });
+    assert.deepEqual(result, { packages: [], unsupported: 'uv.lock', incomplete: null });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
