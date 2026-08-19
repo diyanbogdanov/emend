@@ -168,6 +168,13 @@ function parsePnpmLock(raw: string): Map<string, string> {
  * Tracking the most recent header and attaching the next `version` to it handles
  * both, including the multi-descriptor headers yarn emits when several ranges
  * resolve to one package.
+ *
+ * Berry also lists the repository's own packages as descriptors: the
+ * workspace root (`"<repo-name>@workspace:.":`) and every workspace member
+ * (`"pkg-a@workspace:packages/a":`). Neither is an installed dependency —
+ * both are the repo's own code, the same reason npm's parser skips the root
+ * (`installPath === ''`) and workspace symlinks (`link: true`) below — so
+ * both are dropped before they ever reach `versions`.
  */
 function parseYarnLock(raw: string): Map<string, string> {
   const versions = new Map<string, string>();
@@ -192,7 +199,13 @@ function parseYarnLock(raw: string): Map<string, string> {
           // Strip the range, keeping the name: `zod@^3.24.0` and
           // `zod@npm:^3.24.0` both name `zod`.
           const at = d.lastIndexOf('@');
-          return at > 0 ? d.slice(0, at) : d;
+          if (at <= 0) return d;
+          // `pkg-a@workspace:packages/a` (or `<repo-name>@workspace:.` for
+          // the root) names the repository's own code, not a registry
+          // dependency. `''` drops it via the `.filter(Boolean)` below, same
+          // as the `__metadata` block above.
+          if (d.slice(at + 1).startsWith('workspace:')) return '';
+          return d.slice(0, at);
         })
         .filter(Boolean);
       continue;

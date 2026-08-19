@@ -39,6 +39,19 @@ const read = (fixture: string) => readLockfile(fixtureDir(fixture));
 //                           "classic", run via corepack) against the public
 //                           registry, for the same package.json as the pnpm
 //                           fixture above. Generated 2026-08-19.
+//   yarn-berry/yarn.lock    `corepack yarn@4 install --no-immutable` (Yarn
+//                           4.5.3, via corepack 0.31.0) against the public
+//                           registry, for a two-workspace repo: root
+//                           package.json named "yarn-berry-workspaces-root"
+//                           depending on zod@3.25.76, plus one member at
+//                           packages/pkg-a (name "pkg-a") depending on
+//                           left-pad@1.3.0. Chosen over a single-package repo
+//                           because Berry writes a workspace descriptor for
+//                           *every* workspace, not only the root
+//                           (`"pkg-a@workspace:packages/pkg-a":` alongside
+//                           `"yarn-berry-workspaces-root@workspace:.":`), and
+//                           the fix needs to be proven against both. Generated
+//                           2026-08-20.
 //   bun/bun.lock            `bun install --ignore-scripts` (bun 1.3.12)
 //                           against the public registry, for the same
 //                           package.json again. Bun 1.3.12 writes the text
@@ -201,6 +214,47 @@ test('yarn.lock: real yarn (classic) output resolves to the right versions, tree
     ],
   );
 
+  for (const [name, version] of result.versions) {
+    const installPath = `node_modules/${name}`;
+    const entry = result.tree.get(installPath);
+    assert.ok(entry, `expected a tree entry at ${installPath}`);
+    assert.equal(entry?.name, name);
+    assert.equal(entry?.version, version);
+    assert.equal(entry?.installPath, installPath);
+  }
+});
+
+test('yarn.lock (Berry): the workspace root and every workspace member are excluded, only real dependencies resolve', async () => {
+  // The bug this guards: Berry lists the repository's own packages as
+  // ordinary descriptors — the workspace root
+  // ("yarn-berry-workspaces-root@workspace:.") and the member
+  // ("pkg-a@workspace:packages/pkg-a") — both confirmed by reading
+  // test/fixtures/lockfiles/yarn-berry/yarn.lock directly, each resolving to
+  // the fabricated version "0.0.0-use.local". Treating either as an
+  // installed package would hand the repository's own name to OSV for
+  // vulnerability screening, and would let a genuine dependency that happens
+  // to share that name resolve to "0.0.0-use.local" instead of what was
+  // actually installed.
+  const result = await read('yarn-berry');
+  assert.equal(result.kind, 'yarn.lock');
+  assert.equal(result.unsupported, null);
+
+  assert.equal(result.versions.has('yarn-berry-workspaces-root'), false);
+  assert.equal(result.versions.has('pkg-a'), false);
+  assert.equal(result.tree.has('node_modules/yarn-berry-workspaces-root'), false);
+  assert.equal(result.tree.has('node_modules/pkg-a'), false);
+
+  // The genuine dependencies survive: zod is the workspace root's own direct
+  // dependency, left-pad is packages/pkg-a's — confirmed by reading the
+  // fixture's two "workspace:"-free entries, "zod@npm:3.25.76" and
+  // "left-pad@npm:1.3.0".
+  assert.deepEqual(
+    [...result.versions.entries()].sort(),
+    [
+      ['left-pad', '1.3.0'],
+      ['zod', '3.25.76'],
+    ],
+  );
   for (const [name, version] of result.versions) {
     const installPath = `node_modules/${name}`;
     const entry = result.tree.get(installPath);
