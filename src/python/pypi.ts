@@ -23,6 +23,18 @@
  * DEFLATE (`inflateRawSync`), which is exactly what a zip's "deflate" storage
  * method is, so reading the format directly costs a small parser and no new
  * dependency, and works identically everywhere Node does.
+ *
+ * A limit worth stating plainly: hand-rolling the reader means no entry name
+ * is trusted as a safe relative path. `registry.ts`'s npm extraction gets
+ * zip-slip protection for free from the system `tar` binary; this reader has
+ * none except the explicit check `extractZip` does itself — every entry's
+ * resolved destination is verified to stay inside `destDir` before anything
+ * is written, and an entry that would escape it (`../../../etc/passwd`) is
+ * rejected outright rather than skipped quietly. Every scanned Python
+ * dependency has its wheel fetched and extracted here on an ordinary `emend
+ * scan`, no `--fix` or opt-in required, so without that check a single
+ * malicious or typosquatted release would be enough for arbitrary file write
+ * with the scanning process's own privileges.
  */
 
 import { access, mkdir, rename, rm, writeFile } from 'node:fs/promises';
@@ -169,10 +181,41 @@ function readZipEntry(buf: Buffer, entry: ZipEntry): Buffer {
   throw new Error(`unsupported zip compression method ${entry.method} for ${entry.name}`);
 }
 
-/** Extracts every entry of a zip buffer under `destDir`. */
-async function extractZip(buf: Buffer, destDir: string): Promise<void> {
+/**
+ * Extracts every entry of a zip buffer under `destDir`.
+ *
+ * Exported (only) so tests can exercise extraction directly, the same reason
+ * `python/callsites.ts`'s `pythonSites` is exported — this is otherwise an
+ * internal step of `fetchWheelDirUncached`.
+ *
+ * Every entry's destination is verified to resolve inside `destDir` before
+ * anything is written. See the module doc for why: this reader has no other
+ * zip-slip protection, and a wheel is fetched and extracted on an ordinary
+ * scan with no opt-in.
+ */
+export async function extractZip(buf: Buffer, destDir: string): Promise<void> {
+  const destRoot = path.resolve(destDir);
   for (const entry of readCentralDirectory(buf)) {
     const dest = path.join(destDir, ...entry.name.split('/'));
+    const rel = path.relative(destRoot, path.resolve(dest));
+    // A traversal entry (`../../../PWNED.txt`) is hostile, not malformed —
+    // continuing to extract the rest of the archive while saying nothing
+    // would be the wrong response, the same reasoning `readCentralDirectory`
+    // and `readZipEntry` apply to zip64 and an unsupported compression
+    // method. `rel` escapes `destDir` when it is exactly `..`, or starts
+    // with a `..` *segment* (checked with the platform separator, not a bare
+    // string prefix, so a file legitimately named e.g. `..bashrc` is not
+    // mistaken for one), or — crossing drives on Windows — is itself
+    // absolute. Empty means `dest` resolved to `destDir` itself, which is
+    // never a real file to write.
+    if (
+      rel === '' ||
+      rel === '..' ||
+      rel.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(rel)
+    ) {
+      throw new Error(`zip entry escapes its extraction directory: ${entry.name}`);
+    }
     if (entry.name.endsWith('/')) {
       await mkdir(dest, { recursive: true });
       continue;
