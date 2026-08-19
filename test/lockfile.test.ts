@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { readLockfile } from '../src/lockfile.ts';
@@ -306,6 +306,48 @@ test('bun.lockb is recognised but reported unsupported, never a silently empty r
   assert.equal(result.unsupported, 'bun.lockb');
   assert.equal(result.versions.size, 0);
   assert.equal(result.tree.size, 0);
+});
+
+test('an unparseable package-lock.json sets unsupported, distinctly from no lockfile at all', async () => {
+  // The bug this guards: a package-lock.json present but truncated,
+  // corrupted, or left with an unresolved merge-conflict marker used to
+  // return exactly {kind: null, unsupported: null} — identical to the "no
+  // lockfile at all" case just below, even though a lockfile genuinely was
+  // found and Emend could not read it. Downstream, ecosystems.ts's read()
+  // turned that into a false "no lockfile was found" warning for a lockfile
+  // that was, in fact, found. The pnpm, yarn and bun branches already set
+  // `unsupported` in the equivalent situation (see the bun.lockb test
+  // above); this is npm's own parse failure, not another format's.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-lockfile-corrupt-'));
+  try {
+    // A real, unresolved git merge conflict left inside an otherwise-valid
+    // package-lock.json — genuinely invalid JSON, not merely a contrived
+    // string: JSON.parse throws on this exact shape, the same way it would
+    // on a lockfile truncated mid-write.
+    writeFileSync(
+      path.join(dir, 'package-lock.json'),
+      '{\n' +
+        '  "name": "x",\n' +
+        '  "lockfileVersion": 3,\n' +
+        '  "packages": {\n' +
+        '<<<<<<< HEAD\n' +
+        '    "": { "name": "x", "version": "1.0.0" },\n' +
+        '=======\n' +
+        '    "": { "name": "x", "version": "2.0.0" },\n' +
+        '>>>>>>> feature-branch\n' +
+        '    "node_modules/left-pad": { "version": "1.3.0" }\n' +
+        '  }\n' +
+        '}\n',
+    );
+
+    const result = await readLockfile(dir);
+    assert.equal(result.kind, null);
+    assert.equal(result.unsupported, 'package-lock.json');
+    assert.equal(result.versions.size, 0);
+    assert.equal(result.tree.size, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('no lockfile at all yields kind: null and an empty tree, distinctly from an unparseable one', async () => {

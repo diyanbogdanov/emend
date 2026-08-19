@@ -277,7 +277,12 @@ export async function readLockfile(repoDir: string): Promise<LockfileResult> {
   try {
     lock = JSON.parse(raw) as NpmLockV3;
   } catch {
-    return empty;
+    // package-lock.json is present but does not parse — truncated, corrupted,
+    // or left with an unresolved merge-conflict marker. That is a different
+    // fact from no lockfile existing at all, and callers (ecosystems.ts,
+    // detectors.ts) tell the two apart by this field, the same way the pnpm,
+    // yarn and bun branches above already do for their own parse failures.
+    return { ...empty, unsupported: 'package-lock.json' };
   }
 
   const versions = new Map<string, string>();
