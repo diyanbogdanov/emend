@@ -563,6 +563,71 @@ function spawnWithoutStdin(
 }
 
 /**
+ * The provider block for a self-hosted or custom OpenAI-compatible harness
+ * model, or undefined when there is nothing safe to declare.
+ *
+ * `options.model` is `label/model-id`, split on the FIRST slash only:
+ * `local/ggml-org/gpt-oss-20b-GGUF:MXFP4` is label `local`, id
+ * `ggml-org/gpt-oss-20b-GGUF:MXFP4` — splitting on every slash would cut the
+ * id apart, and the id is what has to reach the API unchanged. A spec with no
+ * slash names no provider and is left alone, the same as one with no
+ * resolvable base URL: this never invents a provider label or a default
+ * endpoint.
+ *
+ * The base URL comes from `resolveLlmConfig` — the same resolution
+ * `EMEND_LLM_BASE_URL` and the ollama/vllm presets already go through for
+ * Emend's own client — rather than a second copy of it here that could drift.
+ * `model` is overridden with the id half of the spec purely so an unset
+ * `EMEND_LLM_MODEL` cannot fail a resolution this has no stake in — confirmed
+ * failing today: `resolveLlmConfig({})` against a bare `EMEND_LLM_BASE_URL`
+ * rejects for "no model" (see providers.test.ts, "a custom base URL still
+ * requires an explicit model"). `catalogue` further down overrides the same
+ * way, with a literal `'placeholder'`, for the same reason. Nothing below
+ * reads `resolved.config.model` back.
+ *
+ * Restricted to providers whose key can only come from `EMEND_LLM_API_KEY` —
+ * true for a bare base URL and for ollama/vllm, false for a hosted preset
+ * (nebius, fireworks, ...) that prefers its own-named variable. Templating
+ * `{env:EMEND_LLM_API_KEY}` in for one of those would silently send an empty
+ * key if the operator had set only the preset's variable, which is worse than
+ * the plain pass-through this falls back to.
+ */
+function selfHostedProvider(model: string | undefined): Record<string, unknown> | undefined {
+  if (!model || model.startsWith('openrouter/')) return undefined;
+  const slash = model.indexOf('/');
+  if (slash <= 0) return undefined;
+  const label = model.slice(0, slash);
+  const modelId = model.slice(slash + 1);
+
+  const resolved = resolveLlmConfig({ model: modelId });
+  if (!resolved.ok) return undefined;
+  const { providerId, baseUrl } = resolved.config;
+  if (providerId) {
+    const keyEnv = PROVIDERS[providerId]?.keyEnv ?? [];
+    if (keyEnv.length !== 1 || keyEnv[0] !== 'EMEND_LLM_API_KEY') return undefined;
+  }
+
+  return {
+    enabled_providers: [label],
+    model,
+    provider: {
+      [label]: {
+        npm: '@ai-sdk/openai-compatible',
+        name: label,
+        // Same indirection as the openrouter block below: opencode substitutes
+        // `{env:VAR}` from its own process environment (empty string if unset,
+        // never an error), so the key never enters this JSON and a key-optional
+        // local runtime still gets a valid config.
+        options: { baseURL: baseUrl, apiKey: '{env:EMEND_LLM_API_KEY}' },
+        // The map key is the id sent to the API, exactly as written after the
+        // first slash — slashes and colons included.
+        models: { [modelId]: { name: modelId } },
+      },
+    },
+  };
+}
+
+/**
  * OpenCode as the escalation harness.
  *
  * Chosen after a build-vs-adopt evaluation that named a sandboxed harness as
@@ -624,7 +689,7 @@ export function openCodeHarness(options: OpenCodeOptions = {}): OpenCodeHarness 
               model: options.model,
               provider: { openrouter: { options: { apiKey: '{env:OPENROUTER_API_KEY}' } } },
             }
-          : {}),
+          : (selfHostedProvider(options.model) ?? {})),
         ...(options.providers ? { provider: options.providers } : {}),
         ...(options.mcp ? { mcp: options.mcp } : {}),
         permission: {
