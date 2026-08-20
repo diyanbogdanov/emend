@@ -13,6 +13,8 @@
  * versions will be compared as semver and quietly mis-ranked.
  */
 
+import { pep440Scheme } from './pep440.ts';
+
 /** One ecosystem's answer to "which of these two versions is newer". */
 export interface VersionScheme {
   id: string;
@@ -67,10 +69,10 @@ export function semverFloor(): VersionScheme {
 }
 
 // Ordered: the first scheme that claims an ecosystem wins, and semver claims
-// everything, so it must stay last. A new scheme goes before it in this array
-// — skip that and its ecosystem quietly compares as semver instead (see the
-// module doc above for what that costs PyPI).
-const SCHEMES: VersionScheme[] = [semverScheme()];
+// everything, so it must stay last. PEP 440 goes ahead of it — registering a
+// scheme after the floor means it is never reached, which is the trap this
+// module's doc comment warns about.
+const SCHEMES: VersionScheme[] = [pep440Scheme(), semverScheme()];
 
 /**
  * The scheme for this ecosystem.
@@ -96,21 +98,37 @@ export function schemeFor(
 
 /**
  * npm-default convenience, so callers without an ecosystem in hand are
- * unchanged. Current callers: `registry.ts`, `fix.ts`, `remediate.ts`,
- * `analyze.ts`, `scripts/audit-removals.ts` — all genuinely npm-only today.
- * A caller that learns a second ecosystem must switch to
- * `schemeFor(ecosystem).compare` rather than keep calling this under the same
- * name; that is exactly how the bug this seam exists to prevent comes back.
+ * unchanged. Current callers, all genuinely npm-only rather than merely
+ * unmigrated:
+ *
+ * - `registry.ts`, inside `resolveRange` — npm semver ranges (`^1.2.3`) for
+ *   materialising TypeScript's own type dependencies on disk, never a
+ *   repository's tracked packages.
+ * - `fix.ts` and `remediate.ts` — vulnerability and freshness remediation,
+ *   which bump an npm/pnpm/yarn/bun lockfile; there is no Python remediation
+ *   path yet for this to be wrong about.
+ * - `scripts/audit-removals.ts`, whose `PACKAGES` list is npm-only by its
+ *   own declaration.
+ *
+ * `analyze.ts` and `registry.ts`'s own `resolveTargetVersion` do NOT call
+ * this any more — both learned their ecosystem and switched to
+ * `schemeFor(ecosystem).compare`, which is exactly the rule below: a caller
+ * that knows its ecosystem must use `schemeFor(ecosystem).compare` rather
+ * than keep calling this under the same name, or the bug this seam exists to
+ * prevent comes back.
  */
 export function compareVersions(a: string, b: string): number {
   return schemeFor('npm').compare(a, b);
 }
 
 /**
- * npm-default convenience; only `registry.ts` calls this today, to filter
- * prereleases out of `resolveTargetVersion` and `resolveRange`. The same
- * warning as `compareVersions` applies: a caller that learns a second
- * ecosystem must switch to `schemeFor(ecosystem).isPrerelease`.
+ * npm-default convenience; only `registry.ts` calls this today, inside
+ * `resolveRange` — the same npm-only type-dependency resolution
+ * `compareVersions`'s doc above describes. `resolveTargetVersion` does NOT
+ * call this any more: it takes its own `ecosystem` parameter and filters
+ * prereleases with `schemeFor(ecosystem).isPrerelease` instead. The same
+ * warning as `compareVersions` applies: a caller that knows its ecosystem
+ * must use `schemeFor(ecosystem).isPrerelease`.
  */
 export function isPrerelease(version: string): boolean {
   return schemeFor('npm').isPrerelease(version);

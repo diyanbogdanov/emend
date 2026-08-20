@@ -553,8 +553,17 @@ function printScan(
   // from every seam's registry has nothing to count, and a summary that only
   // reports what it found would look identical to one that looked everywhere
   // and found nothing. See languages.ts.
-  for (const ecosystem of ecosystems) {
-    console.log(c.dim(`           ${describeCoverage(ecosystem)}`));
+  //
+  // `counts` belongs to only the first ecosystem here: readRepo (inventory.ts)
+  // analyses just the first claimant of a repository, and `ecosystems` is
+  // built the same way (inventoriesFor, over this same unchanged repoDir), so
+  // index 0 in both is the same ecosystem. A later one was claimed but never
+  // actually read — crediting it with this scan's counts would attribute
+  // packages it never saw to it, the same species of mistake this line exists
+  // to stop making.
+  for (const [index, ecosystem] of ecosystems.entries()) {
+    const analyzed = index === 0 ? counts.packagesAnalyzed : 0;
+    console.log(c.dim(`           ${describeCoverage(ecosystem, analyzed)}`));
   }
 
   if (report.warnings.length > 0) {

@@ -13,8 +13,9 @@
  * npm, pnpm, yarn and bun are all parsed. None of them needs a YAML parser: the facts
  * Emend wants — package name, resolved version — live in the *keys* of these
  * files (`zod@3.25.76:`, `"zod@npm:^3.24.0":`), which are matchable line by
- * line. A real YAML parser would be Emend's first runtime dependency and would
- * buy nothing, since the nested values are exactly the parts not needed here.
+ * line. Pulling in the YAML parser Emend already depends on (specdiff.ts,
+ * for OpenAPI specs) would still buy nothing here, since the nested values
+ * are exactly the parts not needed.
  *
  * Being deliberately shallow has a cost worth stating: these parsers understand
  * the shapes in circulation today and will not silently adapt to a new lockfile
@@ -168,6 +169,13 @@ function parsePnpmLock(raw: string): Map<string, string> {
  * Tracking the most recent header and attaching the next `version` to it handles
  * both, including the multi-descriptor headers yarn emits when several ranges
  * resolve to one package.
+ *
+ * Berry also lists the repository's own packages as descriptors: the
+ * workspace root (`"<repo-name>@workspace:.":`) and every workspace member
+ * (`"pkg-a@workspace:packages/a":`). Neither is an installed dependency —
+ * both are the repo's own code, the same reason npm's parser skips the root
+ * (`installPath === ''`) and workspace symlinks (`link: true`) below — so
+ * both are dropped before they ever reach `versions`.
  */
 function parseYarnLock(raw: string): Map<string, string> {
   const versions = new Map<string, string>();
@@ -192,7 +200,13 @@ function parseYarnLock(raw: string): Map<string, string> {
           // Strip the range, keeping the name: `zod@^3.24.0` and
           // `zod@npm:^3.24.0` both name `zod`.
           const at = d.lastIndexOf('@');
-          return at > 0 ? d.slice(0, at) : d;
+          if (at <= 0) return d;
+          // `pkg-a@workspace:packages/a` (or `<repo-name>@workspace:.` for
+          // the root) names the repository's own code, not a registry
+          // dependency. `''` drops it via the `.filter(Boolean)` below, same
+          // as the `__metadata` block above.
+          if (d.slice(at + 1).startsWith('workspace:')) return '';
+          return d.slice(0, at);
         })
         .filter(Boolean);
       continue;
@@ -264,7 +278,12 @@ export async function readLockfile(repoDir: string): Promise<LockfileResult> {
   try {
     lock = JSON.parse(raw) as NpmLockV3;
   } catch {
-    return empty;
+    // package-lock.json is present but does not parse — truncated, corrupted,
+    // or left with an unresolved merge-conflict marker. That is a different
+    // fact from no lockfile existing at all, and callers (ecosystems.ts,
+    // detectors.ts) tell the two apart by this field, the same way the pnpm,
+    // yarn and bun branches above already do for their own parse failures.
+    return { ...empty, unsupported: 'package-lock.json' };
   }
 
   const versions = new Map<string, string>();

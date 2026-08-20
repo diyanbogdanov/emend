@@ -816,3 +816,119 @@ test('an operator who pins a harness model keeps it, and one who configured noth
     process.env = before;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Self-hosted and custom OpenAI-compatible harness models
+//
+// providers.ts promises a self-hosted vLLM or Ollama endpoint is a first-class
+// option for Emend's own client — no code change, just a different base URL.
+// That was never true for the harness: `--harness=local/some-model` wrote no
+// provider block, so opencode resolved through whatever it had authenticated
+// instead and reported "Model not found". These tests pin down the fix
+// alongside the openrouter behaviour it must leave alone.
+// ---------------------------------------------------------------------------
+
+test('an openrouter pin still gets its own block, unaffected by the self-hosted branch', () => {
+  const config = JSON.parse(
+    openCodeHarness({ model: 'openrouter/z-ai/glm-4.6' }).envFor().OPENCODE_CONFIG_CONTENT ?? '{}',
+  );
+  assert.deepEqual(config.enabled_providers, ['openrouter']);
+  assert.equal(config.model, 'openrouter/z-ai/glm-4.6');
+  assert.deepEqual(config.provider, {
+    openrouter: { options: { apiKey: '{env:OPENROUTER_API_KEY}' } },
+  });
+});
+
+test('a self-hosted harness pin gets an openai-compatible block, and the key stays out of the JSON', () => {
+  const before = { ...process.env };
+  try {
+    process.env.EMEND_LLM_BASE_URL = 'http://127.0.0.1:9931/v1';
+    process.env.EMEND_LLM_API_KEY = 'super-secret-value';
+    delete process.env.EMEND_LLM_PROVIDER;
+
+    const raw =
+      openCodeHarness({ model: 'local/ggml-org/gpt-oss-20b-GGUF:MXFP4' }).envFor()
+        .OPENCODE_CONFIG_CONTENT ?? '{}';
+    // The literal key must never appear in the config text — only the template
+    // opencode substitutes from its own environment does.
+    assert.doesNotMatch(raw, /super-secret-value/);
+
+    const config = JSON.parse(raw);
+    assert.deepEqual(config.enabled_providers, ['local']);
+    assert.equal(config.model, 'local/ggml-org/gpt-oss-20b-GGUF:MXFP4');
+    const provider = config.provider.local;
+    assert.equal(provider.npm, '@ai-sdk/openai-compatible');
+    assert.equal(provider.options.baseURL, 'http://127.0.0.1:9931/v1');
+    assert.equal(provider.options.apiKey, '{env:EMEND_LLM_API_KEY}');
+    // Split on the FIRST slash only: the id keeps its own slash and colon,
+    // intact, as the exact key the model gets looked up under.
+    assert.deepEqual(Object.keys(provider.models), ['ggml-org/gpt-oss-20b-GGUF:MXFP4']);
+  } finally {
+    process.env = before;
+  }
+});
+
+test('a self-hosted pin with no resolvable base URL changes nothing', () => {
+  // Same outcome as an unpinned harness with nothing configured: opencode is
+  // left to resolve `--model` from whatever the operator already has set up,
+  // rather than Emend inventing an endpoint.
+  const before = { ...process.env };
+  try {
+    delete process.env.EMEND_LLM_BASE_URL;
+    delete process.env.EMEND_LLM_PROVIDER;
+    delete process.env.EMEND_LLM_API_KEY;
+
+    const config = JSON.parse(
+      openCodeHarness({ model: 'local/some-model' }).envFor().OPENCODE_CONFIG_CONTENT ?? '{}',
+    );
+    assert.equal(config.enabled_providers, undefined);
+    assert.equal(config.provider, undefined);
+    assert.equal(config.model, undefined);
+  } finally {
+    process.env = before;
+  }
+});
+
+test('a harness pin with no slash names no provider, so it is left for opencode to resolve', () => {
+  // No prefix means no label to build a `provider` entry under. Inventing one
+  // would be exactly the guessed default the base-URL check above already
+  // refuses to make, so a bare model id is passed through unchanged even when
+  // a base URL is otherwise sitting right there.
+  const before = { ...process.env };
+  try {
+    process.env.EMEND_LLM_BASE_URL = 'http://127.0.0.1:9931/v1';
+    process.env.EMEND_LLM_API_KEY = 'local';
+    delete process.env.EMEND_LLM_PROVIDER;
+
+    const config = JSON.parse(
+      openCodeHarness({ model: 'gpt-oss-20b' }).envFor().OPENCODE_CONFIG_CONTENT ?? '{}',
+    );
+    assert.equal(config.enabled_providers, undefined);
+    assert.equal(config.provider, undefined);
+  } finally {
+    process.env = before;
+  }
+});
+
+test('a hosted preset with its own key variable is left alone', () => {
+  // nebius's key lives in NEBIUS_API_KEY first; EMEND_LLM_API_KEY is only its
+  // fallback. Templating `{env:EMEND_LLM_API_KEY}` in regardless would risk
+  // silently sending an empty key if the operator had set only the
+  // preset-specific variable — worse than the plain pass-through this falls
+  // back to.
+  const before = { ...process.env };
+  try {
+    process.env.EMEND_LLM_PROVIDER = 'nebius';
+    process.env.NEBIUS_API_KEY = 'a-real-nebius-key';
+    delete process.env.EMEND_LLM_BASE_URL;
+    delete process.env.EMEND_LLM_API_KEY;
+
+    const config = JSON.parse(
+      openCodeHarness({ model: 'myLabel/some-model' }).envFor().OPENCODE_CONFIG_CONTENT ?? '{}',
+    );
+    assert.equal(config.enabled_providers, undefined);
+    assert.equal(config.provider, undefined);
+  } finally {
+    process.env = before;
+  }
+});

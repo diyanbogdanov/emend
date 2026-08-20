@@ -6,21 +6,48 @@
  * which reads exactly like having checked. An adapter that claims a repository
  * is the only thing that makes it screened, so claiming is the contract.
  *
+ * Two views of "depends on" live here, because two callers need different
+ * answers: `read()` is the whole installed tree, flat, for vulnerability
+ * screening; `declared()` is the direct dependencies with the ranges the
+ * manifest states, for upgrade analysis. `declared()` is what `readRepo`
+ * (inventory.ts) used to answer itself, by reading `package.json` directly and
+ * throwing when absent — the same npm-only gate this module exists to remove,
+ * just on the analysis path rather than the screening one. `inventory.ts` is
+ * now a thin router in front of `declared()` here.
+ *
  * `manifestSites` is here rather than in the detector because pointing at the
  * line that names a package is a fact about the ecosystem's own lockfile, and
  * the detector should not know that npm writes install paths.
  */
 
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, access } from 'node:fs/promises';
 import { readLockfile } from './lockfile.ts';
+import { findWorkspaces } from './workspaces.ts';
+import { pythonInventory } from './python/inventory.ts';
 import type { InstalledPackage } from './osv.ts';
-import type { CallSite } from './types.ts';
+import type { CallSite, InstalledDependency, RepoInfo } from './types.ts';
 
 export interface InventoryResult {
   packages: InstalledPackage[];
   /** A manifest found but not parseable, for an honest warning. Never silent. */
   unsupported: string | null;
+  /**
+   * Why `packages` came back empty despite this ecosystem applying, when that
+   * emptiness is not a fact about the repository. `applies()` can claim a
+   * repository on a manifest alone, with no lockfile requirement — necessary
+   * so a repository before its first install is still recognised — but that
+   * means `read()` can be asked for a tree with nothing to resolve it from.
+   * Reporting `packages: []` alone there is indistinguishable from a
+   * repository that genuinely has nothing installed, and the vulnerability
+   * detector would render it as a clean scan.
+   *
+   * Distinct from `unsupported`: nothing here failed to parse, there was
+   * simply nothing to read. `null` whenever `packages` is a complete answer,
+   * including when it is genuinely empty because the repository declares no
+   * dependencies at all.
+   */
+  incomplete: string | null;
 }
 
 export interface EcosystemInventory {
@@ -31,8 +58,26 @@ export interface EcosystemInventory {
    * first silently wins and the second is never consulted.
    */
   osvEcosystem: string;
+  /**
+   * The manifest filenames this inventory looks for.
+   *
+   * Declared rather than inferred because `applies` is a predicate and cannot be
+   * asked what it examined. It exists so `readRepo` can tell a user what was
+   * actually looked for — naming files no adapter reads would be the "nobody
+   * looked" claim this codebase refuses to make.
+   */
+  manifests: string[];
   applies(repoDir: string): Promise<boolean>;
   read(repoDir: string): Promise<InventoryResult>;
+  /**
+   * Declared direct dependencies, with the ranges the manifest states.
+   *
+   * A different question from `read()`, which returns the whole transitive tree
+   * flat for vulnerability screening. This is the upgrade-analysis view: what the
+   * repository asks for, not everything it ends up with. Both live here because
+   * both are facts about how this ecosystem records dependencies.
+   */
+  declared(repoDir: string): Promise<RepoInfo>;
   /**
    * Where each of these packages is named in the ecosystem's own manifest.
    *
@@ -79,12 +124,75 @@ function lockfileSite(file: string, lockfile: string, installPath: string): Call
   };
 }
 
+interface RepoManifest {
+  name?: string;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  scripts?: Record<string, string>;
+}
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The exact version a package.json specifier names outright, or null if it is
+ * a range, a wildcard, a dist-tag, or not a registry specifier at all.
+ *
+ * A bare `4.17.21`, or the same prefixed with `=` or `v`, names one version
+ * with no resolver involved — the same shapes `resolveRange` (registry.ts)
+ * treats as a pin rather than a comparator. Anchored to the whole trimmed
+ * specifier on purpose: `^4.17.21` and `npm:lodash-es@^4.17.21` both contain
+ * the digits `4.17.21`, but neither *is* that version, so an unanchored
+ * search — which is exactly what `versionFromRange` below does — would
+ * wrongly call both exact.
+ */
+function exactPin(declared: string): string | null {
+  const m = /^(?:=|v)?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(declared.trim());
+  return m?.[1] ?? null;
+}
+
+/**
+ * Best-effort concrete version from a semver range, the fallback when neither
+ * node_modules, the lockfile, nor `exactPin` above answered. Marked distinctly
+ * by the caller so we never imply we read it from disk.
+ */
+function versionFromRange(range: string): string | null {
+  const m = range.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
+  return m?.[1] ?? null;
+}
+
+async function readManifest(file: string): Promise<RepoManifest | null> {
+  try {
+    return JSON.parse(await readFile(file, 'utf8')) as RepoManifest;
+  } catch {
+    return null;
+  }
+}
+
 function npmInventory(): EcosystemInventory {
   return {
     id: 'npm',
     osvEcosystem: 'npm',
+    // What `applies` below actually checks: a bare `package.json`, or any of
+    // the four lockfiles `readLockfile` can parse. `bun.lockb` is excluded on
+    // purpose — `readLockfile` recognises it too, but only to report it as
+    // unsupported; finding it alone (no package.json, no parseable lockfile)
+    // does not make `applies` return true, so it is not actually looked for
+    // in the sense this list promises.
+    manifests: ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock'],
 
     async applies(repoDir) {
+      // A `package.json` alone is enough to have declared dependencies worth
+      // analysing; a lockfile alone is enough to have an installed tree worth
+      // screening. Gating on the lockfile only would stop `readRepo` working for
+      // repositories it handles today.
+      if (await exists(path.join(repoDir, 'package.json'))) return true;
       return (await readLockfile(repoDir)).tree.size > 0;
     },
 
@@ -104,7 +212,210 @@ function npmInventory(): EcosystemInventory {
         seen.add(key);
         packages.push({ name: entry.name, ecosystem: 'npm', version: entry.version });
       }
-      return { packages, unsupported: lock.unsupported };
+
+      // No lockfile of any recognised kind was found — `lock.kind === null`
+      // and it was not even an unsupported one (bun.lockb, or a pnpm/yarn/bun
+      // file that parsed to nothing), so `packages` is empty because there was
+      // nothing to resolve it from, not because this repository has nothing
+      // installed. Re-parse package.json (the same file `applies()` already
+      // required to exist) to tell those two apart: zero declared dependencies
+      // really is a clean, complete answer, but one or more declared
+      // dependencies with no lockfile means real packages went unscreened.
+      // Only the root manifest is consulted — a workspace whose root is empty
+      // but whose sub-packages are not would slip past this, same as it would
+      // slip past any check that stops at `applies()`'s own manifest.
+      let incomplete: string | null = null;
+      if (packages.length === 0 && lock.kind === null && !lock.unsupported) {
+        const manifest = await readManifest(path.join(repoDir, 'package.json'));
+        const declaredCount =
+          Object.keys(manifest?.dependencies ?? {}).length +
+          Object.keys(manifest?.devDependencies ?? {}).length;
+        if (declaredCount > 0) {
+          incomplete =
+            'package.json declares dependencies but no lockfile was found (package-lock.json, ' +
+            'pnpm-lock.yaml, yarn.lock or bun.lock) — commit one so installed versions can be ' +
+            'resolved and screened for vulnerabilities';
+        }
+      }
+
+      return { packages, unsupported: lock.unsupported, incomplete };
+    },
+
+    /**
+     * The version that matters is the concrete one a build would resolve, not
+     * the range in package.json — `"^3.22.0"` tells you nothing about whether
+     * the repo is running 3.22.0 or 3.24.1, and the whole analysis is a diff
+     * against a concrete version. Worse, a range can name a version that was
+     * never published: `"typescript": "^5.7.0"` inferred naively yields 5.7.0,
+     * which does not exist.
+     *
+     * Sources are tried in order of decreasing certainty — node_modules, then
+     * the lockfile, then the manifest specifier itself, which resolves to
+     * `'pinned'` when it names one exact version and `'range'` when it does
+     * not (`exactPin` vs. `versionFromRange` above) — and which one answered
+     * is recorded on each entry so a guess is never reported as a reading.
+     *
+     * Moved here from `inventory.ts`'s `readRepo`. `applies()` now covers
+     * "nothing claims this repository at all" — the router throws for that —
+     * but not "the manifest it found does not parse"; `applies()` checks
+     * existence, never validity, so that failure is still this method's to
+     * report.
+     */
+    async declared(repoDir) {
+      const warnings: string[] = [];
+      const manifestPath = path.join(repoDir, 'package.json');
+
+      // `applies()` only checks that `package.json` exists, never that it
+      // parses — an unresolved merge-conflict marker is an ordinary real-world
+      // state, needing no broken repo, just a bad commit. Re-thrown with the
+      // path so the error names which manifest failed, the same context the
+      // pre-router `readRepo` always gave.
+      let manifest: RepoManifest;
+      try {
+        manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as RepoManifest;
+      } catch (err) {
+        throw new Error(`unreadable package.json at ${manifestPath}: ${(err as Error).message}`);
+      }
+
+      const hasNodeModules = await exists(path.join(repoDir, 'node_modules'));
+      const lock = await readLockfile(repoDir);
+
+      // Every workspace manifest, not just the root. A monorepo root usually
+      // declares a few tooling devDependencies and nothing else; the dependencies
+      // that matter are in packages/*, and reading only the root reports such a
+      // repository as clean.
+      const workspaces = await findWorkspaces(repoDir);
+
+      // Keyed by package name: one dependency can be declared by several
+      // workspaces, and the lockfile resolves it to a single version for all of
+      // them. Merging keeps one finding per package while remembering every
+      // manifest that would need editing to migrate it.
+      const byName = new Map<string, InstalledDependency>();
+
+      for (const workspace of workspaces) {
+        const wsManifest =
+          workspace === ''
+            ? manifest
+            : await readManifest(path.join(repoDir, workspace, 'package.json'));
+        if (!wsManifest) continue;
+
+        const groups: Array<[Record<string, string> | undefined, boolean]> = [
+          [wsManifest.dependencies, false],
+          [wsManifest.devDependencies, true],
+        ];
+
+        for (const [group, dev] of groups) {
+          for (const [name, declared] of Object.entries(group ?? {})) {
+            // Local and git dependencies have no registry version to diff against.
+            // `workspace:*` is how a monorepo references its own packages.
+            if (/^(file:|link:|workspace:|git\+|https?:|catalog:|npm:file)/.test(declared)) continue;
+
+            const existing = byName.get(name);
+            if (existing) {
+              if (!existing.declaredIn.includes(workspace)) existing.declaredIn.push(workspace);
+              // A package needed at runtime anywhere is not a dev dependency.
+              if (!dev) existing.dev = false;
+              continue;
+            }
+
+            // Precedence is by decreasing certainty: what is actually on disk, then
+            // what the lockfile says would be installed, then what the specifier
+            // itself states — exactly, if it names one version, or a guess if not.
+            let installed: string | null = null;
+            let source: InstalledDependency['source'] = 'none';
+
+            if (hasNodeModules) {
+              // Workspaces hoist to the root node_modules; check the workspace's own
+              // first for the cases where a version conflict prevented hoisting.
+              for (const base of workspace === ''
+                ? [repoDir]
+                : [path.join(repoDir, workspace), repoDir]) {
+                try {
+                  const dm = JSON.parse(
+                    await readFile(path.join(base, 'node_modules', name, 'package.json'), 'utf8'),
+                  ) as { version?: string };
+                  if (dm.version) {
+                    installed = dm.version;
+                    source = 'node_modules';
+                    break;
+                  }
+                } catch {
+                  /* try the next location, then the lockfile */
+                }
+              }
+            }
+            if (!installed) {
+              const locked = lock.versions.get(name);
+              if (locked) {
+                installed = locked;
+                source = 'lockfile';
+              }
+            }
+            if (!installed) {
+              // An exact specifier (`"4.17.21"`, `"=4.17.21"`, `"v4.17.21"`) is a
+              // fact the manifest states outright, not an inference — distinct
+              // from `versionFromRange` below, which extracts a version out of a
+              // real range and may name one that was never published. See
+              // `InstalledDependency.source`'s own doc for why this still is not
+              // `'lockfile'`: no resolver walked the graph to produce it.
+              const pin = exactPin(declared);
+              if (pin) {
+                installed = pin;
+                source = 'pinned';
+              } else {
+                installed = versionFromRange(declared);
+                if (installed) source = 'range';
+              }
+            }
+
+            byName.set(name, {
+              name,
+              ecosystem: 'npm',
+              declared,
+              dev,
+              installed,
+              source,
+              declaredIn: [workspace],
+            });
+          }
+        }
+      }
+
+      const dependencies = [...byName.values()];
+      if (workspaces.length > 1) {
+        warnings.push(
+          `workspace repository: read ${workspaces.length} manifests (${workspaces
+            .slice(1, 5)
+            .join(', ')}${workspaces.length > 5 ? ', …' : ''})`,
+        );
+      }
+
+      const guessed = dependencies.filter((d) => d.source === 'range');
+      if (lock.unsupported) {
+        warnings.push(
+          `found ${lock.unsupported}, which Emend could not read — versions for ${guessed.length} package(s) were inferred from package.json ranges and may name versions that were never published. package-lock.json, pnpm-lock.yaml and yarn.lock are supported.`,
+        );
+      } else if (guessed.length > 0) {
+        warnings.push(
+          `no resolved version on disk or in a lockfile for: ${guessed.map((d) => d.name).join(', ')} — inferred from the declared range, which may name a version that was never published.`,
+        );
+      }
+
+      const unresolved = dependencies.filter((d) => d.installed === null);
+      if (unresolved.length > 0) {
+        warnings.push(
+          `could not resolve an installed version for: ${unresolved.map((d) => d.name).join(', ')} — these were skipped, not cleared`,
+        );
+      }
+
+      return {
+        dir: repoDir,
+        name: manifest.name ?? path.basename(repoDir),
+        dependencies,
+        scripts: manifest.scripts ?? {},
+        warnings,
+        workspaces,
+      };
     },
 
     async manifestSites(repoDir, packages) {
@@ -146,9 +457,21 @@ function npmInventory(): EcosystemInventory {
 // Every inventory a repository can be screened against. Registering one here is
 // what makes it screened at all — an ecosystem left out of this array behaves
 // exactly like one that was never written: `applies` finds nothing, the scan
-// reports zero findings, and that reads identically to a clean repository. See
-// the module doc for the bug this array exists to stop from recurring.
-const INVENTORIES: EcosystemInventory[] = [npmInventory()];
+// reports zero findings, and that reads identically to a clean repository.
+// `readRepo` (inventory.ts) walks this same array to route analysis, not just
+// screening — an unregistered ecosystem's repository is not only unscreened,
+// `readRepo` throws for it rather than guessing. See the module doc for the
+// bug this array exists to stop from recurring.
+//
+// Order here does not pick a winner for `inventoriesFor`, which returns every
+// claimant — a polyglot repository is still fully screened regardless of this
+// list's order. It does pick one for `readRepo`, which takes only the first
+// claimant (see that function's own doc for why): with npm first, a
+// repository both npm and Python claim has its declared dependencies read as
+// an npm project. That is a real, not yet demonstrated, gap the moment a
+// polyglot repository needs Python's answer instead — revisit with evidence
+// rather than reordering speculatively.
+const INVENTORIES: EcosystemInventory[] = [npmInventory(), pythonInventory()];
 
 /**
  * Every inventory that claims this repository.
@@ -170,4 +493,16 @@ export async function inventoriesFor(
 /** The inventory that reads this OSV ecosystem, if one is registered. */
 export function inventoryFor(osvEcosystem: string): EcosystemInventory | undefined {
   return INVENTORIES.find((i) => i.osvEcosystem === osvEcosystem);
+}
+
+/**
+ * Every manifest filename any registered inventory looks for.
+ *
+ * For `readRepo`'s "nothing claims this repository" message: derived so it
+ * names exactly what is registered today and extends itself the moment a new
+ * ecosystem does — a list kept by hand next to that message would drift the
+ * first time an adapter landed and nobody remembered to update the string.
+ */
+export function registeredManifests(): string[] {
+  return INVENTORIES.flatMap((i) => i.manifests);
 }

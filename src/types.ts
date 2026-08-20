@@ -323,6 +323,15 @@ export interface VerificationReport {
 /** One dependency as declared and installed in the target repo. */
 export interface InstalledDependency {
   name: string;
+  /**
+   * Which ecosystem this dependency belongs to, as OSV names it: `npm`, `PyPI`.
+   *
+   * Carried on the dependency rather than inferred at each call site, because the
+   * call sites were passing a hardcoded `'npm'` and would keep doing so — and a
+   * TypeScript surface extractor handed a PyPI package returns an empty surface,
+   * which diffs as "nothing changed" and renders as a clean upgrade.
+   */
+  ecosystem: string;
   /** The version actually resolved on disk (from node_modules), when available. */
   installed: string | null;
   /** The range declared in package.json, e.g. "^3.22.0". */
@@ -332,8 +341,24 @@ export interface InstalledDependency {
    * Where `installed` came from. `range` means it was inferred from the declared
    * semver range and may name a version that was never published — callers must
    * not present it as a fact read from the repository.
+   *
+   * `pinned` means the manifest itself named this exact version with no
+   * resolver involved — a `requirements.txt` line pinned with `==`/`===`
+   * (see `python/manifests.ts`), or a `package.json` specifier with no range
+   * operator, like `"4.17.21"` rather than `"^4.17.21"` (see `ecosystems.ts`'s
+   * `exactPin`). Not `range`: nothing was inferred, the manifest states the
+   * version outright. Not `lockfile` either: no resolver walked the whole
+   * dependency graph to produce it, unlike
+   * `uv.lock`/`poetry.lock`/`pdm.lock`/`Pipfile.lock`/`package-lock.json`/
+   * `pnpm-lock.yaml`/`yarn.lock`/`bun.lock`, and both adapters draw that line
+   * deliberately — see their module docs. `resolvedVersions` in `pins.ts`
+   * accepts only `node_modules`/`lockfile` as authoritative enough to
+   * arbitrate a version-pin conflict; `pinned` is deliberately not in that
+   * set, for the same reason `range` is not — a pin is a fact about what the
+   * manifest asks for, not a fact confirmed by resolution, and may name a
+   * version that does not exist or cannot satisfy the rest of the graph.
    */
-  source: 'node_modules' | 'lockfile' | 'range' | 'none';
+  source: 'node_modules' | 'lockfile' | 'range' | 'none' | 'pinned';
   /**
    * Workspace directories whose manifest declares this dependency, relative to
    * the repository root. `''` is the root manifest itself.
@@ -343,6 +368,27 @@ export interface InstalledDependency {
    * add a dependency the repository never had.
    */
   declaredIn: string[];
+}
+
+/**
+ * What a repository declares about itself: name, direct dependencies, scripts.
+ *
+ * Defined here rather than in `inventory.ts`, where it lived until
+ * `EcosystemInventory.declared()` (ecosystems.ts) needed to name it in its own
+ * return type. `inventory.ts` imports `ecosystems.ts` to route `readRepo`
+ * through the registered adapters, so `ecosystems.ts` cannot import this type
+ * back from `inventory.ts` without a cycle — it has to live in the shared
+ * vocabulary instead.
+ */
+export interface RepoInfo {
+  dir: string;
+  name: string;
+  dependencies: InstalledDependency[];
+  scripts: Record<string, string>;
+  /** Non-fatal problems worth telling the user about. */
+  warnings: string[];
+  /** Manifest directories read, relative to the root. `''` is the root. */
+  workspaces: string[];
 }
 
 export type PackageStatus = 'analyzed' | 'unanalyzable' | 'up-to-date' | 'error';

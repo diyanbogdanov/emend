@@ -23,14 +23,13 @@ import {
 } from './detectors.ts';
 import { walkDir } from './callsites.ts';
 import {
-  fetchPackageDir,
   resolveTargetVersion,
   clientFor,
 } from './registry.ts';
-import { compareVersions } from './versions.ts';
+import { schemeFor } from './versions.ts';
 import { extractorFor } from './surface.ts';
 import { diffSurfaces, consumerImpacting } from './diff.ts';
-import { findCallSites } from './callsites.ts';
+import { locateCallSites } from './callsites.ts';
 import { materializeRepoDeps } from './vendor.ts';
 import type {
   ApiSurface,
@@ -161,6 +160,47 @@ function withoutSignatures(surface: ApiSurface): ApiSurface {
   return { ...surface, symbols };
 }
 
+/**
+ * Whether `to` is not a genuine upgrade over `from`, under `ecosystem`'s own
+ * version ordering — Stage 1's gate for skipping a dependency as up-to-date
+ * before spending a registry fetch and a surface diff on it.
+ *
+ * Ecosystem-aware on purpose, not the bare `compareVersions`: PEP 440 ranks
+ * `1.0.post1` strictly above `1.0`, while semver — which the bare wrapper
+ * always applies — sees no `-` in either and calls them equal. A PyPI package
+ * sitting on `1.0` with `1.0.post1` published would be marked up-to-date and
+ * never analysed, silently, if this used the npm-only comparator like every
+ * other ecosystem-blind call in this pipeline used to.
+ *
+ * Exported (only) so a test can hold this gate itself honest, without
+ * standing up a registry fetch to reach it.
+ */
+export function isUpToDate(ecosystem: string, from: string, to: string): boolean {
+  return schemeFor(ecosystem).compare(to, from) <= 0;
+}
+
+/**
+ * The `detector` value a surface-diff finding carries, from the dependency's
+ * own ecosystem rather than a constant `'npm-surface'` — a Python finding
+ * mislabelled `npm-surface` is a wrong answer, even if nothing downstream
+ * currently branches on the exact string (checked: `detector` gates the
+ * `cmdFix` routing and `needsSourceRepair` in fix.ts, but only against the
+ * *other* detectors' own names — `version-pin`, `vulnerability`,
+ * `external-lint`, `freshness`, `http-contract` — so any value here that
+ * avoids colliding with those keeps working exactly as before).
+ *
+ * Lower-cased because OSV spells PyPI with a capital P (`dep.ecosystem`,
+ * types.ts) while every other detector id in this codebase (`version-pin`,
+ * `http-contract`, the pre-existing `npm-surface` itself, ...) is
+ * lower-case kebab-case; `PyPI-surface` would be the one shouting exception.
+ *
+ * Exported (only) so a test can hold this mapping honest, without standing
+ * up a registry fetch to reach it — the same reason `isUpToDate` above is.
+ */
+export function surfaceDetector(ecosystem: string): string {
+  return `${ecosystem.toLowerCase()}-surface`;
+}
+
 interface Analyzed {
   report: PackageReport;
   surface?: ApiSurface;
@@ -233,12 +273,7 @@ export async function scanRepo(
     }
 
     try {
-      // 'npm' is transitional, not an unnoticed assumption: every dependency
-      // reaching this point was read from package.json, so it is genuinely the
-      // only correct ecosystem today. This will read the dependency's actual
-      // ecosystem once dependency inventory is driven per-ecosystem here,
-      // rather than assumed npm.
-      const client = clientFor('npm');
+      const client = clientFor(dep.ecosystem);
       if (!client) {
         return {
           report: {
@@ -248,7 +283,7 @@ export async function scanRepo(
             toVersion: null,
             findings: [],
             unlocatedBreaking: 0,
-            note: `no registry client claims ecosystem 'npm'`,
+            note: `no registry client claims ecosystem '${dep.ecosystem}'`,
           },
         };
       }
@@ -271,7 +306,7 @@ export async function scanRepo(
           },
         };
       }
-      const to = pinned ?? resolveTargetVersion(packageVersions);
+      const to = pinned ?? resolveTargetVersion(packageVersions, dep.ecosystem);
       if (!to) {
         return {
           report: {
@@ -285,7 +320,7 @@ export async function scanRepo(
           },
         };
       }
-      if (compareVersions(to, from) <= 0) {
+      if (isUpToDate(dep.ecosystem, from, to)) {
         return {
           report: {
             pkg: dep.name,
@@ -301,12 +336,7 @@ export async function scanRepo(
 
       progress(`  ${dep.name}: ${from} -> ${to}`);
 
-      // 'npm' is transitional, not an unnoticed assumption: every dependency
-      // reaching this point was read from package.json, so it is genuinely the
-      // only correct ecosystem today. This will read the dependency's actual
-      // ecosystem once dependency inventory is driven per-ecosystem here,
-      // rather than assumed npm.
-      const extractor = extractorFor('npm');
+      const extractor = extractorFor(dep.ecosystem);
       if (!extractor) {
         // No registered extractor is not "nothing changed" — an empty surface
         // would diff that way. It is "nobody looked", which is what
@@ -324,9 +354,13 @@ export async function scanRepo(
         };
       }
 
+      // client.fetch, not the npm-only fetchPackageDir free function: this
+      // must download through the same client whose .versions() just answered
+      // for dep.ecosystem, or a PyPI package would ask npm's registry for a
+      // tarball that was never published there.
       const [fromDir, toDir] = await Promise.all([
-        fetchPackageDir(dep.name, from),
-        fetchPackageDir(dep.name, to),
+        client.fetch(dep.name, from),
+        client.fetch(dep.name, to),
       ]);
       const [fromSurface, toSurface] = await Promise.all([
         extractor.extract(fromDir, dep.name, from),
@@ -389,9 +423,24 @@ export async function scanRepo(
     }
   });
 
-  // Stage 2: one TypeScript program over the repo, resolving every package at once.
+  // Stage 2: locate call sites, dispatched per ecosystem through the
+  // `CallSiteResolver` seam (callsites.ts). The TypeScript resolver can never
+  // see a `.py` file and the Python resolver can never see a `.ts` one, so a
+  // repository tracking packages from more than one ecosystem needs each
+  // resolver run against its own packages, through `locateCallSites`, rather
+  // than one resolver called on everything.
+  //
+  // Keyed by bare package name, which presumes every entry in `deps` shares
+  // one ecosystem — true only because readRepo (inventory.ts) returns just its
+  // first claimant's dependencies ("The first claimant, deliberately", there).
+  // Two ecosystems declaring the same name here would overwrite one entry
+  // with the other's, reporting one package's breaking changes against the
+  // other's source. Guarded by "readRepo returns dependencies from a single
+  // ecosystem..." in test/ecosystems.test.ts.
   const surfaces = new Map<string, ApiSurface>();
   const wanted = new Map<string, Set<string>>();
+  const ecosystemOf = new Map<string, string>();
+  for (const d of deps) ecosystemOf.set(d.name, d.ecosystem);
   for (const a of analyzed) {
     if (a.surface && a.impacting && a.impacting.length > 0) {
       surfaces.set(a.report.pkg, a.surface);
@@ -402,7 +451,7 @@ export async function scanRepo(
   let callSiteCount = 0;
   if (surfaces.size > 0) {
     progress(`locating call sites across ${surfaces.size} package(s)`);
-    const index = findCallSites(repoDir, surfaces, wanted);
+    const index = await locateCallSites(repoDir, surfaces, wanted, ecosystemOf);
     warnings.push(...index.warnings);
     progress(`  analyzed ${index.filesAnalyzed} source file(s)`);
 
@@ -410,6 +459,10 @@ export async function scanRepo(
       if (!a.impacting) continue;
       const bucket = index.byPackage.get(a.report.pkg);
       if (!bucket) continue;
+      // Falls back to npm only for a pairing that should be impossible:
+      // `ecosystemOf` is built from the same `deps` that produced `analyzed`,
+      // so every `a.report.pkg` is a name it already carries an entry for.
+      const detector = surfaceDetector(ecosystemOf.get(a.report.pkg) ?? 'npm');
 
       const findings: Finding[] = [];
       let unlocated = 0;
@@ -422,7 +475,7 @@ export async function scanRepo(
         callSiteCount += sites.length;
         findings.push({
           id: findingId(a.report.pkg, a.report.fromVersion ?? '', a.report.toVersion ?? '', change),
-          detector: 'npm-surface',
+          detector,
           pkg: a.report.pkg,
           fromVersion: a.report.fromVersion ?? '',
           toVersion: a.report.toVersion ?? '',
@@ -453,9 +506,12 @@ export async function scanRepo(
   // of "does this repository still work", and a detector cannot be offered files
   // the walk never collected — `--lint` silently found nothing until this list
   // included them. `walkDir` matches by suffix, so a bare `Dockerfile` is named
-  // in full and `api.Dockerfile` matches the same entry.
+  // in full and `api.Dockerfile` matches the same entry. `.py`/`.pyi` are the
+  // same fix for the same bug: without them, no Python file ever reached a
+  // detector, no matter what `python/callsites.ts` could find in one.
   const walked = walkDir(repoDir, [
     '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',
+    '.py', '.pyi',
     '.sh', '.bash', 'Dockerfile', 'Containerfile',
   ]).map((f) => path.relative(repoDir, f));
 

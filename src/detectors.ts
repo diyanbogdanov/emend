@@ -587,6 +587,13 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
         if (result.unsupported) {
           notes.push(`${result.unsupported} could not be read, so its packages were not checked`);
         }
+        // Distinct from `unsupported`: nothing failed to parse, there was
+        // nothing to resolve a tree from. Said here rather than left to the
+        // `packages.length === 0` return below, so it survives even when
+        // another claiming inventory did contribute packages of its own.
+        if (result.incomplete) {
+          notes.push(result.incomplete);
+        }
         packages.push(...result.packages);
       }
       if (packages.length === 0) return { findings: [], notes };

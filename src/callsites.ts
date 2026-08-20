@@ -12,6 +12,7 @@
 import path from 'node:path';
 import ts from 'typescript';
 import type { ApiSurface, CallSite } from './types.ts';
+import { findPythonCallSites } from './python/callsites.ts';
 
 /**
  * Source files admitted to the TypeScript program.
@@ -125,9 +126,42 @@ export function buildProgram(
   return ts.createProgram(fileNames, options);
 }
 
+/**
+ * Skipped by name and never descended into — a stronger exclusion than
+ * `isVendored` (python/callsites.ts) applies for Python call-site search,
+ * which still visits a vendored directory's files one by one and filters
+ * them out after the fact. This list answers a different question — "don't
+ * collect this at all" versus "don't search this for call sites" — for
+ * every caller of this shared, language-agnostic walk, not just Python's.
+ *
+ * A second list rather than an import of `VENDORED_DIR`: the two happen to
+ * share most of their names today, but nothing here needs to be
+ * Python-aware, and coupling this walk to a Python-specific module just to
+ * avoid repeating seven short strings is not a trade worth making.
+ *
+ * `.venv`, `venv`, `__pycache__`, `site-packages`, `.tox`, `.nox` and `envs`
+ * carry the same names and the same reasoning as `VENDORED_DIR` — see its
+ * comment. `env` is excluded from this blind list for the same reason it is
+ * excluded there: it is a plausible real source directory name, so the walk
+ * below only skips it when a sibling `pyvenv.cfg` actually marks it as a
+ * virtual environment.
+ */
+const VENDORED_DIR_NAMES = [
+  '.venv',
+  'venv',
+  '__pycache__',
+  'site-packages',
+  '.tox',
+  '.nox',
+  'envs',
+];
+
 export function walkDir(dir: string, exts: string[]): string[] {
   const out: string[] = [];
-  const skip = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', 'out']);
+  const skip = new Set([
+    'node_modules', '.git', 'dist', 'build', 'coverage', '.next', 'out',
+    ...VENDORED_DIR_NAMES,
+  ]);
   const stack = [dir];
   while (stack.length > 0) {
     const current = stack.pop();
@@ -146,7 +180,11 @@ export function walkDir(dir: string, exts: string[]): string[] {
     // readDirectory with depth 1 returns files only; recurse into subdirectories.
     try {
       for (const sub of ts.sys.getDirectories(current)) {
-        if (skip.has(sub)) continue;
+        if (sub === 'env') {
+          if (ts.sys.fileExists(path.join(current, sub, 'pyvenv.cfg'))) continue;
+        } else if (skip.has(sub)) {
+          continue;
+        }
         stack.push(path.join(current, sub));
       }
     } catch {
@@ -399,15 +437,30 @@ export interface CallSiteResolver {
   ecosystems: string[];
   /** Whether this resolver can parse `file` well enough to search it. */
   handles(file: string): boolean;
-  /** Where `repoDir` calls the tracked symbols of `surfaces`, narrowed to `wanted`. */
+  /**
+   * Where `repoDir` calls the tracked symbols of `surfaces`, narrowed to
+   * `wanted`.
+   *
+   * Returns a bare `CallSiteIndex` or a `Promise` of one: the TypeScript
+   * resolver builds its whole program synchronously and returns directly;
+   * the Python resolver (`python/callsites.ts`) cannot — its parser loads a
+   * WASM grammar, and `web-tree-sitter` only offers an async API for that —
+   * so forcing one shape onto the other would mean either wrapping every
+   * synchronous call in a needless `Promise.resolve`, or blocking Python's
+   * parser on a synchronous load it cannot do. `locateCallSites` (below) is
+   * the caller: it dispatches per ecosystem through `resolverForEcosystem`
+   * and `await`s every resolver's `find` uniformly, which resolves either
+   * kind alike.
+   */
   find(
     repoDir: string,
     surfaces: Map<string, ApiSurface>,
     wanted: Map<string, Set<string>>,
-  ): CallSiteIndex;
+  ): CallSiteIndex | Promise<CallSiteIndex>;
 }
 
 const TS_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+const PY_EXTENSIONS = ['.py', '.pyi'];
 
 // Every language a repository's call sites can be searched in. Registering one
 // here is what makes a language searchable at all — leaving one out is not a
@@ -422,6 +475,12 @@ const RESOLVERS: CallSiteResolver[] = [
     ecosystems: ['npm'],
     handles: (file) => TS_EXTENSIONS.some((ext) => file.endsWith(ext)),
     find: findCallSites,
+  },
+  {
+    id: 'python',
+    ecosystems: ['PyPI'],
+    handles: (file) => PY_EXTENSIONS.some((ext) => file.endsWith(ext)),
+    find: findPythonCallSites,
   },
 ];
 
@@ -444,8 +503,84 @@ export function resolverFor(file: string): CallSiteResolver | undefined {
  * file", routed by extension, for a file that is actually on disk. This one
  * asks "do you serve this ecosystem at all", with neither a file nor a
  * repository in hand — which is what `capabilitiesFor` (languages.ts) needs
- * answered to report coverage before, or instead of, running a scan.
+ * answered to report coverage before, or instead of, running a scan, and what
+ * `locateCallSites` (below) needs to route each tracked package to the
+ * resolver that can actually read its files.
  */
 export function resolverForEcosystem(ecosystem: string): CallSiteResolver | undefined {
   return RESOLVERS.find((r) => r.ecosystems.includes(ecosystem));
+}
+
+/**
+ * Locates call sites for every tracked package, dispatched through each
+ * package's own ecosystem resolver (`resolverForEcosystem`) and merged into
+ * one index. This is the scan pipeline's actual entry point into the
+ * `CallSiteResolver` seam above — `analyze.ts` calls this, never a single
+ * resolver directly, which is what makes registering a resolver in
+ * `RESOLVERS` load-bearing rather than decorative.
+ *
+ * A single resolver cannot serve two languages: the TypeScript resolver
+ * builds a `ts.Program` and can never see a `.py` file; the Python resolver
+ * walks `.py`/`.pyi` files and can never see a `.ts` one. Calling one
+ * resolver on every tracked package regardless of ecosystem is not a partial
+ * answer, it is a wrong one — every package outside that resolver's own
+ * ecosystem silently gets zero call sites, which reads as "not called from
+ * this repository" when the truth is "never searched at all".
+ *
+ * `ecosystemOf` supplies the fact `surfaces`/`wanted` do not carry
+ * themselves — both are keyed by package name alone, the shape every
+ * `CallSiteResolver.find` accepts, so the ecosystem has to travel beside
+ * them rather than inside them.
+ *
+ * The merge stays honest in both directions a careless one could hide:
+ * `filesAnalyzed` is the sum across every resolver that ran — a `.ts` file
+ * and a `.py` file are disjoint sets, so summing double-counts nothing —
+ * and `warnings` is the concatenation of every resolver's own warnings,
+ * because dropping one resolver's warnings here would hide exactly the
+ * coverage gaps this codebase exists to report. A package whose ecosystem no
+ * resolver claims is not silently dropped either: it is named in its own
+ * warning and still gets an (empty) bucket, so its impacting changes count
+ * as unlocated rather than vanishing into a false "clean".
+ */
+export async function locateCallSites(
+  repoDir: string,
+  surfaces: Map<string, ApiSurface>,
+  wanted: Map<string, Set<string>>,
+  ecosystemOf: Map<string, string>,
+): Promise<CallSiteIndex> {
+  const byPackage = new Map<string, Map<string, CallSite[]>>();
+  const warnings: string[] = [];
+  let filesAnalyzed = 0;
+
+  const groups = new Map<string, { surfaces: Map<string, ApiSurface>; wanted: Map<string, Set<string>> }>();
+  for (const [pkg, surface] of surfaces) {
+    const ecosystem = ecosystemOf.get(pkg) ?? '';
+    let group = groups.get(ecosystem);
+    if (!group) {
+      group = { surfaces: new Map(), wanted: new Map() };
+      groups.set(ecosystem, group);
+    }
+    group.surfaces.set(pkg, surface);
+    const w = wanted.get(pkg);
+    if (w) group.wanted.set(pkg, w);
+  }
+
+  for (const [ecosystem, group] of groups) {
+    const resolver = resolverForEcosystem(ecosystem);
+    if (!resolver) {
+      const pkgs = [...group.surfaces.keys()];
+      warnings.push(
+        `no call-site resolver claims ecosystem '${ecosystem || '(unknown)'}'; ` +
+          `${pkgs.length} package(s) (${pkgs.join(', ')}) were not searched for call sites`,
+      );
+      for (const pkg of pkgs) byPackage.set(pkg, new Map());
+      continue;
+    }
+    const index = await resolver.find(repoDir, group.surfaces, group.wanted);
+    filesAnalyzed += index.filesAnalyzed;
+    warnings.push(...index.warnings);
+    for (const [pkg, bucket] of index.byPackage) byPackage.set(pkg, bucket);
+  }
+
+  return { byPackage, filesAnalyzed, warnings };
 }

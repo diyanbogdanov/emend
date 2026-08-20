@@ -12,7 +12,7 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 
 import path from 'node:path';
-import { fetchPackageDir } from './registry.ts';
+import { clientFor } from './registry.ts';
 import { extractorFor } from './surface.ts';
 import { planFinding } from './plan.ts';
 import { findWorkspaces } from './workspaces.ts';
@@ -472,24 +472,35 @@ async function reviewMigration(
  * set of symbols in the new version to find a replacement. Tarballs are cached,
  * so recomputing is cheaper and less error-prone than persisting a large
  * denormalised blob alongside every finding.
+ *
+ * Takes `repoDir` rather than reading ecosystem off `finding` itself: a finding
+ * is planned long after the scan that produced it — every caller here loads it
+ * back out of the store (`emend pr`'s `stored.finding`, the MCP `fix_package`
+ * tool's `findingById`) — so carrying ecosystem on `Finding` would mean every
+ * finding already on disk from before this field existed comes back
+ * `undefined`. Re-deriving it from the repository costs one local read, no
+ * network, and gives the same answer analyze.ts got for this same package
+ * during the scan.
  */
-async function targetSymbols(finding: Finding): Promise<Record<string, ApiSymbol>> {
-  const toDir = await fetchPackageDir(finding.pkg, finding.toVersion);
-  // 'npm' is transitional, not an unnoticed assumption: a finding only exists
-  // because analyze.ts already extracted this package's surface, so npm is
-  // genuinely the only correct ecosystem today. This will read the finding's
-  // actual ecosystem once dependency inventory is driven per-ecosystem here,
-  // rather than assumed npm.
-  const extractor = extractorFor('npm');
-  if (!extractor) {
+async function targetSymbols(repoDir: string, finding: Finding): Promise<Record<string, ApiSymbol>> {
+  const repo = await readRepo(repoDir);
+  const ecosystem = repo.dependencies.find((d) => d.name === finding.pkg)?.ecosystem;
+  const client = ecosystem ? clientFor(ecosystem) : undefined;
+  const extractor = ecosystem ? extractorFor(ecosystem) : undefined;
+  if (!client || !extractor) {
     // Silently returning {} would read as "the target version exports
     // nothing" rather than "nothing was checked" — every finding below would
     // then look deterministically unplannable, for a reason invisible to
     // whoever reads the result. Throwing matches this file's other
     // precondition failure (fixPackage's missing-finding check, further
     // down): fail loud rather than launder an unknown into an answer.
-    throw new Error(`no surface extractor recognises 'npm' for ${finding.pkg}`);
+    throw new Error(
+      ecosystem
+        ? `no registry client or surface extractor recognises ecosystem '${ecosystem}' for ${finding.pkg}`
+        : `${finding.pkg} is not among ${repoDir}'s known dependencies — its ecosystem could not be determined`,
+    );
   }
+  const toDir = await client.fetch(finding.pkg, finding.toVersion);
   const toSurface = await extractor.extract(toDir, finding.pkg, finding.toVersion);
   return toSurface.symbols;
 }
@@ -693,7 +704,7 @@ export async function fixPackage(
   const fromVersion = first.fromVersion;
 
   progress(`planning ${findings.length} finding(s) for ${pkg}`);
-  const toSymbols = await targetSymbols(first);
+  const toSymbols = await targetSymbols(repoDir, first);
 
   const planned: Array<{ finding: Finding; plan: MigrationPlan }> = [];
   const unplanned: Finding[] = [];

@@ -12,6 +12,7 @@ import path from 'node:path';
 import ts from 'typescript';
 import type { ApiSurface, ApiSymbol, SymbolKind, TypeParam } from './types.ts';
 import { materializeTypeDeps } from './typescript/typedeps.ts';
+import { extractPythonSurface } from './python/surface.ts';
 
 /**
  * Bounds on the walk.
@@ -856,6 +857,7 @@ export interface SurfaceExtractor {
 // `unanalyzable` rather than an extractor that quietly hands back an empty,
 // "nothing changed" surface.
 const EXTRACTORS: SurfaceExtractor[] = [
+  { id: 'python', handles: (eco) => eco === 'PyPI', extract: extractPythonSurface },
   { id: 'typescript', handles: (eco) => eco === 'npm', extract: extractSurface },
 ];
 
