@@ -529,10 +529,15 @@ export async function scanRepo(
   // `breaking`, and counting only the packages would have left it out of the one
   // line of a scan anybody reads.
   //
-  // Every class is counted separately; which counts reach the `N breaking · M
-  // deprecated` headline is the renderer's decision, and `inHeadline` in
-  // freshness.ts writes that rule down. Keep the two in agreement when adding a
-  // severity — a new class stays out of the headline by default.
+  // One number per severity, because every class added since — drift,
+  // vulnerability, lint, freshness — is real and is not an API break, and each
+  // gets its own line rather than being folded into somebody else's.
+  //
+  // Which of them reaches the `N breaking · M deprecated` headline is not
+  // decided here: `inHeadline` in freshness.ts writes that rule down, and
+  // `SUMMARY_CLASSES` in cli.ts is what asks it. There is no longer a pair to
+  // keep in agreement by hand — a class added to that table without a headline
+  // severity lands below the fold, and one left out of it is not shown at all.
   const allFindings = packages.flatMap((p) => p.findings);
   const breaking = allFindings.filter((f) => f.change.severity === 'breaking').length;
   const deprecation = allFindings.filter((f) => f.change.severity === 'deprecation').length;
