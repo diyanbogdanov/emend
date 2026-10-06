@@ -21,11 +21,17 @@ const fixture = (name: string): string =>
 //   Pipfile.lock  pypa/pipenv @ 96e6b19 (main), Pipenv dogfooding itself —
 //                 10 default + 100 develop packages.
 //
-// All four fetched 2026-08-19 from raw.githubusercontent.com. requirements.txt
-// has no fixture file: its tests below use inline text, matching how simple
-// and unambiguous the line-oriented format already is — the risk this task
-// exists to catch is TOML block-boundary tracking against real formatting,
-// which requirements.txt has none of.
+// All four fetched 2026-08-19 from raw.githubusercontent.com.
+//
+//   requirements-hashed.txt
+//                 tern-tools/tern @ 19c7e51, docs/releases/v2_8_0-requirements.txt
+//                 — real `pip-compile --generate-hashes` output, 23 pins. Fetched
+//                 2026-10-06.
+//
+// requirements.txt was once thought to need no fixture, being line-oriented
+// with no block boundaries to track. Hashed output disproved that: every pin
+// continues across `\`-terminated lines, which is structure a line-at-a-time
+// reading gets wrong. The simpler cases below still use inline text.
 
 test('uv.lock yields resolved versions', () => {
   const parsed = readPythonManifest('uv.lock', fixture('uv.lock'));
@@ -239,4 +245,29 @@ test('a subtable that writes its own name/version pair is not read as a package'
       ['beta', '2.0.0'],
     ],
   );
+});
+
+test('pip-compile --generate-hashes output reads every pin without its continuation or hashes', () => {
+  // Each pin ends in `\` and continues across `--hash` lines. Read a line at a
+  // time, the version came back as `1.26.7 \` — and OSV, asked about that
+  // string, matched every advisory urllib3 has ever had, fixed or not.
+  const parsed = readPythonManifest('requirements.txt', fixture('requirements-hashed.txt'));
+  assert.equal(parsed.versions.size, 23);
+  assert.equal(parsed.versions.get('urllib3'), '1.26.7');
+  assert.equal(parsed.versions.get('typing-extensions'), '3.10.0.2');
+  for (const [name, version] of parsed.versions) {
+    assert.match(version, /^[0-9][0-9A-Za-z.!+_-]*$/, `${name} read as ${JSON.stringify(version)}`);
+  }
+  assert.equal(parsed.declared.size, 0);
+});
+
+test('a hash on the pin’s own line is an option, not part of the version', () => {
+  // pip stops reading a requirement at the first token that starts with `-`,
+  // and joins a `\`-terminated line with the next whatever the line ending.
+  const parsed = readPythonManifest(
+    'requirements.txt',
+    'urllib3==1.26.5 --hash=sha256:abc\r\ncertifi==2024.2.2 \\\r\n    --hash=sha256:def\r\n',
+  );
+  assert.equal(parsed.versions.get('urllib3'), '1.26.5');
+  assert.equal(parsed.versions.get('certifi'), '2024.2.2');
 });

@@ -264,7 +264,13 @@ function parseRequirementsTxt(text: string): ParsedRequirements {
   const versions = new Map<string, string>();
   const declared = new Map<string, string>();
 
-  for (const raw of text.split('\n')) {
+  // pip joins a line ending in `\` with the next before reading it, and
+  // `pip-compile --generate-hashes` writes every pin that way, continued across
+  // its `--hash` lines. Read a line at a time, the pin kept the `\` as part of
+  // its version, and OSV matched every advisory against that string.
+  const joined = text.replace(/\\\r?\n/g, ' ');
+
+  for (const raw of joined.split('\n')) {
     // Stripping an inline comment first handles a full-line comment
     // (`# pinned for CI` becomes `''`) and a trailing one (`jinja2>=3.1.0  #
     // why` becomes `jinja2>=3.1.0`) with the same rule: '#' cannot appear in a
@@ -279,7 +285,15 @@ function parseRequirementsTxt(text: string): ParsedRequirements {
     // would put a nonsense entry into a vulnerability query.
     if (line.startsWith('-')) continue;
 
-    const beforeMarker = (line.split(';')[0] ?? '').trim();
+    // Per-requirement options follow the requirement on its own line
+    // (`urllib3==1.26.5 --hash=sha256:…`). pip stops reading the requirement at
+    // the first whitespace-separated token that starts with `-`, and so does
+    // this — no specifier, extra or marker begins one.
+    const tokens = line.split(/\s+/);
+    const optionAt = tokens.findIndex((t) => t.startsWith('-'));
+    const requirement = (optionAt === -1 ? tokens : tokens.slice(0, optionAt)).join(' ');
+
+    const beforeMarker = (requirement.split(';')[0] ?? '').trim();
     if (beforeMarker === '') continue;
 
     const match = REQUIREMENT_RE.exec(beforeMarker);
