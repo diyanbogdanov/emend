@@ -33,7 +33,10 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Node, Tree } from 'web-tree-sitter';
 import { parsePython } from './parser.ts';
-import { walkDir, type CallSiteIndex } from '../callsites.ts';
+import { pythonImportRoots } from './surface.ts';
+import { walkDir, type CallSiteIndex, type ImportSites } from '../callsites.ts';
+import { clientFor } from '../registry.ts';
+import type { InstalledPackage } from '../osv.ts';
 import type { ApiSurface, CallSite } from '../types.ts';
 
 const PY_EXTENSIONS = ['.py', '.pyi'];
@@ -383,4 +386,94 @@ export async function findPythonCallSites(
   }
 
   return { byPackage, filesAnalyzed, warnings };
+}
+
+/** Every module path one file's import statements name, where each statement sits. */
+function importStatements(root: Node, source: string, file: string): { module: string; site: CallSite }[] {
+  const lines = source.split('\n');
+  const found: { module: string; site: CallSite }[] = [];
+  const add = (module: string, at: Node): void => {
+    const { row, column } = at.startPosition;
+    found.push({
+      module,
+      site: { file, line: row + 1, column: column + 1, text: (lines[row] ?? '').trim().slice(0, 120), via: 'import' },
+    });
+  };
+  const visit = (node: Node): void => {
+    if (node.type === 'import_statement') {
+      for (const child of node.namedChildren) {
+        const module = child.type === 'aliased_import' ? child.childForFieldName('name')?.text : child.type === 'dotted_name' ? child.text : undefined;
+        if (module) add(module, node);
+      }
+    } else if (node.type === 'import_from_statement') {
+      // Relative imports name this repository's own modules — see collectImports.
+      const moduleNode = node.childForFieldName('module_name');
+      if (moduleNode?.type === 'dotted_name') add(moduleNode.text, node);
+    }
+    for (const child of node.namedChildren) visit(child);
+  };
+  visit(root);
+  return found;
+}
+
+/**
+ * `CallSiteResolver.importSites` for Python: where this repository imports each
+ * of `packages`, for the vulnerability detector's "is it used here at all".
+ *
+ * A package's import names come from its wheel (`importRoots`), since PyPI
+ * names distributions and code imports modules. A package whose wheel cannot
+ * be read, or ships no modules, is `unchecked` with the reason — never an empty
+ * list of sites, which would say every file was read and none imported it. So
+ * is every package still without a site when a file could not be parsed.
+ */
+export async function findPythonImportSites(
+  files: string[],
+  read: (file: string) => Promise<string | null>,
+  packages: InstalledPackage[],
+): Promise<ImportSites> {
+  const sites = new Map<string, CallSite[]>();
+  const unchecked = new Map<string, string>();
+  const roots = new Map<string, string[]>();
+  const client = clientFor('PyPI');
+
+  for (const pkg of packages) {
+    try {
+      if (!client) throw new Error('no PyPI client is registered');
+      const found = await pythonImportRoots(await client.fetch(pkg.name, pkg.version));
+      if (found.length === 0) throw new Error(`${pkg.name} ${pkg.version} ships no Python modules to look for`);
+      roots.set(pkg.name, found);
+      sites.set(pkg.name, []);
+    } catch (err) {
+      unchecked.set(pkg.name, `its import names could not be read: ${(err as Error).message}`);
+    }
+  }
+  if (roots.size === 0) return { sites, unchecked };
+
+  let unparsed = 0;
+  for (const file of files) {
+    if (!PY_EXTENSIONS.some((ext) => file.endsWith(ext))) continue;
+    const source = await read(file);
+    if (source === null) continue;
+    let tree: Tree;
+    try {
+      tree = await parsePython(source);
+    } catch {
+      unparsed++;
+      continue;
+    }
+    for (const { module, site } of importStatements(tree.rootNode, source, file)) {
+      for (const [name, pkgRoots] of roots) {
+        if (belongsToPackage(module, pkgRoots)) sites.get(name)?.push(site);
+      }
+    }
+  }
+
+  if (unparsed > 0) {
+    for (const [name, found] of sites) {
+      if (found.length > 0) continue;
+      sites.delete(name);
+      unchecked.set(name, `${unparsed} Python file(s) could not be parsed`);
+    }
+  }
+  return { sites, unchecked };
 }

@@ -94,6 +94,11 @@ export async function extractPythonSurface(
   return surfaceFromSource(pkg, version, files);
 }
 
+/** The module paths an already-downloaded package is imported by — see `importRoots`. */
+export async function pythonImportRoots(pkgDir: string): Promise<string[]> {
+  return importRoots(await collectPySources(pkgDir));
+}
+
 /**
  * Does the actual extraction work, from an in-memory path -> source map
  * rather than a directory — exported so it can be tested without downloading

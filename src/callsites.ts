@@ -12,7 +12,8 @@
 import path from 'node:path';
 import ts from 'typescript';
 import type { ApiSurface, CallSite } from './types.ts';
-import { findPythonCallSites } from './python/callsites.ts';
+import type { InstalledPackage } from './osv.ts';
+import { findPythonCallSites, findPythonImportSites } from './python/callsites.ts';
 
 /**
  * Source files admitted to the TypeScript program.
@@ -457,6 +458,32 @@ export interface CallSiteResolver {
     surfaces: Map<string, ApiSurface>,
     wanted: Map<string, Set<string>>,
   ): CallSiteIndex | Promise<CallSiteIndex>;
+  /**
+   * Where the repository imports each of `packages` — the vulnerability
+   * detector's question, whether a package is used here at all, rather than
+   * `find`'s, whether a symbol is called.
+   *
+   * Optional: npm's answer predates this seam and lives in detectors.ts
+   * (`indexImports`), where an import specifier is the package's own name. A
+   * resolver implements this when that does not hold — PyYAML is `import yaml`.
+   */
+  importSites?(
+    files: string[],
+    read: (file: string) => Promise<string | null>,
+    packages: InstalledPackage[],
+  ): Promise<ImportSites>;
+}
+
+/** What `CallSiteResolver.importSites` found. */
+export interface ImportSites {
+  /** Package name -> where it is imported. An empty list is "read every file, found no import". */
+  sites: Map<string, CallSite[]>;
+  /**
+   * Package name -> why its imports could not be looked for. Kept apart from
+   * `sites` because an empty list there is a claim — "not imported" — and
+   * nobody looked for these.
+   */
+  unchecked: Map<string, string>;
 }
 
 const TS_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
@@ -481,6 +508,7 @@ const RESOLVERS: CallSiteResolver[] = [
     ecosystems: ['PyPI'],
     handles: (file) => PY_EXTENSIONS.some((ext) => file.endsWith(ext)),
     find: findPythonCallSites,
+    importSites: findPythonImportSites,
   },
 ];
 

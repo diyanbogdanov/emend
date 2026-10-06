@@ -17,7 +17,7 @@ import { createHash } from 'node:crypto';
 import ts from 'typescript';
 import { inventoriesFor, type EcosystemInventory } from './ecosystems.ts';
 import { diffSpecs } from './specdiff.ts';
-import { packageOfSpecifier } from './callsites.ts';
+import { packageOfSpecifier, resolverForEcosystem, type ImportSites } from './callsites.ts';
 import { remediationTarget, type InstalledPackage, type VulnerablePackage } from './osv.ts';
 import { ordinal, rankVulnerable, type AdvisoryFacts } from './advisory.ts';
 import type { LintAdapter } from './lint.ts';
@@ -622,8 +622,19 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
       }
       const ordered = facts.size > 0 ? rankVulnerable(vulnerable, facts) : vulnerable;
 
-      // One pass over the source tree, then a lookup per package.
+      // One pass over the source tree, then a lookup per package — for npm,
+      // whose import specifier is the package's own name. An ecosystem whose
+      // resolver can say where its packages are imported is asked instead:
+      // reading only JavaScript imports called every Python package
+      // unimported, on a repository whose own code said `import yaml`.
       const imports = await indexImports(ctx.sourceFiles, ctx.read);
+      const asked = new Map<string, ImportSites>();
+      for (const ecosystem of new Set(ordered.map((p) => p.ecosystem))) {
+        const resolver = resolverForEcosystem(ecosystem);
+        if (!resolver?.importSites) continue;
+        const owned = ordered.filter((p) => p.ecosystem === ecosystem);
+        asked.set(ecosystem, await resolver.importSites(ctx.sourceFiles, ctx.read, owned));
+      }
 
       // One manifest parse per claiming inventory, not one per non-imported
       // package: manifestSites re-reads and re-parses a whole lockfile, and
@@ -645,7 +656,9 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
       for (const pkg of ordered) {
         const target = remediationTarget(pkg);
 
-        const sites: CallSite[] = [...(imports.get(pkg.name) ?? [])];
+        const answer = asked.get(pkg.ecosystem);
+        const unchecked = answer?.unchecked.get(pkg.name);
+        const sites: CallSite[] = [...((answer ? answer.sites.get(pkg.name) : imports.get(pkg.name)) ?? [])];
         const imported = sites.length > 0;
         if (!imported) {
           // Absent when no registered inventory understands this package's
@@ -660,9 +673,13 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
         // Deduplicated: separate advisories routinely alias the same CVE, and
         // listing it twice reads as two problems.
         const named = [...new Set(pkg.vulnerabilities.map((v) => v.cve ?? v.id))].join(', ');
+        // "Not imported" is a claim, and only made when the imports were read:
+        // a package whose import names are unknown was never looked for.
         const reach = imported
           ? `imported at ${sites.length} site(s) in this repository`
-          : 'not imported from this repository’s source — it runs because a dependency calls it';
+          : unchecked !== undefined
+            ? `whether this repository imports it could not be checked — ${unchecked}`
+            : 'not imported from this repository’s source — it runs because a dependency calls it';
         const leaves =
           target.leaves.length > 0
             ? ` ${target.leaves.length} has no published fix and survives the upgrade: ${target.leaves.join(', ')}.`
