@@ -529,15 +529,20 @@ export async function scanRepo(
   // `breaking`, and counting only the packages would have left it out of the one
   // line of a scan anybody reads.
   //
-  // One number per severity, because every class added since — drift,
-  // vulnerability, lint, freshness — is real and is not an API break, and each
-  // gets its own line rather than being folded into somebody else's.
+  // One number per class the summary shows on a line of its own —
+  // vulnerability, lint, freshness, feature — because each is real and is not
+  // an API break, and folding it into somebody else's count would hide it.
+  // `drift` has no number here: the CLI's drift line counts pin conflicts, and
+  // the medium-confidence signature changes diff.ts also marks `drift` are
+  // listed under their package but counted nowhere.
   //
   // Which of them reaches the `N breaking · M deprecated` headline is not
   // decided here: `inHeadline` in freshness.ts writes that rule down, and
-  // `SUMMARY_CLASSES` in cli.ts is what asks it. There is no longer a pair to
+  // `SUMMARY_CLASSES` in cli.ts asks it, so the CLI's summary has no pair to
   // keep in agreement by hand — a class added to that table without a headline
   // severity lands below the fold, and one left out of it is not shown at all.
+  // The dashboard (server.ts) and the runner's log line (github/runner.ts)
+  // still spell the headline's two severities themselves.
   const allFindings = packages.flatMap((p) => p.findings);
   const breaking = allFindings.filter((f) => f.change.severity === 'breaking').length;
   const deprecation = allFindings.filter((f) => f.change.severity === 'deprecation').length;

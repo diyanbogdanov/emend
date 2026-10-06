@@ -24,13 +24,15 @@ import type { Finding, PackageReport, Severity } from './types.ts';
  *
  * The headline is the one line anybody reads, and every class that has been
  * added since — drift, vulnerability, lint, freshness — is real and is not an
- * API break. Each is counted on its own line instead, so the headline keeps
- * meaning what it says.
+ * API break. None of them is counted there, so the headline keeps meaning what
+ * it says.
  *
- * Asked by `SUMMARY_CLASSES` in `cli.ts`, which is the only place the summary is
- * partitioned. That matters more than it sounds: this function existed for some
- * time with no caller at all, while the headline spelled its two severities by
- * hand — so the rule was documented, tested, and enforcing nothing.
+ * Asked by `SUMMARY_CLASSES` in `cli.ts`, which partitions the CLI's summary.
+ * That matters more than it sounds: this function existed for some time with no
+ * caller at all, while the headline spelled its two severities by hand — so the
+ * rule was documented, tested, and enforcing nothing. Two renderers still spell
+ * them by hand: the dashboard (`server.ts`) and the runner's log line
+ * (`github/runner.ts`).
  */
 export function inHeadline(severity: Severity): boolean {
   return severity === 'breaking' || severity === 'deprecation';
