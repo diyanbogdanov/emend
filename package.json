@@ -3,7 +3,7 @@
   "version": "0.1.1",
   "description": "Verified AI dependency migrations. Finds which of your lines a version bump actually breaks, fixes them, and proves the result still compiles and passes your tests.",
   "author": "Diyan Bogdanov",
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/diyanbogdanov/emend.git"
