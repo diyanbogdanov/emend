@@ -37,6 +37,7 @@
  * with the scanning process's own privileges.
  */
 
+import { createHash } from 'node:crypto';
 import { access, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -62,9 +63,22 @@ export function toPackageVersions(doc: PyPIPackageDoc, name: string): PackageVer
   };
 }
 
+/**
+ * One file PyPI lists for a release. `size` and `digests` are computed by PyPI
+ * on upload, so they describe the file that was published rather than anything
+ * its publisher can restate.
+ */
+interface PyPIFile {
+  filename: string;
+  packagetype: string;
+  url: string;
+  size?: number;
+  digests?: { sha256?: string };
+}
+
 /** The slice of a version-specific PyPI JSON response `pickWheel` reads. */
 interface PyPIVersionDoc {
-  urls?: { filename: string; packagetype: string; url: string }[];
+  urls?: PyPIFile[];
 }
 
 /**
@@ -83,11 +97,7 @@ interface PyPIVersionDoc {
  * a package with no public API, which diffs against any real version as
  * "nothing changed".
  */
-function pickWheel(
-  doc: PyPIVersionDoc,
-  pkg: string,
-  version: string,
-): { filename: string; url: string } {
+function pickWheel(doc: PyPIVersionDoc, pkg: string, version: string): PyPIFile {
   const wheels = (doc.urls ?? []).filter((u) => u.packagetype === 'bdist_wheel');
   const wheel = wheels.find((w) => w.filename.includes('-none-any.whl')) ?? wheels[0];
   if (!wheel) {
@@ -111,6 +121,21 @@ interface ZipEntry {
   compressedSize: number;
   localHeaderOffset: number;
 }
+
+/**
+ * The largest wheel Emend downloads, as PyPI lists its size. Two per dependency
+ * per scan, on a hosted worker shared across installations. Sized to admit
+ * scipy, pyarrow and opencv; the multi-hundred-megabyte CUDA builds of torch and
+ * tensorflow are refused, and a refused package is reported as skipped.
+ */
+const MAX_WHEEL_BYTES = 256 * 1024 * 1024;
+
+/**
+ * The most one wheel may write to disk once inflated, counted across every
+ * entry: the non-recursive zip bomb points many small entries at one compressed
+ * block, so no single entry is ever large and only their sum is.
+ */
+const MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024;
 
 const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_DIR_SIGNATURE = 0x02014b50;
@@ -164,7 +189,7 @@ function readCentralDirectory(buf: Buffer): ZipEntry[] {
  * the two methods every zip writer in the Python packaging toolchain emits —
  * so any other method is reported rather than guessed at.
  */
-function readZipEntry(buf: Buffer, entry: ZipEntry): Buffer {
+function readZipEntry(buf: Buffer, entry: ZipEntry, limit: number): Buffer {
   const p = entry.localHeaderOffset;
   if (buf.readUInt32LE(p) !== LOCAL_HEADER_SIGNATURE) {
     throw new Error(`corrupt zip: local header for ${entry.name} has a bad signature`);
@@ -176,8 +201,21 @@ function readZipEntry(buf: Buffer, entry: ZipEntry): Buffer {
   const extraLen = buf.readUInt16LE(p + 28);
   const dataStart = p + 30 + nameLen + extraLen;
   const raw = buf.subarray(dataStart, dataStart + entry.compressedSize);
+  // A stored entry is no larger than the wheel it sits in, which was already
+  // size-checked; only inflating can produce more than was downloaded.
   if (entry.method === 0) return Buffer.from(raw);
-  if (entry.method === 8) return zlib.inflateRawSync(raw);
+  if (entry.method === 8) {
+    try {
+      // Bounded while inflating, not checked afterwards: the point is never to
+      // hold the oversized output at all.
+      return zlib.inflateRawSync(raw, { maxOutputLength: Math.max(1, limit) });
+    } catch (err) {
+      if (err instanceof RangeError) {
+        throw new Error(`zip entry ${entry.name} inflates past the extraction limit`);
+      }
+      throw err;
+    }
+  }
   throw new Error(`unsupported zip compression method ${entry.method} for ${entry.name}`);
 }
 
@@ -193,8 +231,13 @@ function readZipEntry(buf: Buffer, entry: ZipEntry): Buffer {
  * zip-slip protection, and a wheel is fetched and extracted on an ordinary
  * scan with no opt-in.
  */
-export async function extractZip(buf: Buffer, destDir: string): Promise<void> {
+export async function extractZip(
+  buf: Buffer,
+  destDir: string,
+  maxBytes: number = MAX_EXTRACTED_BYTES,
+): Promise<void> {
   const destRoot = path.resolve(destDir);
+  let written = 0;
   for (const entry of readCentralDirectory(buf)) {
     const dest = path.join(destDir, ...entry.name.split('/'));
     const rel = path.relative(destRoot, path.resolve(dest));
@@ -220,8 +263,13 @@ export async function extractZip(buf: Buffer, destDir: string): Promise<void> {
       await mkdir(dest, { recursive: true });
       continue;
     }
+    const data = readZipEntry(buf, entry, maxBytes - written);
+    written += data.length;
+    if (written > maxBytes) {
+      throw new Error(`zip extracts to more than its ${maxBytes}-byte extraction limit`);
+    }
     await mkdir(path.dirname(dest), { recursive: true });
-    await writeFile(dest, readZipEntry(buf, entry));
+    await writeFile(dest, data);
   }
 }
 
@@ -312,12 +360,28 @@ async function fetchWheelDirUncached(pkg: string, version: string): Promise<stri
     throw new Error(`PyPI ${metaRes.status} for ${pkg}@${version} (${metaUrl})`);
   }
   const wheel = pickWheel((await metaRes.json()) as PyPIVersionDoc, pkg, version);
+  const expected = wheel.digests?.sha256;
+  if (wheel.size === undefined || !expected) {
+    throw new Error(`refusing ${wheel.filename}: PyPI lists no size or sha256 to check it against`);
+  }
+  // Before the request, because downloading it is the cost.
+  if (wheel.size > MAX_WHEEL_BYTES) {
+    const mib = (n: number) => Math.ceil(n / (1024 * 1024));
+    throw new Error(
+      `refusing ${wheel.filename}: ${mib(wheel.size)} MiB is over the ${mib(MAX_WHEEL_BYTES)} MiB limit for a wheel Emend downloads to read`,
+    );
+  }
 
   const wheelRes = await fetch(wheel.url);
   if (!wheelRes.ok) {
     throw new Error(`${wheel.url} returned ${wheelRes.status} for ${pkg}@${version}`);
   }
   const buf = Buffer.from(await wheelRes.arrayBuffer());
+  // The cache outlives this scan and is read by every later one, so a file that
+  // is not the one PyPI indexed must never reach it.
+  if (createHash('sha256').update(buf).digest('hex') !== expected) {
+    throw new Error(`refusing ${wheel.filename}: its sha256 is not the one PyPI lists for it`);
+  }
 
   // Staged under a random name and only renamed into place once extraction
   // finishes, so a half-extracted directory is never visible at `dest` — the

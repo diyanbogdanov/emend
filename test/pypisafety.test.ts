@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 
 // A lockfile is written by whoever owns the repository being scanned, and the
 // hosted App scans repositories it has no reason to trust. Every name and
@@ -18,7 +20,7 @@ import path from 'node:path';
 const sandbox = await mkdtemp(path.join(tmpdir(), 'emend-pypi-'));
 const cacheRoot = path.join(sandbox, 'cache');
 process.env.EMEND_CACHE = cacheRoot;
-const { pypiClient } = await import('../src/python/pypi.ts');
+const { extractZip, pypiClient } = await import('../src/python/pypi.ts');
 
 test.after(() => rm(sandbox, { recursive: true, force: true }));
 
@@ -114,4 +116,145 @@ test('names and versions real projects publish still reach PyPI', async () => {
   } finally {
     restore();
   }
+});
+
+// ---------------------------------------------------------------------------
+// The wheel itself. The publisher of a package chooses its bytes, and the
+// hosted App downloads two wheels per dependency on every scan — so size, the
+// bytes on disk after inflating, and whether the file is the one PyPI indexed
+// are all checked rather than trusted.
+// ---------------------------------------------------------------------------
+
+/** A zip of the given entries; `deflate` stores an entry compressed, as wheels do. */
+function zipOf(entries: { name: string; data: Buffer; deflate?: boolean }[]): Buffer {
+  const parts: Buffer[] = [];
+  const central: Buffer[] = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = Buffer.from(e.name, 'utf8');
+    const body = e.deflate ? zlib.deflateRawSync(e.data) : e.data;
+    const method = e.deflate ? 8 : 0;
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(method, 8);
+    local.writeUInt32LE(body.length, 18);
+    local.writeUInt32LE(e.data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    parts.push(local, name, body);
+
+    const dir = Buffer.alloc(46);
+    dir.writeUInt32LE(0x02014b50, 0);
+    dir.writeUInt16LE(20, 4);
+    dir.writeUInt16LE(20, 6);
+    dir.writeUInt16LE(method, 10);
+    dir.writeUInt32LE(body.length, 20);
+    dir.writeUInt32LE(e.data.length, 24);
+    dir.writeUInt16LE(name.length, 28);
+    dir.writeUInt32LE(offset, 42);
+    central.push(dir, name);
+
+    offset += local.length + name.length + body.length;
+  }
+  const directory = Buffer.concat(central);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(directory.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, directory, eocd]);
+}
+
+const sha256 = (buf: Buffer) => createHash('sha256').update(buf).digest('hex');
+
+/** PyPI's version document and the wheel it points at, served from a stub. */
+function servePyPI(
+  pkg: string,
+  wheel: Buffer,
+  listed: { size: number; sha256: string },
+): { calls: string[]; wheelUrl: string; restore: () => void } {
+  const wheelUrl = `https://files.pythonhosted.org/packages/${pkg}-1.0-py3-none-any.whl`;
+  const doc = {
+    urls: [
+      {
+        filename: `${pkg}-1.0-py3-none-any.whl`,
+        packagetype: 'bdist_wheel',
+        url: wheelUrl,
+        size: listed.size,
+        digests: { sha256: listed.sha256 },
+      },
+    ],
+  };
+  const stub = stubFetch((url) =>
+    url === wheelUrl ? new Response(new Uint8Array(wheel)) : new Response(JSON.stringify(doc)),
+  );
+  return { ...stub, wheelUrl };
+}
+
+const module = Buffer.from('def greet(name):\n    return name\n');
+const wheel = zipOf([{ name: 'demo/__init__.py', data: module, deflate: true }]);
+
+test('a wheel inside the limits whose digest matches is cached and returned', async () => {
+  // The control: none of the checks below may cost the ordinary case.
+  const { restore } = servePyPI('demo-ok', wheel, { size: wheel.length, sha256: sha256(wheel) });
+  try {
+    const dir = await pypiClient().fetch('demo-ok', '1.0');
+    assert.equal(dir, path.join(cacheRoot, 'demo-ok', '1.0'));
+    assert.deepEqual(await readFile(path.join(dir, 'demo', '__init__.py')), module);
+  } finally {
+    restore();
+  }
+});
+
+test('a wheel PyPI lists as gigabytes is refused before it is downloaded', async () => {
+  // PyPI computes the size on upload, so the publisher cannot understate it —
+  // checked before the request, because downloading it is the cost.
+  const { calls, wheelUrl, restore } = servePyPI('demo-huge', wheel, {
+    size: 5 * 1024 ** 3,
+    sha256: sha256(wheel),
+  });
+  try {
+    await assert.rejects(() => pypiClient().fetch('demo-huge', '1.0'), /refusing .*MiB/);
+    assert.equal(calls.includes(wheelUrl), false);
+  } finally {
+    restore();
+  }
+});
+
+test('a wheel whose bytes are not the ones PyPI indexed is refused, and nothing is cached', async () => {
+  // The cache is shared by every later scan, so a file that is not the one
+  // PyPI recorded would be read as the package for as long as it stays there.
+  const { restore } = servePyPI('demo-swapped', wheel, {
+    size: wheel.length,
+    sha256: sha256(Buffer.from('a different file')),
+  });
+  try {
+    await assert.rejects(() => pypiClient().fetch('demo-swapped', '1.0'), /sha256/);
+    assert.equal(existsSync(path.join(cacheRoot, 'demo-swapped')), false);
+  } finally {
+    restore();
+  }
+});
+
+test('an entry that inflates past the extraction limit is refused', async () => {
+  // A megabyte of zeros deflates to about a kilobyte. Without a limit on
+  // what inflating may produce, a small wheel fills the disk of whatever
+  // scans it.
+  const bomb = zipOf([{ name: 'demo/zeros.py', data: Buffer.alloc(1024 * 1024), deflate: true }]);
+  const dest = await mkdtemp(path.join(sandbox, 'bomb-'));
+  await assert.rejects(() => extractZip(bomb, dest, 64 * 1024), /extraction limit/);
+});
+
+test('the extraction limit counts everything written, not each entry alone', async () => {
+  // The non-recursive zip bomb points many entries at one compressed block,
+  // so every entry is small and only their sum is not.
+  const half = Buffer.alloc(40 * 1024);
+  const many = zipOf([
+    { name: 'demo/a.py', data: half, deflate: true },
+    { name: 'demo/b.py', data: half, deflate: true },
+  ]);
+  const dest = await mkdtemp(path.join(sandbox, 'many-'));
+  await assert.rejects(() => extractZip(many, dest, 64 * 1024), /extraction limit/);
 });
