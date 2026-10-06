@@ -509,11 +509,19 @@ export async function scanRepo(
   // in full and `api.Dockerfile` matches the same entry. `.py`/`.pyi` are the
   // same fix for the same bug: without them, no Python file ever reached a
   // detector, no matter what `python/callsites.ts` could find in one.
+  const escaped: string[] = [];
   const walked = walkDir(repoDir, [
     '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',
     '.py', '.pyi',
     '.sh', '.bash', 'Dockerfile', 'Containerfile',
-  ]).map((f) => path.relative(repoDir, f));
+  ], escaped).map((f) => path.relative(repoDir, f));
+  // Not read, and said: a file the scan never saw is not a file the
+  // repository lacks (see walkDir for why links out are left out).
+  if (escaped.length > 0) {
+    warnings.push(
+      `${escaped.length} path(s) link to outside the repository and were not read: ${escaped.sort().join(', ')}`,
+    );
+  }
 
   // No cap. It was four hundred, then ten thousand, and both were guesses at a
   // cost nobody had measured: reading all 19,333 files of n8n takes 3.5 seconds

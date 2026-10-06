@@ -9,8 +9,10 @@
  *    cannot see because `c` is just a local variable
  */
 
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
+import { linksOutside } from './repofiles.ts';
 import type { ApiSurface, CallSite } from './types.ts';
 import type { InstalledPackage } from './osv.ts';
 import { findPythonCallSites, findPythonImportSites } from './python/callsites.ts';
@@ -157,7 +159,18 @@ const VENDORED_DIR_NAMES = [
   'envs',
 ];
 
-export function walkDir(dir: string, exts: string[]): string[] {
+/**
+ * Every file under `dir` ending in one of `exts`, skipping dependency and
+ * build directories.
+ *
+ * A file or directory that is a link to outside `dir` is left out: everything
+ * downstream — pins, detectors, lint tools, both call-site resolvers — reads
+ * whatever this returns, so this is the one place to stop a committed
+ * `Dockerfile -> /etc/shadow` from being read. Each one left out is appended to
+ * `escaped`, relative to `dir`, for a caller that will say so.
+ */
+export function walkDir(dir: string, exts: string[], escaped?: string[]): string[] {
+  const root = realpathSync(dir);
   const out: string[] = [];
   const skip = new Set([
     'node_modules', '.git', 'dist', 'build', 'coverage', '.next', 'out',
@@ -176,7 +189,12 @@ export function walkDir(dir: string, exts: string[]): string[] {
     for (const e of entries) {
       const base = path.basename(e);
       if (skip.has(base)) continue;
-      if (exts.some((x) => e.endsWith(x))) out.push(e);
+      if (!exts.some((x) => e.endsWith(x))) continue;
+      if (linksOutside(root, e)) {
+        escaped?.push(path.relative(dir, e));
+        continue;
+      }
+      out.push(e);
     }
     // readDirectory with depth 1 returns files only; recurse into subdirectories.
     try {
@@ -186,7 +204,12 @@ export function walkDir(dir: string, exts: string[]): string[] {
         } else if (skip.has(sub)) {
           continue;
         }
-        stack.push(path.join(current, sub));
+        const subPath = path.join(current, sub);
+        if (linksOutside(root, subPath)) {
+          escaped?.push(path.relative(dir, subPath));
+          continue;
+        }
+        stack.push(subPath);
       }
     } catch {
       /* unreadable directory — skip */
