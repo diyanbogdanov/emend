@@ -23,7 +23,7 @@
  * exists to stop from recurring.
  */
 
-import { readFile, access } from 'node:fs/promises';
+import { readFile, access, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { readPythonManifest, type PythonManifest, type PythonManifestKind } from './manifests.ts';
 import type { EcosystemInventory } from '../ecosystems.ts';
@@ -62,6 +62,101 @@ interface BestManifest {
   /** Kept alongside the parsed result so `manifestSites` need not re-read the file. */
   text: string;
   manifest: PythonManifest;
+  /** Each `-r`/`-c` include that could not be followed, and why — every one a
+   *  reason the dependency list is partial. Always empty for the lockfiles. */
+  unfollowed: string[];
+}
+
+/** PEP 503's normalised name, so `Requests` in one file and `requests` in another are one package. */
+const canonical = (name: string): string => name.toLowerCase().replace(/[-_.]+/g, '-');
+
+/**
+ * `requirements.txt` with its `-r` and `-c` includes followed the way pip
+ * follows them: each relative to the file that names it, a requirements
+ * include adding its packages, a constraints include only deciding the version
+ * of a package something else requires. First occurrence wins across files, as
+ * it does within one.
+ *
+ * The paths come from the repository, and the hosted App scans repositories it
+ * has no reason to trust, so a target is judged by its real path: one outside
+ * the checkout — `../x`, or a committed symlink to anywhere — is not read,
+ * because whatever file it named would be parsed as requirements and its lines
+ * printed back as dependency names. A URL is not fetched. Neither is dropped in
+ * silence: each lands in `unfollowed`.
+ */
+async function readRequirementsTree(
+  repoDir: string,
+  text: string,
+): Promise<{ manifest: PythonManifest; unfollowed: string[] }> {
+  const root = await realpath(repoDir);
+  const top = await realpath(path.join(repoDir, 'requirements.txt'));
+  const visited = new Set<string>([top]);
+  const seen = new Set<string>();
+  const versions = new Map<string, string>();
+  const declared = new Map<string, string>();
+  const constraints = new Map<string, string>();
+  const unfollowed: string[] = [];
+
+  const visit = async (file: string, body: string, asConstraints: boolean): Promise<void> => {
+    const parsed = readPythonManifest('requirements.txt', body);
+    if (asConstraints) {
+      for (const [name, version] of parsed.versions) {
+        if (!constraints.has(canonical(name))) constraints.set(canonical(name), version);
+      }
+    } else {
+      for (const [into, from] of [[versions, parsed.versions], [declared, parsed.declared]] as const) {
+        for (const [name, value] of from) {
+          if (seen.has(canonical(name))) continue;
+          seen.add(canonical(name));
+          into.set(name, value);
+        }
+      }
+    }
+
+    const named = path.relative(root, file);
+    for (const include of parsed.includes ?? []) {
+      const unread = (why: string) => unfollowed.push(`${named} includes ${include.target}, ${why}`);
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(include.target)) {
+        unread('a URL Emend does not fetch — its packages were not read');
+        continue;
+      }
+      let real: string;
+      try {
+        real = await realpath(path.resolve(path.dirname(file), include.target));
+      } catch {
+        unread('which does not exist — its packages were not read');
+        continue;
+      }
+      const rel = path.relative(root, real);
+      if (rel === '' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+        unread('which is outside the repository — not read');
+        continue;
+      }
+      if (visited.has(real)) continue;
+      visited.add(real);
+      let next: string;
+      try {
+        next = await readFile(real, 'utf8');
+      } catch {
+        unread('which could not be read — its packages were not read');
+        continue;
+      }
+      await visit(real, next, asConstraints || include.kind === 'constraints');
+    }
+  };
+  await visit(top, text, false);
+
+  for (const [name] of declared) {
+    const pinned = constraints.get(canonical(name));
+    if (pinned === undefined) continue;
+    declared.delete(name);
+    versions.set(name, pinned);
+  }
+
+  return {
+    manifest: { kind: 'requirements.txt', versions, declared, unsupported: null },
+    unfollowed,
+  };
 }
 
 /**
@@ -84,7 +179,8 @@ async function readBestManifest(repoDir: string): Promise<BestManifest | null> {
     } catch {
       continue;
     }
-    return { kind, text, manifest: readPythonManifest(kind, text) };
+    if (kind === 'requirements.txt') return { kind, text, ...(await readRequirementsTree(repoDir, text)) };
+    return { kind, text, manifest: readPythonManifest(kind, text), unfollowed: [] };
   }
   return null;
 }
@@ -169,7 +265,11 @@ export function pythonInventory(): EcosystemInventory {
       for (const [name, version] of best.manifest.versions) {
         packages.push({ name, ecosystem: 'PyPI', version });
       }
-      return { packages, unsupported: best.manifest.unsupported, incomplete: null };
+      return {
+        packages,
+        unsupported: best.manifest.unsupported,
+        incomplete: best.unfollowed.length > 0 ? best.unfollowed.join('; ') : null,
+      };
     },
 
     async declared(repoDir) {
@@ -259,6 +359,8 @@ export function pythonInventory(): EcosystemInventory {
             'could not be confirmed and are not guessed',
         );
       }
+
+      warnings.push(...best.unfollowed);
 
       if (best.manifest.unsupported) {
         warnings.push(

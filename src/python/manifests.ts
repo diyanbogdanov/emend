@@ -75,7 +75,26 @@ export interface PythonManifest {
    * when at least one dependency was recovered.
    */
   unsupported: PythonManifestKind | null;
+  /**
+   * `requirements.txt` only: the files its `-r`/`-c` lines name, in order,
+   * as written. Not followed here — this module reads text, not paths; the
+   * inventory resolves and reads them (`./inventory.ts`).
+   */
+  includes?: RequirementsInclude[];
 }
+
+/**
+ * One `-r`/`--requirement` or `-c`/`--constraint` line. A requirements include
+ * adds that file's packages; a constraints include only decides which version
+ * of an already-required package is installed — pip's meaning, never whether.
+ */
+export interface RequirementsInclude {
+  kind: 'requirements' | 'constraints';
+  target: string;
+}
+
+/** `-r x`, `-rx`, `--requirement x`, `--requirement=x`, and the same for `-c`. */
+const INCLUDE_RE = /^(?:(--requirement|-r)|(--constraint|-c))(?:\s*=\s*|\s+)?(\S+)/;
 
 /**
  * Resolved versions from the TOML shape `uv.lock`, `poetry.lock` and
@@ -230,6 +249,7 @@ const REQUIREMENT_RE = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$/
 interface ParsedRequirements {
   versions: Map<string, string>;
   declared: Map<string, string>;
+  includes: RequirementsInclude[];
 }
 
 /**
@@ -263,6 +283,7 @@ function resolvedVersion(specifier: string): string | null {
 function parseRequirementsTxt(text: string): ParsedRequirements {
   const versions = new Map<string, string>();
   const declared = new Map<string, string>();
+  const includes: RequirementsInclude[] = [];
 
   // pip joins a line ending in `\` with the next before reading it, and
   // `pip-compile --generate-hashes` writes every pin that way, continued across
@@ -282,8 +303,17 @@ function parseRequirementsTxt(text: string): ParsedRequirements {
     // `-e .`, `-e .[extra]` (editable installs), `-r other.txt` / `-c
     // constraints.txt` (includes) and option flags like `--index-url` all
     // start with `-`. None names an installable package; treating `-e` as one
-    // would put a nonsense entry into a vulnerability query.
-    if (line.startsWith('-')) continue;
+    // would put a nonsense entry into a vulnerability query. An include is
+    // recorded rather than dropped: the packages it names are as much this
+    // repository's as the ones written here, and skipping it read a
+    // requirements.txt of nothing but `-r` lines as no dependencies at all.
+    if (line.startsWith('-')) {
+      const include = INCLUDE_RE.exec(line);
+      if (include?.[3]) {
+        includes.push({ kind: include[1] ? 'requirements' : 'constraints', target: include[3] });
+      }
+      continue;
+    }
 
     // Per-requirement options follow the requirement on its own line
     // (`urllib3==1.26.5 --hash=sha256:…`). pip stops reading the requirement at
@@ -314,7 +344,7 @@ function parseRequirementsTxt(text: string): ParsedRequirements {
     }
   }
 
-  return { versions, declared };
+  return { versions, declared, includes };
 }
 
 /**
@@ -334,11 +364,12 @@ export function readPythonManifest(kind: PythonManifestKind, text: string): Pyth
     case 'Pipfile.lock':
       return readPipfileLock(text);
     case 'requirements.txt': {
-      const { versions, declared } = parseRequirementsTxt(text);
+      const { versions, declared, includes } = parseRequirementsTxt(text);
       return {
         kind,
         versions,
         declared,
+        includes,
         // A requirements.txt line is independently a comment, an option, a
         // requirement, or noise — there is no single whole-file shape to call
         // unsupported the way a TOML block or a JSON document has. A line
