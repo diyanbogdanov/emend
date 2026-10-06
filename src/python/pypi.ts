@@ -238,6 +238,43 @@ async function pathExists(p: string): Promise<boolean> {
   }
 }
 
+/** PEP 508's grammar for a project name, verbatim — it has no `/`, `\`, `#` or `%`. */
+const PROJECT_NAME = /^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$/i;
+
+/**
+ * The characters a PEP 440 version is spelled with, normalised or not. Not
+ * `pep440.ts`'s parser: that refuses legal-but-unnormalised spellings, which
+ * would turn a real package into a skipped one. Whether the string is a valid
+ * version is that module's question; this one asks only whether it is a single
+ * inert path segment and URL segment. Starting on an alphanumeric is what rules
+ * out `.` and `..`, the only segments these characters could move a path with.
+ */
+const VERSION_CHARS = /^[A-Za-z0-9][A-Za-z0-9.!+_-]*$/;
+
+/**
+ * Refuses a name or version that would move the cache path or rewrite the PyPI
+ * URL. Both come from the scanned repository's lockfile, so either can be
+ * hostile. `2.10/json#/../../x` asks PyPI about idna 2.10 — nothing after `#`
+ * leaves the machine — while `path.join` resolves the same string outside the
+ * cache, or onto a directory that already exists, which the cache-hit check
+ * would hand to the extractor as the package. A name like
+ * `evil/json#/../../requests` fetches one project and files it under another's
+ * cache entry, where no containment check would see anything wrong.
+ *
+ * Thrown rather than skipped quietly: analyze.ts records the package as an
+ * error, and an error counts as skipped, never as clean.
+ */
+function assertPlainCoordinates(pkg: string, version?: string): void {
+  if (!PROJECT_NAME.test(pkg)) {
+    throw new Error(`refusing PyPI package name ${JSON.stringify(pkg)}: not a PEP 508 project name`);
+  }
+  if (version !== undefined && !VERSION_CHARS.test(version)) {
+    throw new Error(
+      `refusing ${pkg} version ${JSON.stringify(version)}: not spelled like a PEP 440 version`,
+    );
+  }
+}
+
 /**
  * In-flight wheel fetches, keyed by `pkg@version` — the same corruption
  * `registry.ts`'s own map exists to prevent: two callers extracting the same
@@ -257,11 +294,13 @@ function fetchWheelDir(pkg: string, version: string): Promise<string> {
 }
 
 async function fetchWheelDirUncached(pkg: string, version: string): Promise<string> {
+  assertPlainCoordinates(pkg, version);
+
   // Shares `registry.ts`'s cache root and its per-package/version layout —
   // unlike npm's tarballs, a wheel has no wrapping `package/` directory of
   // its own, so this extracts straight into the version directory. `pkg`
-  // needs no `+`-encoding the way a scoped npm name does: PyPI names never
-  // contain `/`. Landing beside npm's own cache entries is what keeps
+  // needs no `+`-encoding the way a scoped npm name does: a name with a `/`
+  // was refused just above. Landing beside npm's own cache entries is what keeps
   // `emend cache list`/`prune` working across both ecosystems without a
   // second code path (module doc).
   const dest = path.join(CACHE_ROOT, pkg, version);
@@ -315,6 +354,7 @@ export function pypiClient(): RegistryClient {
     handles: (ecosystem) => ecosystem === 'PyPI',
 
     async versions(pkg) {
+      assertPlainCoordinates(pkg);
       const url = `https://pypi.org/pypi/${pkg}/json`;
       const res = await fetch(url);
       if (!res.ok) {
