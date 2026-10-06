@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { capabilitiesFor, describeCoverage } from '../src/languages.ts';
+import { capabilitiesFor, coverageEcosystems, describeCoverage } from '../src/languages.ts';
 
 test('npm reports every tier as available', () => {
   const caps = capabilitiesFor('npm');
@@ -49,4 +49,19 @@ test('a fully covered ecosystem with nothing examined does not claim any tier ra
   assert.doesNotMatch(line, /fully examined/);
   assert.doesNotMatch(line, /all ran/);
   assert.match(line, /no dependencies were analysed/);
+});
+
+test('an ecosystem the scan analysed keeps its coverage line when no inventory claims the repository', () => {
+  // When the claimants and readRepo disagreed — npm once claimed a repository
+  // only by its lockfile, while readRepo analysed a bare package.json — a scan
+  // analysed packages, found breaking changes, and printed no coverage line at
+  // all. Silence is the one thing this line exists to rule out.
+  assert.deepEqual(coverageEcosystems('npm', []), ['npm']);
+});
+
+test('the analysed ecosystem comes first, and none is listed twice', () => {
+  // cli.ts credits the scan's counts to index 0 only, so the ecosystem that was
+  // analysed has to be the one there; a later claimant gets "0 analysed".
+  assert.deepEqual(coverageEcosystems('npm', ['PyPI', 'npm']), ['npm', 'PyPI']);
+  assert.deepEqual(coverageEcosystems(undefined, ['npm']), ['npm']);
 });

@@ -58,6 +58,25 @@ const TIER_REASON: Record<keyof Capabilities, string> = {
 const TIERS = Object.keys(TIER_LABEL) as (keyof Capabilities)[];
 
 /**
+ * The ecosystems the coverage line reports: the one the scan analysed first,
+ * then every other ecosystem that claims the repository.
+ *
+ * Taken from what was analysed rather than trusted to the claimants' order:
+ * when the two disagreed — npm once claimed a repository only by its lockfile,
+ * while readRepo analysed a bare package.json — a scan found breaking changes
+ * and printed no coverage line at all, silence being the one reading this line
+ * exists to rule out. First, because the caller credits the scan's counts to
+ * index 0 and nothing after it.
+ */
+export function coverageEcosystems(analysed: string | undefined, claimed: string[]): string[] {
+  const list = analysed === undefined ? [] : [analysed];
+  for (const ecosystem of claimed) {
+    if (!list.includes(ecosystem)) list.push(ecosystem);
+  }
+  return list;
+}
+
+/**
  * One line per ecosystem, naming what this scan actually did — not merely
  * what Emend is capable of.
  *

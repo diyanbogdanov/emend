@@ -15,7 +15,7 @@ import { emendPath } from './paths.ts';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
 import { inventoriesFor } from './ecosystems.ts';
-import { describeCoverage } from './languages.ts';
+import { coverageEcosystems, describeCoverage } from './languages.ts';
 import { reintroduced } from './remediate.ts';
 import { offersPagination } from './httpsites.ts';
 import { fixFinding, needsSourceRepair, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
@@ -618,7 +618,14 @@ async function cmdScan(args: Args): Promise<number> {
   if (args.flags.get('json') === true) {
     console.log(JSON.stringify(report, null, 2));
   } else {
-    const ecosystems = (await inventoriesFor(repoDir)).map((i) => i.osvEcosystem);
+    // Every dependency readRepo returns belongs to the one ecosystem it
+    // analysed — it reads a single claimant (inventory.ts) — so the first
+    // names it. Not a literal 'npm': a Python scan would then print an npm
+    // line credited with PyPI's counts.
+    const ecosystems = coverageEcosystems(
+      repo.dependencies[0]?.ecosystem,
+      (await inventoriesFor(repoDir)).map((i) => i.osvEcosystem),
+    );
     printScan(
       report,
       args.flags.get('all') === true,
