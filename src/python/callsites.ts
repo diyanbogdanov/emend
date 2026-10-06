@@ -168,15 +168,18 @@ function collectImports(root: Node): Imports {
 }
 
 /**
- * Whether `modulePath` is `pkg` itself or one of its submodules — matched on
- * whole path segments, never a string prefix: `pkg.startsWith('requests')`
- * would wrongly claim `requests_toolbelt` and `requestsauth` as part of
- * `requests`. Every import form funnels through this one check, so `from
- * pkg.sub import Name` is recognised exactly where `from pkg import Name`
- * already was.
+ * Whether `modulePath` is one of a package's import roots or a submodule of
+ * one — matched on whole path segments, never a string prefix:
+ * `startsWith('requests')` would wrongly claim `requests_toolbelt` and
+ * `requestsauth` as part of `requests`. Every import form funnels through this
+ * one check, so `from pkg.sub import Name` is recognised exactly where `from
+ * pkg import Name` already was.
+ *
+ * Roots, not the distribution name: PyYAML is imported as `yaml`, and
+ * matching against the name in the lockfile found no import of it anywhere.
  */
-function belongsToPackage(modulePath: string, pkg: string): boolean {
-  return modulePath === pkg || modulePath.startsWith(`${pkg}.`);
+function belongsToPackage(modulePath: string, roots: string[]): boolean {
+  return roots.some((root) => modulePath === root || modulePath.startsWith(`${root}.`));
 }
 
 /**
@@ -224,7 +227,7 @@ function bucketedSites(
   root: Node,
   source: string,
   file: string,
-  pkg: string,
+  roots: string[],
   symbols: string[],
 ): Map<string, CallSite[]> {
   const buckets = new Map<string, CallSite[]>();
@@ -245,8 +248,8 @@ function bucketedSites(
   // star import or *any* referenced module belongs to `pkg`, so `from
   // pkg.sub import *` and a method lead through `from pkg.sub import Name`
   // get the same submodule treatment as their flat forms.
-  const starImportsPkg = [...imports.starImported].some((m) => belongsToPackage(m, pkg));
-  const referencesPkg = [...imports.referenced].some((m) => belongsToPackage(m, pkg));
+  const starImportsPkg = [...imports.starImported].some((m) => belongsToPackage(m, roots));
+  const referencesPkg = [...imports.referenced].some((m) => belongsToPackage(m, roots));
 
   const record = (canonical: string, at: Node): void => {
     const { row, column } = at.startPosition;
@@ -271,7 +274,7 @@ function bucketedSites(
         const local = fn.text;
         const binding = imports.names.get(local);
         const resolved =
-          binding && belongsToPackage(binding.module, pkg)
+          binding && belongsToPackage(binding.module, roots)
             ? binding.exported
             : starImportsPkg
               ? local
@@ -289,7 +292,7 @@ function bucketedSites(
           // is one of its top-level exports, not a guess about some
           // unrelated object's own method.
           const resolvedModule = receiverModule(object, imports);
-          if (resolvedModule && belongsToPackage(resolvedModule, pkg) && bareWanted.has(member)) {
+          if (resolvedModule && belongsToPackage(resolvedModule, roots) && bareWanted.has(member)) {
             record(member, fn);
           }
           // A method-style match: `.member(...)` on whatever the receiver
@@ -320,7 +323,7 @@ export async function pythonSites(
   symbols: string[],
 ): Promise<CallSite[]> {
   const tree = await parsePython(source);
-  return [...bucketedSites(tree.rootNode, source, file, pkg, symbols).values()].flat();
+  return [...bucketedSites(tree.rootNode, source, file, [pkg], symbols).values()].flat();
 }
 
 /**
@@ -368,7 +371,9 @@ export async function findPythonCallSites(
     for (const [pkg, symbolSet] of wanted) {
       const bucket = byPackage.get(pkg);
       if (!bucket || symbolSet.size === 0) continue;
-      const found = bucketedSites(tree.rootNode, source, rel, pkg, [...symbolSet]);
+      // The distribution name only when the extractor recorded no roots.
+      const roots = surfaces.get(pkg)?.modules ?? [pkg];
+      const found = bucketedSites(tree.rootNode, source, rel, roots, [...symbolSet]);
       for (const [canonical, sites] of found) {
         const existing = bucket.get(canonical) ?? [];
         existing.push(...sites);

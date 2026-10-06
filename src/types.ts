@@ -114,6 +114,13 @@ export interface ApiSurface {
   truncated?: boolean;
   /** Populated when extraction hit a problem worth surfacing to the user. */
   note?: string;
+  /**
+   * The module paths code imports this package by, where that is not `pkg`
+   * itself: PyPI names distributions and code imports modules, so PyYAML is
+   * `yaml` and Pillow is `PIL`. Set by the Python extractor; absent for npm,
+   * whose import specifier is its package name.
+   */
+  modules?: string[];
 }
 
 export type ChangeKind =

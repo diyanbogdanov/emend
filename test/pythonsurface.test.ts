@@ -95,3 +95,24 @@ test('a signature change is what diff.ts sees', async () => {
     true,
   );
 });
+
+test('a package records the module paths it is imported by, not its distribution name', async () => {
+  // PyPI names distributions; code imports modules, and the two differ
+  // wherever it matters most — PyYAML is `yaml`, Pillow is `PIL`. Call sites
+  // are found through imports, so the surface has to say what to look for.
+  const def = 'def f():\n    pass\n';
+  const roots = async (files: Record<string, string>) =>
+    (await surfaceFromSource('dist', '1.0', files)).modules;
+
+  assert.deepEqual(await roots({ 'yaml/__init__.py': def, 'yaml/loader.py': def, '_yaml/__init__.py': def }), [
+    '_yaml',
+    'yaml',
+  ]);
+  assert.deepEqual(await roots({ 'six.py': def }), ['six']);
+  // A PEP 420 namespace: `google/` has no __init__.py, so the package is
+  // `google.cloud.storage`, not every import of `google` there is.
+  assert.deepEqual(
+    await roots({ 'google/cloud/storage/__init__.py': def, 'google/cloud/storage/blob.py': def }),
+    ['google.cloud.storage'],
+  );
+});

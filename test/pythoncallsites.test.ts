@@ -6,6 +6,7 @@ import path from 'node:path';
 import { resolverFor, resolverForEcosystem } from '../src/callsites.ts';
 import { findPythonCallSites, pythonSites } from '../src/python/callsites.ts';
 import type { ApiSurface } from '../src/types.ts';
+import { surfaceFromSource } from '../src/python/surface.ts';
 
 test('Python files are claimed, and PyPI is claimed by ecosystem', async () => {
   assert.equal(resolverFor('app/main.py')?.id, 'python');
@@ -199,4 +200,26 @@ test('a bare `env` directory WITHOUT pyvenv.cfg is real source, not skipped', as
   // virtual environment rather than this repository's own code.
   const files = await callSiteFilesFor({ 'env/app.py': CALL_SITE });
   assert.deepEqual(files, ['env/app.py']);
+});
+
+test('call sites are found under the module a distribution installs, not its PyPI name', async () => {
+  // `pkg` here is PyYAML — the name in the lockfile — and the code says
+  // `import yaml`. Matching imports against the distribution name found
+  // nothing, and a real signature change to yaml.load read as "No findings".
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-pyroots-'));
+  try {
+    writeFileSync(path.join(dir, 'app.py'), 'import yaml\n\nconfig = yaml.load(open("c.yml"))\n');
+    const surface = await surfaceFromSource('PyYAML', '5.4.1', {
+      'yaml/__init__.py': 'def load(stream, Loader=None):\n    pass\n',
+    });
+    const index = await findPythonCallSites(
+      dir,
+      new Map([['PyYAML', surface]]),
+      new Map([['PyYAML', new Set(['load'])]]),
+    );
+    const sites = index.byPackage.get('PyYAML')?.get('load') ?? [];
+    assert.deepEqual(sites.map((s) => `${s.file}:${s.line}`), ['app.py:3']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

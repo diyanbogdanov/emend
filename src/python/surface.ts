@@ -157,7 +157,37 @@ export async function surfaceFromSource(
     // first file read stands in as a representative, non-null pointer. Only
     // its nullness is ever inspected (see `diffSurfaces`).
     entry: paths[0] ?? null,
+    modules: importRoots(paths),
   };
+}
+
+/**
+ * The module paths a package is imported by, read off where its files sit:
+ * a file's root is the first directory above it holding an `__init__.py`, or,
+ * with none, the file's own dotted path — PEP 420's rule, so a namespace
+ * package such as `google/cloud/storage` is `google.cloud.storage` rather than
+ * every `google` import there is. A root inside another collapses into it.
+ *
+ * From the files, not the wheel's `top_level.txt`: only setuptools writes that,
+ * and hatchling, flit and poetry-core wheels have none. The cost is a wheel
+ * that ships a stray top-level `tests/` package claims `tests` too.
+ */
+export function importRoots(paths: string[]): string[] {
+  const files = new Set(paths);
+  const roots = new Set<string>();
+  for (const rel of paths) {
+    const dirs = rel.split('/');
+    const module = (dirs.pop() ?? '').replace(PY_SOURCE, '');
+    let root: string | undefined;
+    for (let depth = 1; depth <= dirs.length && root === undefined; depth++) {
+      const dir = dirs.slice(0, depth).join('/');
+      if (files.has(`${dir}/__init__.py`) || files.has(`${dir}/__init__.pyi`)) {
+        root = dirs.slice(0, depth).join('.');
+      }
+    }
+    roots.add(root ?? [...dirs, module].join('.'));
+  }
+  return [...roots].filter((r) => ![...roots].some((o) => r.startsWith(`${o}.`))).sort();
 }
 
 /**
