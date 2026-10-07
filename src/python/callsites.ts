@@ -295,15 +295,19 @@ function bucketedSites(
           // is one of its top-level exports, not a guess about some
           // unrelated object's own method.
           const resolvedModule = receiverModule(object, imports);
-          if (resolvedModule && belongsToPackage(resolvedModule, roots) && bareWanted.has(member)) {
-            record(member, fn);
+          if (resolvedModule) {
+            if (belongsToPackage(resolvedModule, roots) && bareWanted.has(member)) record(member, fn);
+          } else {
+            // A method-style match: `.member(...)` on whatever the receiver
+            // is. This cannot be resolved further without a type checker — see
+            // the module doc — so it matches by name alone, gated on the file
+            // importing the module (or one of its submodules) at all. Never
+            // for a receiver proven above to be a module, of this package or
+            // any other: a module is not an instance of anything, so
+            // `requests.get(...)` is not `LookupDict.get`.
+            const canonical = methodWanted.get(member);
+            if (canonical && referencesPkg) record(canonical, fn);
           }
-          // A method-style match: `.member(...)` on whatever the receiver
-          // is. This cannot be resolved further without a type checker — see
-          // the module doc — so it matches by name alone, gated on the file
-          // importing the module (or one of its submodules) at all.
-          const canonical = methodWanted.get(member);
-          if (canonical && referencesPkg) record(canonical, fn);
         }
       }
     }

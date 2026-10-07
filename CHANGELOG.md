@@ -7,6 +7,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- A Python call through an imported module also matched any class method of
+  the same name: every `requests.get(...)` was reported as a call to
+  `LookupDict.get` as well. A call whose receiver is a module now matches only
+  that module's own functions.
+
 ## [0.2.0] — 2026-10-07
 
 0.1.1 was tagged but never published to npm, so its fixes — `emend --version`
