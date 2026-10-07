@@ -638,7 +638,13 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
       for (const pkg of ordered) {
         const target = remediationTarget(pkg);
 
-        const sites: CallSite[] = [...(imports.get(pkg.name) ?? [])];
+        // indexImports reads JavaScript and TypeScript, where an import names
+        // its package, so it answers for npm packages and nothing else. For any
+        // other ecosystem both answers would be claims nobody checked: a crate
+        // called `lodash` is not the npm `lodash` this code imports, and one
+        // called `serde` is not unimported because no JavaScript file names it.
+        const readable = pkg.ecosystem === 'npm';
+        const sites: CallSite[] = readable ? [...(imports.get(pkg.name) ?? [])] : [];
         const imported = sites.length > 0;
         if (!imported) {
           // Absent when no registered inventory understands this package's
@@ -655,7 +661,9 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
         const named = [...new Set(pkg.vulnerabilities.map((v) => v.cve ?? v.id))].join(', ');
         const reach = imported
           ? `imported at ${sites.length} site(s) in this repository`
-          : 'not imported from this repository’s source — it runs because a dependency calls it';
+          : readable
+            ? 'not imported from this repository’s source — it runs because a dependency calls it'
+            : `whether this repository imports it could not be checked — nothing here reads ${pkg.ecosystem} imports`;
         const leaves =
           target.leaves.length > 0
             ? ` ${target.leaves.length} has no published fix and survives the upgrade: ${target.leaves.join(', ')}.`
