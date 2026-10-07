@@ -656,9 +656,22 @@ export function vulnerabilityDetector(options: VulnerabilityOptions): Detector {
       for (const pkg of ordered) {
         const target = remediationTarget(pkg);
 
+        // An ecosystem whose resolver can say where its packages are imported
+        // was asked above. Otherwise indexImports answers, and only for npm: it
+        // reads JavaScript and TypeScript, where an import names its package.
+        // For any other ecosystem both answers would be claims nobody checked —
+        // a crate called `lodash` is not the npm `lodash` this code imports, and
+        // one called `serde` is not unimported because no JavaScript file names it.
         const answer = asked.get(pkg.ecosystem);
-        const unchecked = answer?.unchecked.get(pkg.name);
-        const sites: CallSite[] = [...((answer ? answer.sites.get(pkg.name) : imports.get(pkg.name)) ?? [])];
+        const npm = pkg.ecosystem === 'npm';
+        const unchecked = answer
+          ? answer.unchecked.get(pkg.name)
+          : npm
+            ? undefined
+            : `nothing here reads ${pkg.ecosystem} imports`;
+        const sites: CallSite[] = [
+          ...((answer ? answer.sites.get(pkg.name) : npm ? imports.get(pkg.name) : undefined) ?? []),
+        ];
         const imported = sites.length > 0;
         if (!imported) {
           // Absent when no registered inventory understands this package's
