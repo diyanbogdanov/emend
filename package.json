@@ -1,6 +1,6 @@
 {
   "name": "emend-cli",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Verified AI dependency migrations. Finds which of your lines a version bump actually breaks, fixes them, and proves the result still compiles and passes your tests.",
   "author": "Diyan Bogdanov",
   "license": "MIT",
@@ -20,7 +20,9 @@
     "dependabot",
     "typescript",
     "openapi",
-    "security"
+    "security",
+    "python",
+    "pypi"
   ],
   "type": "module",
   "bin": {

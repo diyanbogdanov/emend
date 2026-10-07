@@ -279,9 +279,10 @@ Step-by-step: [docs/github-app-setup.md](docs/github-app-setup.md) ·
 
 ## Status
 
-**MVP / proof of concept.** TypeScript + npm + GitHub only. Scanning, migration and pull
-requests are exercised against a real private repository; the GitHub App token exchange
-is the one link only a registered App can validate.
+**MVP / proof of concept.** `emend scan` reads TypeScript/npm and Python/PyPI repositories;
+`emend fix` and pull requests are npm-only, and GitHub is the only host. Scanning, migration
+and pull requests are exercised against a real private repository; the GitHub App token
+exchange is the one link only a registered App can validate.
 
 Emend is deliberately explicit about where it can be wrong or silent —
 **[docs/limitations.md](docs/limitations.md)** documents each case, measured rather than

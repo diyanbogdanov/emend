@@ -90,3 +90,84 @@ disagree about would surface it, and was tried: across 77 real package pairs it
 added **782** findings to catch that one, most of them differences buried deep in
 expanded inferred types. Reporting the changed alias itself instead measures at
 154 across the same 77 pairs, which is the shape a fix should take.
+
+---
+
+## Python
+
+Python support is newer and narrower than TypeScript's, and the gaps below are
+where it is narrower. Most are structural — they follow from how Python is read
+here — and are said as such rather than dressed as measurements.
+
+**`emend fix` does not migrate Python yet.** `scan` reads Python; `fix` bumps
+npm packages only, and refuses a Python finding outright rather than hand its
+name to a package manager that would install whatever npm package shares it.
+
+**Verifying Python needs a type checker.** Through `emend mcp`'s `verify` tool
+— the one path that verifies a Python repository today — Emend runs mypy or
+pyright, then pytest, and calls a repository with neither type checker
+`unverified`. Passing tests alone are not taken as proof: Python has no compile
+step, and accepting them would change what Emend acts on for TypeScript too.
+This is a refusal, not an oversight.
+
+**A package's API is read from its source, not inferred.** Each version's wheel
+is parsed, never imported, so nothing resolves what a name refers to:
+
+- a signature is whatever its own `def` line says;
+- re-exports through `__init__.py` are not followed; every file's top-level
+  names are merged into one namespace instead, which finds a re-exported name
+  where it is defined — and makes two files defining the same name collide,
+  the first in path order winning;
+- names manufactured at import time (a module `__getattr__`, PEP 562) are
+  invisible;
+- a decorator that changes what callers pass is read at its face-value `def`;
+  only `@deprecated` is understood.
+
+What it does find is real. PyYAML 5.4.1 → 6.0.3 reports `load` as drift at the
+call `yaml.load(open("c.yml"))`, where 6.0 made `Loader` required; urllib3
+1.26.18 → 2.0.0 finds `HTTPResponse.getheaders` and `AppEngineManager` removed
+and `request()` added — each a documented 2.0 change.
+
+**A method call is a lead, not proof.** Without types, `c.close()` cannot be
+tied to a `Session`. A call through an imported name is exact; a method of the
+right name, in a file that imports the package, is reported as a place to look.
+The import is the precondition, which is what keeps "not called from this
+repository" strong.
+
+**Only wheels are read, and only up to a size.** A package that publishes only
+an sdist is skipped — reading one can mean running its `setup.py`, which is the
+one thing analysis never does. A wheel PyPI lists at over 256 MiB is skipped
+too, which takes in the CUDA builds of torch and tensorflow. Both are reported
+as skipped, never as clean.
+
+**Import names come from where a wheel's files sit.** PyYAML is found as `yaml`
+because its wheel ships `yaml/`. A wheel that also ships a stray top-level
+`tests/` package claims `tests` as well, and a namespace package written the
+old pkgutil way claims its whole namespace (`google`) rather than its own
+corner of it. When a vulnerable package's wheel cannot be read at all, whether
+the repository imports it is reported as *could not be checked* — never as *not
+imported*.
+
+**A range in requirements.txt is not an installed version.** `requests>=2.0`
+names no version, so that dependency is skipped rather than guessed, unless a
+`-c` constraints file pins it. An `-r` or `-c` include is followed only inside
+the repository; one that leaves it, or is a URL, is named in a warning and not
+read. A repository with only a `pyproject.toml` has its dependencies read from
+nowhere, and says so.
+
+**Dependency groups are not read.** uv and Poetry record which group a package
+belongs to; Emend reports every dependency as a runtime one. That over-reports
+— a test-only package is screened as though it ships — which is the safe
+direction to be wrong in.
+
+**One ecosystem per repository.** A repository that both npm and Python claim
+has its npm dependencies analysed and its Python ones skipped, with a warning
+naming the ecosystem left out. Merging the two would key both by bare package
+name, and an npm and a PyPI package with the same name would overwrite each
+other.
+
+**PEP 440 is not fully normalised.** Versions written the canonical way order
+correctly — epochs, pre-, post- and dev-releases, including a post-release of a
+pre-release. Alternative spellings (`1.0-alpha`, `1.0.a1`, `rev`) are not
+normalised; one that does not parse sorts lowest, so it is never proposed as an
+upgrade target.
