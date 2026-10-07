@@ -245,6 +245,18 @@ function readPipfileLock(text: string): PythonManifest {
  */
 const REQUIREMENT_RE = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$/;
 
+/**
+ * The package one `requirements.txt` line requires, or null for a comment, an
+ * option, a continuation or anything else that names none — read the way
+ * `parseRequirementsTxt` reads a requirement, so a cited line is always one
+ * that function counted.
+ */
+export function requirementName(line: string): string | null {
+  const text = (line.split('#')[0] ?? '').trim();
+  if (text === '' || text.startsWith('-')) return null;
+  return REQUIREMENT_RE.exec(text)?.[1] ?? null;
+}
+
 /** What one `requirements.txt` sorts its entries into — see `parseRequirementsTxt`. */
 interface ParsedRequirements {
   versions: Map<string, string>;

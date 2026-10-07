@@ -25,7 +25,12 @@
 
 import { readFile, access, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { readPythonManifest, type PythonManifest, type PythonManifestKind } from './manifests.ts';
+import {
+  readPythonManifest,
+  requirementName,
+  type PythonManifest,
+  type PythonManifestKind,
+} from './manifests.ts';
 import type { EcosystemInventory } from '../ecosystems.ts';
 import type { CallSite, InstalledDependency, RepoInfo } from '../types.ts';
 import type { InstalledPackage } from '../osv.ts';
@@ -65,6 +70,9 @@ interface BestManifest {
   /** Each `-r`/`-c` include that could not be followed, and why — every one a
    *  reason the dependency list is partial. Always empty for the lockfiles. */
   unfollowed: string[];
+  /** The requirements files read, repository-relative, top one first — where a
+   *  package is required, for citing it. Empty for the lockfiles. */
+  files: { path: string; text: string }[];
 }
 
 /** PEP 503's normalised name, so `Requests` in one file and `requests` in another are one package. */
@@ -87,7 +95,7 @@ const canonical = (name: string): string => name.toLowerCase().replace(/[-_.]+/g
 async function readRequirementsTree(
   repoDir: string,
   text: string,
-): Promise<{ manifest: PythonManifest; unfollowed: string[] }> {
+): Promise<{ manifest: PythonManifest; unfollowed: string[]; files: BestManifest['files'] }> {
   const root = await realpath(repoDir);
   const top = await realpath(path.join(repoDir, 'requirements.txt'));
   const visited = new Set<string>([top]);
@@ -96,9 +104,11 @@ async function readRequirementsTree(
   const declared = new Map<string, string>();
   const constraints = new Map<string, string>();
   const unfollowed: string[] = [];
+  const files: BestManifest['files'] = [];
 
   const visit = async (file: string, body: string, asConstraints: boolean): Promise<void> => {
     const parsed = readPythonManifest('requirements.txt', body);
+    if (!asConstraints) files.push({ path: path.relative(root, file).split(path.sep).join('/'), text: body });
     if (asConstraints) {
       for (const [name, version] of parsed.versions) {
         if (!constraints.has(canonical(name))) constraints.set(canonical(name), version);
@@ -156,6 +166,7 @@ async function readRequirementsTree(
   return {
     manifest: { kind: 'requirements.txt', versions, declared, unsupported: null },
     unfollowed,
+    files,
   };
 }
 
@@ -180,17 +191,20 @@ async function readBestManifest(repoDir: string): Promise<BestManifest | null> {
       continue;
     }
     if (kind === 'requirements.txt') return { kind, text, ...(await readRequirementsTree(repoDir, text)) };
-    return { kind, text, manifest: readPythonManifest(kind, text), unfollowed: [] };
+    return { kind, text, manifest: readPythonManifest(kind, text), unfollowed: [], files: [] };
   }
   return null;
 }
 
 /**
- * The line in `raw` that names `name`, so a finding can point at it.
+ * The line in a lockfile's `raw` text that names `name`, so a finding can
+ * point at it. `requirements.txt` is not a lockfile and is cited by
+ * `requirementsSite` instead: given this needle, it never matched, and every
+ * requirements finding cited line 1.
  *
  * `Pipfile.lock` is JSON, so its packages are named by an object key
- * (`"requests": {`); the four other kinds are the TOML shape `manifests.ts`
- * reads, named by `name = "requests"`. Both needles are quoted so a shorter
+ * (`"requests": {`); the three TOML lockfiles name them as
+ * `name = "requests"`. Both needles are quoted so a shorter
  * package name cannot match inside a longer one's line (`requests` inside
  * `requests-toolbelt`) — the same reasoning `../ecosystems.ts`'s `lockfileSite`
  * gives for quoting an npm install path.
@@ -211,6 +225,23 @@ function pythonManifestSite(kind: PythonManifestKind, raw: string, name: string)
     text: name,
     via: 'import',
   };
+}
+
+/**
+ * Where `name` is required: the first line, across the requirements files in
+ * the order they were read, whose requirement is `name` under PEP 503 — the
+ * `Idna` a file writes is the `idna` an advisory names. Line 1 of
+ * requirements.txt when none names it, as before.
+ */
+function requirementsSite(files: BestManifest['files'], name: string): CallSite {
+  for (const file of files) {
+    const index = file.text.split('\n').findIndex((line) => {
+      const required = requirementName(line);
+      return required !== null && canonical(required) === canonical(name);
+    });
+    if (index !== -1) return { file: file.path, line: index + 1, column: 1, text: name, via: 'import' };
+  }
+  return { file: 'requirements.txt', line: 1, column: 1, text: name, via: 'import' };
 }
 
 export function pythonInventory(): EcosystemInventory {
@@ -388,7 +419,12 @@ export function pythonInventory(): EcosystemInventory {
 
       const sites = new Map<string, CallSite>();
       for (const pkg of packages) {
-        sites.set(`${pkg.name}@${pkg.version}`, pythonManifestSite(best.kind, best.text, pkg.name));
+        sites.set(
+          `${pkg.name}@${pkg.version}`,
+          best.kind === 'requirements.txt'
+            ? requirementsSite(best.files, pkg.name)
+            : pythonManifestSite(best.kind, best.text, pkg.name),
+        );
       }
       return sites;
     },
