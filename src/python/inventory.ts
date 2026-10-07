@@ -24,6 +24,7 @@
  */
 
 import { readFile, access, realpath } from 'node:fs/promises';
+import { OutsideRepositoryError, readRepoFile, within } from '../repofiles.ts';
 import path from 'node:path';
 import {
   readPythonManifest,
@@ -137,8 +138,7 @@ async function readRequirementsTree(
         unread('which does not exist — its packages were not read');
         continue;
       }
-      const rel = path.relative(root, real);
-      if (rel === '' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+      if (!within(root, real) || real === root) {
         unread('which is outside the repository — not read');
         continue;
       }
@@ -186,8 +186,21 @@ async function readBestManifest(repoDir: string): Promise<BestManifest | null> {
   for (const kind of MANIFEST_ORDER) {
     let text: string;
     try {
-      text = await readFile(path.join(repoDir, kind), 'utf8');
-    } catch {
+      text = await readRepoFile(repoDir, kind);
+    } catch (err) {
+      // Present but a link out of the repository: reported as a manifest that
+      // could not be read, never as the absence of one — the next candidate
+      // standing in for it would be a different file's answer.
+      if (err instanceof OutsideRepositoryError) {
+        return {
+          kind,
+          text: '',
+          manifest: { kind, versions: new Map(), declared: new Map(), unsupported: kind },
+          unfollowed: [err.message],
+          // Nothing was read, so there is no requirement line to cite.
+          files: [],
+        };
+      }
       continue;
     }
     if (kind === 'requirements.txt') return { kind, text, ...(await readRequirementsTree(repoDir, text)) };
@@ -299,7 +312,10 @@ export function pythonInventory(): EcosystemInventory {
       return {
         packages,
         unsupported: best.manifest.unsupported,
-        incomplete: best.unfollowed.length > 0 ? best.unfollowed.join('; ') : null,
+        // A manifest refused outright is already `unsupported`, and declared()
+        // gives the reason; repeating it here printed it twice in one scan.
+        incomplete:
+          best.unfollowed.length > 0 && !best.manifest.unsupported ? best.unfollowed.join('; ') : null,
       };
     },
 

@@ -22,6 +22,7 @@
 
 import path from 'node:path';
 import { readFile, access } from 'node:fs/promises';
+import { OutsideRepositoryError, readRepoFile } from './repofiles.ts';
 import { readLockfile } from './lockfile.ts';
 import { findWorkspaces } from './workspaces.ts';
 import { pythonInventory } from './python/inventory.ts';
@@ -172,10 +173,21 @@ function versionFromRange(range: string): string | null {
   return m?.[1] ?? null;
 }
 
-async function readManifest(file: string): Promise<RepoManifest | null> {
+/**
+ * A package.json of the repository, or null when it cannot be read. A link out
+ * of the repository is also null, and said in `warnings` when the caller keeps
+ * any: it exists, so leaving it unsaid would read as a workspace with nothing
+ * declared.
+ */
+async function readManifest(
+  repoDir: string,
+  relative: string,
+  warnings?: string[],
+): Promise<RepoManifest | null> {
   try {
-    return JSON.parse(await readFile(file, 'utf8')) as RepoManifest;
-  } catch {
+    return JSON.parse(await readRepoFile(repoDir, relative)) as RepoManifest;
+  } catch (err) {
+    if (err instanceof OutsideRepositoryError) warnings?.push(err.message);
     return null;
   }
 }
@@ -243,7 +255,7 @@ function npmInventory(): EcosystemInventory {
       // slip past any check that stops at `applies()`'s own manifest.
       let incomplete: string | null = null;
       if (packages.length === 0 && lock.kind === null && !lock.unsupported) {
-        const manifest = await readManifest(path.join(repoDir, 'package.json'));
+        const manifest = await readManifest(repoDir, 'package.json');
         const declaredCount =
           Object.keys(manifest?.dependencies ?? {}).length +
           Object.keys(manifest?.devDependencies ?? {}).length;
@@ -289,7 +301,7 @@ function npmInventory(): EcosystemInventory {
       // pre-router `readRepo` always gave.
       let manifest: RepoManifest;
       try {
-        manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as RepoManifest;
+        manifest = JSON.parse(await readRepoFile(repoDir, 'package.json')) as RepoManifest;
       } catch (err) {
         throw new Error(`unreadable package.json at ${manifestPath}: ${(err as Error).message}`);
       }
@@ -313,7 +325,7 @@ function npmInventory(): EcosystemInventory {
         const wsManifest =
           workspace === ''
             ? manifest
-            : await readManifest(path.join(repoDir, workspace, 'package.json'));
+            : await readManifest(repoDir, path.join(workspace, 'package.json'), warnings);
         if (!wsManifest) continue;
 
         const groups: Array<[Record<string, string> | undefined, boolean]> = [
@@ -446,7 +458,7 @@ function npmInventory(): EcosystemInventory {
 
       let raw: string;
       try {
-        raw = await readFile(path.join(repoDir, kind), 'utf8');
+        raw = await readRepoFile(repoDir, kind);
       } catch {
         return new Map();
       }

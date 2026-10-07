@@ -23,8 +23,7 @@
  * degraded rather than treating as an empty dependency set.
  */
 
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { OutsideRepositoryError, readRepoFile } from './repofiles.ts';
 
 /** Where a concrete version came from. Callers surface this; never imply disk. */
 export type VersionSource = 'node_modules' | 'lockfile' | 'range';
@@ -266,8 +265,10 @@ export async function readLockfile(repoDir: string): Promise<LockfileResult> {
 
   let raw: string;
   try {
-    raw = await readFile(path.join(repoDir, 'package-lock.json'), 'utf8');
-  } catch {
+    raw = await readRepoFile(repoDir, 'package-lock.json');
+  } catch (err) {
+    // Present but a link out of the repository: unread, which is not absent.
+    if (err instanceof OutsideRepositoryError) return { ...empty, unsupported: 'package-lock.json' };
     // pnpm and yarn describe only which version resolved, not an install tree.
     // That is the fact the analysis actually needs; the tree only ever served as
     // a staging layout, and staging places everything flat regardless.
@@ -278,8 +279,9 @@ export async function readLockfile(repoDir: string): Promise<LockfileResult> {
     ] as const) {
       let text: string;
       try {
-        text = await readFile(path.join(repoDir, file), 'utf8');
-      } catch {
+        text = await readRepoFile(repoDir, file);
+      } catch (err) {
+        if (err instanceof OutsideRepositoryError) return { ...empty, unsupported: file };
         continue;
       }
       const lines = new Map<string, number>();
@@ -296,10 +298,10 @@ export async function readLockfile(repoDir: string): Promise<LockfileResult> {
 
     for (const name of UNSUPPORTED_LOCKFILES) {
       try {
-        await readFile(path.join(repoDir, name), 'utf8');
+        await readRepoFile(repoDir, name);
         return { ...empty, unsupported: name };
-      } catch {
-        /* not this one */
+      } catch (err) {
+        if (err instanceof OutsideRepositoryError) return { ...empty, unsupported: name };
       }
     }
     return empty;
