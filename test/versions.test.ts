@@ -21,11 +21,13 @@ test('prerelease sorts below the release it precedes', () => {
   assert.equal(compareVersions('1.0.0-rc.1', '1.0.0-rc.1'), 0);
 });
 
-test('an ecosystem with no registered scheme falls back to semver', () => {
-  // Every ecosystem orders versions somehow; semver is the only scheme built.
-  // The fallback keeps behaviour identical to before this seam existed.
+test('npm falls back to semver; PyPI is now claimed by PEP 440', () => {
+  // npm has no scheme of its own, so it falls through to the semver floor.
+  // PyPI used to fall through too, but pep440.ts now registers ahead of that
+  // floor (see versions.ts's module doc for why the order matters) — so this
+  // is no longer "no registered scheme" for PyPI.
   assert.equal(schemeFor('npm').id, 'semver');
-  assert.equal(schemeFor('PyPI').id, 'semver');
+  assert.equal(schemeFor('PyPI').id, 'pep440');
 });
 
 test('a registered scheme is consulted ahead of the semver floor', () => {

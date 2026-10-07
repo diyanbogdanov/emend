@@ -8,7 +8,10 @@ test('npm reports every tier as available', () => {
 });
 
 test('an ecosystem with no extractor reports the gap rather than hiding it', () => {
-  const caps = capabilitiesFor('PyPI');
+  // Not PyPI: Task 8 registered a Python extractor, so PyPI now clears the
+  // surface tier (see pythonsurface.test.ts) and is no longer an example of
+  // "nothing claims this ecosystem". crates.io still is, on every tier.
+  const caps = capabilitiesFor('crates.io');
   assert.equal(caps.surface, false);
   assert.equal(caps.callSites, false);
 });
@@ -16,12 +19,16 @@ test('an ecosystem with no extractor reports the gap rather than hiding it', () 
 test('the coverage line names what was not examined, and why', () => {
   // The requirement: a reader must not be able to mistake "not examined" for
   // "examined and clean".
+  // Not PyPI: Task 9 registered a Python call-site resolver, so PyPI now
+  // clears every tier (see the capabilities test above) and is no longer an
+  // example of "something was not examined". crates.io still is, on every tier.
+  //
   // The analysed count passed here is irrelevant to this case (a missing tier
   // is a capability fact, not an observation) and is 0 only because that is
   // the simplest value to pass.
-  const line = describeCoverage('PyPI', 0);
+  const line = describeCoverage('crates.io', 0);
   assert.match(line, /not examined/);
-  assert.match(line, /PyPI/);
+  assert.match(line, /crates\.io/);
   assert.doesNotMatch(line, /clean|no issues|nothing found/i);
 });
 
@@ -45,10 +52,10 @@ test('a fully covered ecosystem with nothing examined does not claim any tier ra
 });
 
 test('an ecosystem the scan analysed keeps its coverage line when no inventory claims the repository', () => {
-  // npm's inventory claims a repository by its lockfile, while readRepo
-  // analyses a bare package.json — so a lockfile-less scan analysed packages,
-  // found breaking changes, and printed no coverage line at all. Silence is the
-  // one thing this line exists to rule out.
+  // When the claimants and readRepo disagreed — npm once claimed a repository
+  // only by its lockfile, while readRepo analysed a bare package.json — a scan
+  // analysed packages, found breaking changes, and printed no coverage line at
+  // all. Silence is the one thing this line exists to rule out.
   assert.deepEqual(coverageEcosystems('npm', []), ['npm']);
 });
 

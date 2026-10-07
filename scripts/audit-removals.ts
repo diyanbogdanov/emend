@@ -138,7 +138,7 @@ for (const pkg of PACKAGES) {
     const client = clientFor('npm');
     if (!client) throw new Error(`no registry client claims ecosystem 'npm'`);
     const pack = await client.versions(pkg);
-    const to = resolveTargetVersion(pack);
+    const to = resolveTargetVersion(pack, 'npm');
     if (!to) continue;
     const from = pickFrom(pack.versions, to);
     if (!from) continue;

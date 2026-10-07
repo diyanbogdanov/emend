@@ -7,6 +7,31 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **Python support in `emend scan`.** A repository with `uv.lock`,
+  `poetry.lock`, `pdm.lock`, `Pipfile.lock` or `requirements.txt` is scanned
+  the way an npm one is: dependencies are screened against OSV, each package's
+  public API is diffed between versions, and the changes are located in the
+  repository's own code. Versions are ordered by PEP 440, not semver.
+  - Lockfiles give exact versions. `requirements.txt` gives its `==` pins and
+    its ranges, including hashed `pip-compile` output, and its `-r` and `-c`
+    includes are followed — inside the repository only.
+  - A package's API is read statically from its published wheel; nothing in it
+    runs. A package that publishes only an sdist is skipped rather than built,
+    as is a wheel PyPI lists at over 256 MiB.
+  - Call sites are found through imports, under the module names a wheel
+    installs — PyYAML is `import yaml`. A method call is reported as a lead,
+    since nothing resolves the type of what it is called on.
+  - A vulnerable package is reported as imported where the repository imports
+    it, and as "could not be checked" — never "not imported" — when its import
+    names could not be read.
+  - Verification runs mypy or pyright, then pytest. A repository with neither
+    type checker configured is `unverified`: passing tests alone are not taken
+    as proof.
+  - `emend fix` migrates npm packages only, and refuses a Python finding rather
+    than running `npm install` for it.
+
 ### Changed
 
 - Relicensed from AGPL-3.0-only to MIT. The contributor licence agreement and the
@@ -31,6 +56,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - A vulnerable package that nothing imports cited `package-lock.json` as its
   site even in a pnpm, yarn or bun repository that has none — line 1 of a file
   that does not exist. It now cites the lockfile that was actually read.
+- A migration whose tests passed while its typecheck was skipped was summarised
+  as "typecheck and tests are green". It now says the tests pass and types were
+  not checked.
 - A finding in a pnpm, yarn or bun repository cited line 1 of its lockfile,
   with text that appears nowhere in it. It now cites the line the lockfile
   names the package on.

@@ -135,3 +135,33 @@ test('a clean or skipped typecheck counts nothing', () => {
   // repository as damaged by an upgrade that only made it noisier.
   assert.equal(countDiagnostics(withOutput('src/a.ts(1,1): warning TS6133: unused')), 0);
 });
+
+// ---------------------------------------------------------------------------
+// The `verified` summary must only claim what actually ran.
+// ---------------------------------------------------------------------------
+
+test('a pass with a skipped typecheck does not claim the typecheck ran', () => {
+  // `compare`'s final branch is reached whenever the tests ran and passed —
+  // including when the typecheck was skipped, which happens for any repository
+  // with a test script and no tsconfig.json. Its summary said "typecheck and
+  // tests are green", asserting something that did not happen. The mirror case,
+  // `typecheck-only`, was always careful about this: its own comment says
+  // asserting one claim when another is true "is simply false".
+  const skippedTypecheck = {
+    typecheck: skip('tsc', 'no typecheck script and no tsconfig.json'),
+    test: pass('npm test'),
+  };
+  const report = compare(skippedTypecheck, skippedTypecheck);
+  assert.equal(report.outcome, 'verified');
+  assert.doesNotMatch(report.summary, /typecheck and tests are green/);
+  assert.match(report.summary, /types were not checked|typecheck did not run/i);
+});
+
+test('a pass with both steps run still says typecheck and tests are green', () => {
+  // Companion to the test above: pins that the skipped-typecheck wording fix
+  // did not flip the summary for the ordinary case where both steps ran.
+  const bothRan = { typecheck: pass('tsc'), test: pass('npm test') };
+  const report = compare(bothRan, bothRan);
+  assert.equal(report.outcome, 'verified');
+  assert.match(report.summary, /typecheck and tests are green/);
+});

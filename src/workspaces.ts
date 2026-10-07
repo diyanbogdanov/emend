@@ -12,7 +12,8 @@
  * confident "no findings" is trusted.
  */
 
-import { readFile, readdir } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
+import { OutsideRepositoryError, readRepoFile } from './repofiles.ts';
 import path from 'node:path';
 
 /** Bounds discovery on repositories with pathological directory counts. */
@@ -35,9 +36,7 @@ async function readWorkspaceGlobs(repoDir: string): Promise<string[]> {
   const globs: string[] = [];
 
   try {
-    const manifest = JSON.parse(
-      await readFile(path.join(repoDir, 'package.json'), 'utf8'),
-    ) as RootManifest;
+    const manifest = JSON.parse(await readRepoFile(repoDir, 'package.json')) as RootManifest;
     const declared = Array.isArray(manifest.workspaces)
       ? manifest.workspaces
       : manifest.workspaces?.packages;
@@ -49,7 +48,7 @@ async function readWorkspaceGlobs(repoDir: string): Promise<string[]> {
   }
 
   try {
-    const yaml = await readFile(path.join(repoDir, 'pnpm-workspace.yaml'), 'utf8');
+    const yaml = await readRepoFile(repoDir, 'pnpm-workspace.yaml');
     let inPackages = false;
     for (const line of yaml.split('\n')) {
       if (/^[a-zA-Z]/.test(line)) inPackages = /^packages:/.test(line);
@@ -84,10 +83,13 @@ async function expandGlob(
     if (index >= segments.length) {
       const rel = path.relative(repoDir, dir).split(path.sep).join('/');
       try {
-        await readFile(path.join(dir, 'package.json'), 'utf8');
+        await readRepoFile(repoDir, path.join(rel, 'package.json'));
         if (rel !== '') found.add(rel);
-      } catch {
-        /* a matched directory without a manifest is not a workspace */
+      } catch (err) {
+        // Kept as a workspace, so reading it is refused where that is said
+        // aloud (ecosystems.ts) rather than vanishing here.
+        if (err instanceof OutsideRepositoryError && rel !== '') found.add(rel);
+        /* otherwise a matched directory without a manifest is not a workspace */
       }
       return;
     }

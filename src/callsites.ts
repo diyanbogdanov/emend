@@ -9,9 +9,13 @@
  *    cannot see because `c` is just a local variable
  */
 
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
+import { linksOutside } from './repofiles.ts';
 import type { ApiSurface, CallSite } from './types.ts';
+import type { InstalledPackage } from './osv.ts';
+import { findPythonCallSites, findPythonImportSites } from './python/callsites.ts';
 
 /**
  * Source files admitted to the TypeScript program.
@@ -125,9 +129,53 @@ export function buildProgram(
   return ts.createProgram(fileNames, options);
 }
 
-export function walkDir(dir: string, exts: string[]): string[] {
+/**
+ * Skipped by name and never descended into — a stronger exclusion than
+ * `isVendored` (python/callsites.ts) applies for Python call-site search,
+ * which still visits a vendored directory's files one by one and filters
+ * them out after the fact. This list answers a different question — "don't
+ * collect this at all" versus "don't search this for call sites" — for
+ * every caller of this shared, language-agnostic walk, not just Python's.
+ *
+ * A second list rather than an import of `VENDORED_DIR`: the two happen to
+ * share most of their names today, but nothing here needs to be
+ * Python-aware, and coupling this walk to a Python-specific module just to
+ * avoid repeating seven short strings is not a trade worth making.
+ *
+ * `.venv`, `venv`, `__pycache__`, `site-packages`, `.tox`, `.nox` and `envs`
+ * carry the same names and the same reasoning as `VENDORED_DIR` — see its
+ * comment. `env` is excluded from this blind list for the same reason it is
+ * excluded there: it is a plausible real source directory name, so the walk
+ * below only skips it when a sibling `pyvenv.cfg` actually marks it as a
+ * virtual environment.
+ */
+const VENDORED_DIR_NAMES = [
+  '.venv',
+  'venv',
+  '__pycache__',
+  'site-packages',
+  '.tox',
+  '.nox',
+  'envs',
+];
+
+/**
+ * Every file under `dir` ending in one of `exts`, skipping dependency and
+ * build directories.
+ *
+ * A file or directory that is a link to outside `dir` is left out: everything
+ * downstream — pins, detectors, lint tools, both call-site resolvers — reads
+ * whatever this returns, so this is the one place to stop a committed
+ * `Dockerfile -> /etc/shadow` from being read. Each one left out is appended to
+ * `escaped`, relative to `dir`, for a caller that will say so.
+ */
+export function walkDir(dir: string, exts: string[], escaped?: string[]): string[] {
+  const root = realpathSync(dir);
   const out: string[] = [];
-  const skip = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', 'out']);
+  const skip = new Set([
+    'node_modules', '.git', 'dist', 'build', 'coverage', '.next', 'out',
+    ...VENDORED_DIR_NAMES,
+  ]);
   const stack = [dir];
   while (stack.length > 0) {
     const current = stack.pop();
@@ -141,13 +189,27 @@ export function walkDir(dir: string, exts: string[]): string[] {
     for (const e of entries) {
       const base = path.basename(e);
       if (skip.has(base)) continue;
-      if (exts.some((x) => e.endsWith(x))) out.push(e);
+      if (!exts.some((x) => e.endsWith(x))) continue;
+      if (linksOutside(root, e)) {
+        escaped?.push(path.relative(dir, e));
+        continue;
+      }
+      out.push(e);
     }
     // readDirectory with depth 1 returns files only; recurse into subdirectories.
     try {
       for (const sub of ts.sys.getDirectories(current)) {
-        if (skip.has(sub)) continue;
-        stack.push(path.join(current, sub));
+        if (sub === 'env') {
+          if (ts.sys.fileExists(path.join(current, sub, 'pyvenv.cfg'))) continue;
+        } else if (skip.has(sub)) {
+          continue;
+        }
+        const subPath = path.join(current, sub);
+        if (linksOutside(root, subPath)) {
+          escaped?.push(path.relative(dir, subPath));
+          continue;
+        }
+        stack.push(subPath);
       }
     } catch {
       /* unreadable directory — skip */
@@ -399,15 +461,56 @@ export interface CallSiteResolver {
   ecosystems: string[];
   /** Whether this resolver can parse `file` well enough to search it. */
   handles(file: string): boolean;
-  /** Where `repoDir` calls the tracked symbols of `surfaces`, narrowed to `wanted`. */
+  /**
+   * Where `repoDir` calls the tracked symbols of `surfaces`, narrowed to
+   * `wanted`.
+   *
+   * Returns a bare `CallSiteIndex` or a `Promise` of one: the TypeScript
+   * resolver builds its whole program synchronously and returns directly;
+   * the Python resolver (`python/callsites.ts`) cannot — its parser loads a
+   * WASM grammar, and `web-tree-sitter` only offers an async API for that —
+   * so forcing one shape onto the other would mean either wrapping every
+   * synchronous call in a needless `Promise.resolve`, or blocking Python's
+   * parser on a synchronous load it cannot do. `locateCallSites` (below) is
+   * the caller: it dispatches per ecosystem through `resolverForEcosystem`
+   * and `await`s every resolver's `find` uniformly, which resolves either
+   * kind alike.
+   */
   find(
     repoDir: string,
     surfaces: Map<string, ApiSurface>,
     wanted: Map<string, Set<string>>,
-  ): CallSiteIndex;
+  ): CallSiteIndex | Promise<CallSiteIndex>;
+  /**
+   * Where the repository imports each of `packages` — the vulnerability
+   * detector's question, whether a package is used here at all, rather than
+   * `find`'s, whether a symbol is called.
+   *
+   * Optional: npm's answer predates this seam and lives in detectors.ts
+   * (`indexImports`), where an import specifier is the package's own name. A
+   * resolver implements this when that does not hold — PyYAML is `import yaml`.
+   */
+  importSites?(
+    files: string[],
+    read: (file: string) => Promise<string | null>,
+    packages: InstalledPackage[],
+  ): Promise<ImportSites>;
+}
+
+/** What `CallSiteResolver.importSites` found. */
+export interface ImportSites {
+  /** Package name -> where it is imported. An empty list is "read every file, found no import". */
+  sites: Map<string, CallSite[]>;
+  /**
+   * Package name -> why its imports could not be looked for. Kept apart from
+   * `sites` because an empty list there is a claim — "not imported" — and
+   * nobody looked for these.
+   */
+  unchecked: Map<string, string>;
 }
 
 const TS_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+const PY_EXTENSIONS = ['.py', '.pyi'];
 
 // Every language a repository's call sites can be searched in. Registering one
 // here is what makes a language searchable at all — leaving one out is not a
@@ -422,6 +525,13 @@ const RESOLVERS: CallSiteResolver[] = [
     ecosystems: ['npm'],
     handles: (file) => TS_EXTENSIONS.some((ext) => file.endsWith(ext)),
     find: findCallSites,
+  },
+  {
+    id: 'python',
+    ecosystems: ['PyPI'],
+    handles: (file) => PY_EXTENSIONS.some((ext) => file.endsWith(ext)),
+    find: findPythonCallSites,
+    importSites: findPythonImportSites,
   },
 ];
 
@@ -461,8 +571,8 @@ export function resolverForEcosystem(ecosystem: string): CallSiteResolver | unde
  * `RESOLVERS` load-bearing rather than decorative.
  *
  * A single resolver cannot serve two languages: the TypeScript resolver
- * builds a `ts.Program` and can never see a file in any other language, and a
- * resolver for another language could never see a `.ts` one. Calling one
+ * builds a `ts.Program` and can never see a `.py` file; the Python resolver
+ * walks `.py`/`.pyi` files and can never see a `.ts` one. Calling one
  * resolver on every tracked package regardless of ecosystem is not a partial
  * answer, it is a wrong one — every package outside that resolver's own
  * ecosystem silently gets zero call sites, which reads as "not called from
@@ -474,8 +584,8 @@ export function resolverForEcosystem(ecosystem: string): CallSiteResolver | unde
  * them rather than inside them.
  *
  * The merge stays honest in both directions a careless one could hide:
- * `filesAnalyzed` is the sum across every resolver that ran — each reads only
- * its own language's files, so summing double-counts nothing —
+ * `filesAnalyzed` is the sum across every resolver that ran — a `.ts` file
+ * and a `.py` file are disjoint sets, so summing double-counts nothing —
  * and `warnings` is the concatenation of every resolver's own warnings,
  * because dropping one resolver's warnings here would hide exactly the
  * coverage gaps this codebase exists to report. A package whose ecosystem no

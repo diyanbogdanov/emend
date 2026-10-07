@@ -362,16 +362,26 @@ test('a version guessed from a range is never used as the authority', () => {
   // Telling someone their Dockerfile disagrees with a version that might not
   // exist is exactly the false certainty the honesty rules forbid, and the
   // lockfile-backed case is indistinguishable to whoever reads the finding.
+  //
+  // `pinned` (an exact `package.json`/`requirements.txt` specifier, e.g.
+  // "4.17.21" or "requests==2.31.0") is deliberately held to the same
+  // standard, even though nothing was inferred there: the manifest states it
+  // outright, but no resolver walked the whole dependency graph to confirm it
+  // — it may still name a version that does not exist or cannot satisfy the
+  // rest of the graph, exactly the risk this function exists to keep out of
+  // arbitration. See InstalledDependency.source's own doc.
   const resolved = resolvedVersions([
     { name: 'playwright', installed: '1.63.0', source: 'range' },
     { name: 'zod', installed: '3.22.4', source: 'lockfile' },
     { name: 'react', installed: '19.0.0', source: 'node_modules' },
     { name: 'ghost', installed: null, source: 'none' },
+    { name: 'lodash', installed: '4.17.21', source: 'pinned' },
   ]);
   assert.equal(resolved.get('playwright'), undefined, 'a guess cannot arbitrate');
   assert.equal(resolved.get('zod'), '3.22.4');
   assert.equal(resolved.get('react'), '19.0.0');
   assert.equal(resolved.get('ghost'), undefined);
+  assert.equal(resolved.get('lodash'), undefined, 'a pin cannot arbitrate either');
 });
 
 test('a pin for a package the repository does not install is left alone', () => {

@@ -17,6 +17,7 @@ import { extractorFor } from './surface.ts';
 import { planFinding } from './plan.ts';
 import { findWorkspaces } from './workspaces.ts';
 import { readRepo } from './inventory.ts';
+import { inventoryFor } from './ecosystems.ts';
 import { scanPins, resolvedVersions, planPinRepair } from './pins.ts';
 import { planOverride, planRemediation, type Remediation } from './remediate.ts';
 import { applyLintPatch, repairableFiles, type LintFinding } from './lint.ts';
@@ -505,6 +506,33 @@ async function targetSymbols(repoDir: string, finding: Finding): Promise<Record<
   return toSurface.symbols;
 }
 
+/**
+ * Refuses to bump anything that is not an npm package of this repository.
+ *
+ * `bumpDependency` speaks npm, pnpm, yarn and bun and nothing else. Handed a
+ * PyPI name it ran `npm install <name>`: whatever unrelated npm package shares
+ * the name, its install scripts included unless --untrusted, with the
+ * requirements file left untouched. A finding does not carry its ecosystem
+ * (`targetSymbols` says why), so this asks the repository: a declared npm
+ * dependency, or a package the npm lockfile installs — the second because a
+ * vulnerability fix bumps transitive packages package.json never names.
+ *
+ * Exported so the guard can be tested on its own; every path into
+ * `bumpDependency` below calls it before a workspace exists.
+ */
+export async function assertNpmPackage(repoDir: string, pkg: string): Promise<void> {
+  const repo = await readRepo(repoDir);
+  if (repo.dependencies.some((d) => d.name === pkg && d.ecosystem === 'npm')) return;
+  const npm = inventoryFor('npm');
+  if (npm && (await npm.applies(repoDir))) {
+    const { packages } = await npm.read(repoDir);
+    if (packages.some((p) => p.name === pkg)) return;
+  }
+  throw new Error(
+    `emend fix bumps npm packages only, and ${pkg} is not one in ${repoDir} — refusing rather than running npm install for it`,
+  );
+}
+
 
 /**
  * Symbols the compiler says are gone, as opposed to symbols it merely names.
@@ -702,6 +730,7 @@ export async function fixPackage(
   const pkg = first.pkg;
   const toVersion = first.toVersion;
   const fromVersion = first.fromVersion;
+  await assertNpmPackage(repoDir, pkg);
 
   progress(`planning ${findings.length} finding(s) for ${pkg}`);
   const toSymbols = await targetSymbols(repoDir, first);
@@ -1231,6 +1260,7 @@ export async function fixVulnerability(
   const progress = options.onProgress ?? (() => {});
   const untrusted = options.untrusted === true;
   const phaseOpts = { skipTests: untrusted };
+  await assertNpmPackage(repoDir, finding.pkg);
 
   const repo = await readRepo(repoDir);
   const directs = new Set(repo.dependencies.map((d) => d.name));
@@ -1592,6 +1622,7 @@ export async function fixFreshness(
   const progress = options.onProgress ?? (() => {});
   const untrusted = options.untrusted === true;
   const phaseOpts = { skipTests: untrusted };
+  await assertNpmPackage(repoDir, finding.pkg);
 
   let ws: Workspace | null = null;
   try {

@@ -660,7 +660,9 @@ async function cmdScan(args: Args): Promise<number> {
     console.log(JSON.stringify(report, null, 2));
   } else {
     // Every dependency readRepo returns belongs to the one ecosystem it
-    // analysed, so the first names it.
+    // analysed — it reads a single claimant (inventory.ts) — so the first
+    // names it. Not a literal 'npm': a Python scan would then print an npm
+    // line credited with PyPI's counts.
     const ecosystems = coverageEcosystems(
       repo.dependencies[0]?.ecosystem,
       (await inventoriesFor(repoDir)).map((i) => i.osvEcosystem),
