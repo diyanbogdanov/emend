@@ -101,28 +101,33 @@ export interface EcosystemInventory {
  * disk at all. `file` is now a parameter so this only ever cites a lockfile
  * that is actually there; the caller is responsible for that guarantee.
  *
- * The search is for the install path *in quotes*, which is how npm writes it
- * (`"node_modules/qs": {`). pnpm, yarn and bun install paths are synthesized
- * by `readLockfile` rather than read off the page, so for those the search
- * will usually miss and fall through to line 1 — that fallback is honest, not
- * an artifact: the package genuinely is named somewhere in `file`, this just
- * did not pinpoint the line. `column` is likewise never computed. `via:
+ * pnpm, yarn and bun are read a line at a time, so `readLockfile` records the
+ * line each package was read from (`line`) and that is the one cited. npm's
+ * package-lock.json is parsed as JSON, so for it the install path is searched
+ * for *in quotes*, as npm writes it (`"node_modules/qs": {`). Searching for
+ * that path in the other three used to miss every time and cite line 1 —
+ * pnpm's `lockfileVersion` — with a synthesized path that appeared nowhere in
+ * the file. The text cited is the line as written. `column` is never
+ * computed. `via:
  * 'import'` is a stretch for a manifest reference — `CallSite.via` is only
  * `'import' | 'type'` — but widening that union changes what every renderer
  * prints, which a behaviour-neutral refactor must not do. Worth revisiting
  * when something other than npm has a manifest to point at.
  */
-function lockfileSite(file: string, lockfile: string, installPath: string): CallSite {
+function lockfileSite(file: string, lockfile: string, installPath: string, line?: number): CallSite {
   const lines = lockfile.split('\n');
-  const index = lines.findIndex((l) => l.includes(`"${installPath}"`));
+  const index = line !== undefined ? line - 1 : lines.findIndex((l) => l.includes(`"${installPath}"`));
   return {
     file,
     line: index === -1 ? 1 : index + 1,
     column: 1,
-    text: installPath,
+    text: index === -1 ? installPath : (lines[index] ?? '').trim().slice(0, 120),
     via: 'import',
   };
 }
+
+/** Every lockfile `readLockfile` looks at, parseable or not. */
+const LOCKFILE_NAMES = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb'];
 
 interface RepoManifest {
   name?: string;
@@ -179,21 +184,33 @@ function npmInventory(): EcosystemInventory {
   return {
     id: 'npm',
     osvEcosystem: 'npm',
-    // What `applies` below actually checks: a bare `package.json`, or any of
-    // the four lockfiles `readLockfile` can parse. `bun.lockb` is excluded on
-    // purpose — `readLockfile` recognises it too, but only to report it as
-    // unsupported; finding it alone (no package.json, no parseable lockfile)
-    // does not make `applies` return true, so it is not actually looked for
-    // in the sense this list promises.
-    manifests: ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock'],
+    // What `applies` below actually checks: a bare `package.json`, or any
+    // lockfile `readLockfile` looks at — `bun.lockb` included, since one it
+    // cannot read is now reported as unreadable rather than passed over. The
+    // same list `applies` walks, so the two cannot disagree.
+    manifests: ['package.json', ...LOCKFILE_NAMES],
 
+    // Whether there is a lockfile to read, not whether it parses. Parsing here
+    // cost a full parse every time anything asked which ecosystems claim a
+    // repository — once more per scan for the coverage line, and again inside
+    // the vulnerability screen, whose read() parses it anyway. And claiming
+    // only what parsed disowned a repository whose lockfile is unreadable: the
+    // screen did not run and said nothing, where read() reports it as
+    // `unsupported` and the screen says so.
     async applies(repoDir) {
       // A `package.json` alone is enough to have declared dependencies worth
       // analysing; a lockfile alone is enough to have an installed tree worth
       // screening. Gating on the lockfile only would stop `readRepo` working for
-      // repositories it handles today.
+      // repositories it handles today. The lockfile is asked to exist, not to
+      // parse: parsing here cost a full parse every time anything asked which
+      // ecosystems claim a repository, and claiming only what parsed disowned
+      // a repository whose lockfile is unreadable, so the vulnerability screen
+      // said nothing rather than that it could not read it.
       if (await exists(path.join(repoDir, 'package.json'))) return true;
-      return (await readLockfile(repoDir)).tree.size > 0;
+      for (const name of LOCKFILE_NAMES) {
+        if (await exists(path.join(repoDir, name))) return true;
+      }
+      return false;
     },
 
     async read(repoDir) {
@@ -437,17 +454,17 @@ function npmInventory(): EcosystemInventory {
       // One pass over the tree builds every install path this call could
       // need, rather than re-scanning it once per package as manifestSite
       // used to — the parse and the read above already happened only once.
-      const installPaths = new Map<string, string>();
+      const entries = new Map<string, { installPath: string; line?: number }>();
       for (const entry of lock.tree.values()) {
         const key = `${entry.name}@${entry.version}`;
-        if (!installPaths.has(key)) installPaths.set(key, entry.installPath);
+        if (!entries.has(key)) entries.set(key, entry);
       }
 
       const sites = new Map<string, CallSite>();
       for (const pkg of packages) {
         const key = `${pkg.name}@${pkg.version}`;
-        const installPath = installPaths.get(key) ?? pkg.name;
-        sites.set(key, lockfileSite(kind, raw, installPath));
+        const entry = entries.get(key);
+        sites.set(key, lockfileSite(kind, raw, entry?.installPath ?? pkg.name, entry?.line));
       }
       return sites;
     },

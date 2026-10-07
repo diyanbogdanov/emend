@@ -60,6 +60,13 @@ export interface LockEntry {
   /** Install path relative to the repository root. */
   installPath: string;
   dev: boolean;
+  /**
+   * The 1-based line of the lockfile that names this package, where the parser
+   * read it off a line — pnpm, yarn and bun. Absent for package-lock.json,
+   * parsed as JSON, whose install path is quoted on the page and searched for
+   * instead. Lets a finding cite the line its version actually came from.
+   */
+  line?: number;
 }
 
 interface NpmLockV3 {
@@ -89,9 +96,10 @@ const UNSUPPORTED_LOCKFILES = ['bun.lockb'];
  * be a nested path (`parent/child`) when Bun needs two versions of a package,
  * while element zero always spells the real `name@version`.
  */
-function parseBunLock(raw: string): Map<string, string> {
+function parseBunLock(raw: string, lines?: Map<string, number>): Map<string, string> {
   const versions = new Map<string, string>();
 
+  const rawLines = raw.split('\n');
   // Strip trailing commas before `}` or `]`. Bun writes them; JSON forbids them.
   const stripped = raw.replace(/,(\s*[}\]])/g, '$1');
   let doc: { packages?: Record<string, unknown> };
@@ -105,7 +113,14 @@ function parseBunLock(raw: string): Map<string, string> {
     const spec = Array.isArray(value) ? value[0] : value;
     if (typeof spec !== 'string') continue;
     const parsed = splitNameVersion(spec);
-    if (parsed && !versions.has(parsed.name)) versions.set(parsed.name, parsed.version);
+    if (parsed && !versions.has(parsed.name)) {
+      versions.set(parsed.name, parsed.version);
+      // Parsed as JSON, so the line is found afterwards: the spec string is
+      // written verbatim, quoted, only in the package's own entry — a
+      // dependency declaration names the package and version apart.
+      const at = rawLines.findIndex((l) => l.includes(`"${spec}"`));
+      if (at !== -1) lines?.set(parsed.name, at + 1);
+    }
   }
   return versions;
 }
@@ -136,11 +151,11 @@ function splitNameVersion(spec: string): { name: string; version: string } | nul
  * `/zod/3.25.76:` (v6 and earlier). Both appear at a fixed indent under
  * `packages:`, which is enough to find them without parsing YAML.
  */
-function parsePnpmLock(raw: string): Map<string, string> {
+function parsePnpmLock(raw: string, lines?: Map<string, number>): Map<string, string> {
   const versions = new Map<string, string>();
   let inPackages = false;
 
-  for (const line of raw.split('\n')) {
+  for (const [index, line] of raw.split('\n').entries()) {
     if (/^[a-zA-Z]/.test(line)) inPackages = /^packages:/.test(line);
     if (!inPackages) continue;
 
@@ -152,11 +167,17 @@ function parsePnpmLock(raw: string): Map<string, string> {
       const lastSlash = key.lastIndexOf('/');
       const name = key.slice(1, lastSlash);
       const version = key.slice(lastSlash + 1).split('(')[0] ?? '';
-      if (name && /^\d/.test(version) && !versions.has(name)) versions.set(name, version);
+      if (name && /^\d/.test(version) && !versions.has(name)) {
+        versions.set(name, version);
+        lines?.set(name, index + 1);
+      }
       continue;
     }
     const parsed = splitNameVersion(key);
-    if (parsed && !versions.has(parsed.name)) versions.set(parsed.name, parsed.version);
+    if (parsed && !versions.has(parsed.name)) {
+      versions.set(parsed.name, parsed.version);
+      lines?.set(parsed.name, index + 1);
+    }
   }
   return versions;
 }
@@ -177,11 +198,12 @@ function parsePnpmLock(raw: string): Map<string, string> {
  * (`installPath === ''`) and workspace symlinks (`link: true`) below — so
  * both are dropped before they ever reach `versions`.
  */
-function parseYarnLock(raw: string): Map<string, string> {
+function parseYarnLock(raw: string, lines?: Map<string, number>): Map<string, string> {
   const versions = new Map<string, string>();
   let pending: string[] = [];
+  let header = 0;
 
-  for (const line of raw.split('\n')) {
+  for (const [index, line] of raw.split('\n').entries()) {
     if (line.trim() === '' || line.startsWith('#')) continue;
 
     if (!/^\s/.test(line) && line.trimEnd().endsWith(':')) {
@@ -191,6 +213,7 @@ function parseYarnLock(raw: string): Map<string, string> {
         pending = [];
         continue;
       }
+      header = index + 1;
       pending = line
         .trimEnd()
         .slice(0, -1)
@@ -214,7 +237,13 @@ function parseYarnLock(raw: string): Map<string, string> {
 
     const version = line.match(/^\s+"?version"?:?\s+"?([^"\s]+)"?\s*$/)?.[1];
     if (version && pending.length > 0) {
-      for (const name of pending) if (!versions.has(name)) versions.set(name, version);
+      for (const name of pending) {
+        if (versions.has(name)) continue;
+        versions.set(name, version);
+        // The block's header, which names the package; the version line under
+        // it does not.
+        lines?.set(name, header);
+      }
       pending = [];
     }
   }
@@ -253,12 +282,14 @@ export async function readLockfile(repoDir: string): Promise<LockfileResult> {
       } catch {
         continue;
       }
-      const versions = parse(text);
+      const lines = new Map<string, number>();
+      const versions = parse(text, lines);
       if (versions.size === 0) return { ...empty, unsupported: file };
       const tree = new Map<string, LockEntry>();
       for (const [name, version] of versions) {
         const installPath = `node_modules/${name}`;
-        tree.set(installPath, { name, version, installPath, dev: false });
+        const line = lines.get(name);
+        tree.set(installPath, { name, version, installPath, dev: false, ...(line ? { line } : {}) });
       }
       return { versions, tree, kind: file, unsupported: null };
     }
