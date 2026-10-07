@@ -63,6 +63,13 @@ interface Parsed {
    * in. `undefined` means no `.devN` at all, which must outrank having one.
    */
   dev: number | undefined;
+  /**
+   * The `.postN` number, kept apart from `phase` for the reason `dev` is: a
+   * pre-release can have a post-release (`1.0a1.post1`), and `phase` records
+   * only the `a`. Folded in, the post was simply dropped. `undefined` means no
+   * `.postN`, which sorts below having one.
+   */
+  post: number | undefined;
   local: string | undefined;
 }
 
@@ -102,6 +109,7 @@ function parse(version: string): Parsed | null {
     phase,
     phaseNumber,
     dev,
+    post: postStr === undefined ? undefined : Number.parseInt(postStr, 10),
     local,
   };
 }
@@ -148,6 +156,13 @@ function compare(a: string, b: string): number {
 
   if (pa.phase !== pb.phase) return PHASE[pa.phase] - PHASE[pb.phase];
   if (pa.phaseNumber !== pb.phaseNumber) return pa.phaseNumber - pb.phaseNumber;
+
+  // Same pre-release: a post-release of it outranks it, and a later one
+  // outranks an earlier — `1.0a1 < 1.0a1.post1 < 1.0a1.post2`. For a plain
+  // post-release this repeats what `phaseNumber` already compared.
+  const aPost = pa.post ?? -1;
+  const bPost = pb.post ?? -1;
+  if (aPost !== bPost) return aPost - bPost;
 
   // Same phase and number: whichever side has a `.devN` is a preview of the
   // other and sorts lower. No `.devN` beats any `.devN` (`Infinity` beats every
