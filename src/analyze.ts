@@ -23,14 +23,13 @@ import {
 } from './detectors.ts';
 import { walkDir } from './callsites.ts';
 import {
-  fetchPackument,
-  fetchPackageDir,
   resolveTargetVersion,
-  compareVersions,
+  clientFor,
 } from './registry.ts';
-import { extractSurface } from './surface.ts';
+import { compareVersions } from './versions.ts';
+import { extractorFor } from './surface.ts';
 import { diffSurfaces, consumerImpacting } from './diff.ts';
-import { findCallSites } from './callsites.ts';
+import { locateCallSites } from './callsites.ts';
 import { materializeRepoDeps } from './vendor.ts';
 import type {
   ApiSurface,
@@ -233,13 +232,27 @@ export async function scanRepo(
     }
 
     try {
-      const packument = await fetchPackument(dep.name);
+      const client = clientFor(dep.ecosystem);
+      if (!client) {
+        return {
+          report: {
+            pkg: dep.name,
+            status: 'error',
+            fromVersion: from,
+            toVersion: null,
+            findings: [],
+            unlocatedBreaking: 0,
+            note: `no registry client claims ecosystem '${dep.ecosystem}'`,
+          },
+        };
+      }
+      const packageVersions = await client.versions(dep.name);
       const pinned = options.targets?.[dep.name];
       // A pin that was never published is a typo, and silently falling back to
       // `latest` would migrate somewhere the caller did not ask for while
       // reporting success. The benchmark would read that as the model
       // over-editing.
-      if (pinned && !packument.versions?.[pinned]) {
+      if (pinned && !packageVersions.versions.includes(pinned)) {
         return {
           report: {
             pkg: dep.name,
@@ -252,7 +265,7 @@ export async function scanRepo(
           },
         };
       }
-      const to = pinned ?? resolveTargetVersion(packument);
+      const to = pinned ?? resolveTargetVersion(packageVersions);
       if (!to) {
         return {
           report: {
@@ -282,13 +295,35 @@ export async function scanRepo(
 
       progress(`  ${dep.name}: ${from} -> ${to}`);
 
+      const extractor = extractorFor(dep.ecosystem);
+      if (!extractor) {
+        // No registered extractor is not "nothing changed" — an empty surface
+        // would diff that way. It is "nobody looked", which is what
+        // `unanalyzable` exists to say.
+        return {
+          report: {
+            pkg: dep.name,
+            status: 'unanalyzable',
+            fromVersion: from,
+            toVersion: to,
+            findings: [],
+            unlocatedBreaking: 0,
+            note: 'no surface extractor recognises this ecosystem',
+          },
+        };
+      }
+
+      // client.fetch, not the npm-only fetchPackageDir free function: this
+      // must download through the same client whose .versions() just answered
+      // for dep.ecosystem, or a PyPI package would ask npm's registry for a
+      // tarball that was never published there.
       const [fromDir, toDir] = await Promise.all([
-        fetchPackageDir(dep.name, from),
-        fetchPackageDir(dep.name, to),
+        client.fetch(dep.name, from),
+        client.fetch(dep.name, to),
       ]);
       const [fromSurface, toSurface] = await Promise.all([
-        extractSurface(fromDir, dep.name, from),
-        extractSurface(toDir, dep.name, to),
+        extractor.extract(fromDir, dep.name, from),
+        extractor.extract(toDir, dep.name, to),
       ]);
 
       const diff = diffSurfaces(fromSurface, toSurface);
@@ -347,9 +382,16 @@ export async function scanRepo(
     }
   });
 
-  // Stage 2: one TypeScript program over the repo, resolving every package at once.
+  // Stage 2: locate call sites, dispatched per ecosystem through the
+  // `CallSiteResolver` seam (callsites.ts). The TypeScript resolver can never
+  // see a `.py` file and the Python resolver can never see a `.ts` one, so a
+  // repository tracking packages from more than one ecosystem needs each
+  // resolver run against its own packages, through `locateCallSites`, rather
+  // than one resolver called on everything.
   const surfaces = new Map<string, ApiSurface>();
   const wanted = new Map<string, Set<string>>();
+  const ecosystemOf = new Map<string, string>();
+  for (const d of deps) ecosystemOf.set(d.name, d.ecosystem);
   for (const a of analyzed) {
     if (a.surface && a.impacting && a.impacting.length > 0) {
       surfaces.set(a.report.pkg, a.surface);
@@ -360,7 +402,7 @@ export async function scanRepo(
   let callSiteCount = 0;
   if (surfaces.size > 0) {
     progress(`locating call sites across ${surfaces.size} package(s)`);
-    const index = findCallSites(repoDir, surfaces, wanted);
+    const index = await locateCallSites(repoDir, surfaces, wanted, ecosystemOf);
     warnings.push(...index.warnings);
     progress(`  analyzed ${index.filesAnalyzed} source file(s)`);
 
@@ -414,9 +456,6 @@ export async function scanRepo(
   // in full and `api.Dockerfile` matches the same entry.
   const walked = walkDir(repoDir, [
     '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',
-    // Go, so its advisories' affected symbols can be looked for. A detector
-    // cannot be offered files the walk never collected.
-    '.go',
     '.sh', '.bash', 'Dockerfile', 'Containerfile',
   ]).map((f) => path.relative(repoDir, f));
 
@@ -430,7 +469,7 @@ export async function scanRepo(
   // When there *was* a cap, it dropped by walk order: on n8n it hid 8 of 8
   // Dockerfiles and 7 of 9 shell scripts, and `--lint` read as clean. The
   // partition below survives from that era and now only orders the list.
-  const configFiles = walked.filter((f) => /(Dockerfile|Containerfile)|\.(sh|bash|go)$/.test(f));
+  const configFiles = walked.filter((f) => /(Dockerfile|Containerfile)|\.(sh|bash)$/.test(f));
   const codeFiles = walked.filter((f) => !configFiles.includes(f));
   const sourceFiles = [...configFiles, ...codeFiles];
   const pinScan = await scanPins(

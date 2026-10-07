@@ -8,6 +8,7 @@ function context(files: Record<string, string>, installed: Array<[string, string
     repoDir: '/repo',
     dependencies: installed.map(([name, version]) => ({
       name,
+      ecosystem: 'npm',
       installed: version,
       declared: version,
       dev: false,

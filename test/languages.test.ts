@@ -1,0 +1,60 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { capabilitiesFor, coverageEcosystems, describeCoverage } from '../src/languages.ts';
+
+test('npm reports every tier as available', () => {
+  const caps = capabilitiesFor('npm');
+  assert.deepEqual(caps, { inventory: true, registry: true, surface: true, callSites: true });
+});
+
+test('an ecosystem with no extractor reports the gap rather than hiding it', () => {
+  const caps = capabilitiesFor('PyPI');
+  assert.equal(caps.surface, false);
+  assert.equal(caps.callSites, false);
+});
+
+test('the coverage line names what was not examined, and why', () => {
+  // The requirement: a reader must not be able to mistake "not examined" for
+  // "examined and clean".
+  // The analysed count passed here is irrelevant to this case (a missing tier
+  // is a capability fact, not an observation) and is 0 only because that is
+  // the simplest value to pass.
+  const line = describeCoverage('PyPI', 0);
+  assert.match(line, /not examined/);
+  assert.match(line, /PyPI/);
+  assert.doesNotMatch(line, /clean|no issues|nothing found/i);
+});
+
+test('a fully covered ecosystem with packages examined names the count, not a blanket claim', () => {
+  const line = describeCoverage('npm', 5);
+  assert.doesNotMatch(line, /not examined/);
+  assert.match(line, /\b5\b/);
+  assert.match(line, /all ran/);
+});
+
+test('a fully covered ecosystem with nothing examined does not claim any tier ran', () => {
+  // The defect this pins: every tier being *registered* is not the same claim
+  // as this scan having *run* them on something. A repository whose
+  // dependencies were all unresolved ranges used to hit "fully examined ...
+  // all ran" having analysed zero packages — this is the case that must not
+  // recur, on an ecosystem (npm) where every tier genuinely is registered.
+  const line = describeCoverage('npm', 0);
+  assert.doesNotMatch(line, /fully examined/);
+  assert.doesNotMatch(line, /all ran/);
+  assert.match(line, /no dependencies were analysed/);
+});
+
+test('an ecosystem the scan analysed keeps its coverage line when no inventory claims the repository', () => {
+  // npm's inventory claims a repository by its lockfile, while readRepo
+  // analyses a bare package.json — so a lockfile-less scan analysed packages,
+  // found breaking changes, and printed no coverage line at all. Silence is the
+  // one thing this line exists to rule out.
+  assert.deepEqual(coverageEcosystems('npm', []), ['npm']);
+});
+
+test('the analysed ecosystem comes first, and none is listed twice', () => {
+  // cli.ts credits the scan's counts to index 0 only, so the ecosystem that was
+  // analysed has to be the one there; a later claimant gets "0 analysed".
+  assert.deepEqual(coverageEcosystems('npm', ['PyPI', 'npm']), ['npm', 'PyPI']);
+  assert.deepEqual(coverageEcosystems(undefined, ['npm']), ['npm']);
+});

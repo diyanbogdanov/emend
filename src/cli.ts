@@ -14,6 +14,8 @@ import os from 'node:os';
 import { emendPath } from './paths.ts';
 import { scanRepo } from './analyze.ts';
 import { readRepo } from './inventory.ts';
+import { inventoriesFor } from './ecosystems.ts';
+import { coverageEcosystems, describeCoverage } from './languages.ts';
 import { reintroduced } from './remediate.ts';
 import { offersPagination } from './httpsites.ts';
 import { fixFinding, needsSourceRepair, fixFreshness, fixLint, fixPackage, fixPins, fixVulnerability } from './fix.ts';
@@ -48,8 +50,7 @@ import { parseSpec } from './specdiff.ts';
 import { behindCurrent } from './pins.ts';
 import { inHeadline } from './freshness.ts';
 import { previousVersion } from './github.ts';
-import { scanPackages, goSymbolRecord } from './osv.ts';
-import { goSymbolSites, symbolTargets } from './goreach.ts';
+import { scanPackages } from './osv.ts';
 import { LINT_ADAPTERS } from './lint.ts';
 import { enrichAdvisories } from './advisory.ts';
 import type { VulnerabilityOptions } from './detectors.ts';
@@ -63,7 +64,7 @@ import {
   renderSummary,
   type CaseOutcome,
 } from './eval.ts';
-import type { CallSite, Finding, ScanReport, Severity } from './types.ts';
+import type { Finding, ScanReport, Severity } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -360,24 +361,6 @@ function vulnerabilitiesFrom(args: Args): VulnerabilityOptions | undefined {
   return {
     scan: (packages) => scanPackages(fetch, packages),
     enrich: (ids) => enrichAdvisories(fetch, ids, { ...(token ? { token } : {}) }),
-    // Go only. The GHSA record carries no symbols; the GO-xxxx record it aliases
-    // does, so this is one more request per advisory in exchange for knowing
-    // whether the vulnerable *function* is reached rather than only the module.
-    goSymbols: async (pkg, ctx) => {
-      const sites: CallSite[] = [];
-      for (const vuln of pkg.vulnerabilities) {
-        const record = await goSymbolRecord(fetch, vuln.aliases);
-        if (!record) continue;
-        for (const target of symbolTargets(record, pkg.name)) {
-          for (const file of ctx.sourceFiles) {
-            if (!file.endsWith('.go')) continue;
-            const source = await ctx.read(file);
-            if (source !== null) sites.push(...goSymbolSites(file, source, target));
-          }
-        }
-      }
-      return sites;
-    },
   };
 }
 
@@ -456,7 +439,13 @@ const SUMMARY_CLASSES: ReadonlyArray<{
   },
 ];
 
-function printScan(report: ScanReport, showAll: boolean, current: CurrentVersions = new Map()): void {
+function printScan(
+  report: ScanReport,
+  showAll: boolean,
+  current: CurrentVersions = new Map(),
+  /** OSV ecosystems the scan actually found an inventory for. */
+  ecosystems: string[] = [],
+): void {
   const { counts } = report;
   console.log('');
   console.log(c.bold(`  Emend scan — ${report.repo}`));
@@ -601,6 +590,22 @@ function printScan(report: ScanReport, showAll: boolean, current: CurrentVersion
       `           ${counts.packagesAnalyzed} package(s) analyzed, ${counts.packagesSkipped} skipped (skipped ≠ clean)`,
     ),
   );
+  // Named per ecosystem, not folded into the counts above: a language absent
+  // from every seam's registry has nothing to count, and a summary that only
+  // reports what it found would look identical to one that looked everywhere
+  // and found nothing. See languages.ts.
+  //
+  // `counts` belongs to only the first ecosystem here: readRepo (inventory.ts)
+  // analyses just the first claimant of a repository, and `ecosystems` is
+  // built the same way (inventoriesFor, over this same unchanged repoDir), so
+  // index 0 in both is the same ecosystem. A later one was claimed but never
+  // actually read — crediting it with this scan's counts would attribute
+  // packages it never saw to it, the same species of mistake this line exists
+  // to stop making.
+  for (const [index, ecosystem] of ecosystems.entries()) {
+    const analyzed = index === 0 ? counts.packagesAnalyzed : 0;
+    console.log(c.dim(`           ${describeCoverage(ecosystem, analyzed)}`));
+  }
 
   if (report.warnings.length > 0) {
     console.log('');
@@ -654,7 +659,18 @@ async function cmdScan(args: Args): Promise<number> {
   if (args.flags.get('json') === true) {
     console.log(JSON.stringify(report, null, 2));
   } else {
-    printScan(report, args.flags.get('all') === true, await publishedVersions(report, contracts));
+    // Every dependency readRepo returns belongs to the one ecosystem it
+    // analysed, so the first names it.
+    const ecosystems = coverageEcosystems(
+      repo.dependencies[0]?.ecosystem,
+      (await inventoriesFor(repoDir)).map((i) => i.osvEcosystem),
+    );
+    printScan(
+      report,
+      args.flags.get('all') === true,
+      await publishedVersions(report, contracts),
+      ecosystems,
+    );
   }
 
   const store = new Store();
