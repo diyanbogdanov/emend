@@ -1,6 +1,6 @@
 {
   "name": "emend-cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Verified AI dependency migrations. Finds which of your lines a version bump actually breaks, fixes them, and proves the result still compiles and passes your tests.",
   "author": "Diyan Bogdanov",
   "license": "MIT",

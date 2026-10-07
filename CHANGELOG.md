@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-07
+
 ### Fixed
 
 - A Python call through an imported module also matched any class method of
@@ -162,7 +164,8 @@ First published release. MVP / proof of concept: TypeScript + npm + GitHub only.
   no test script means `typecheck-only`, skipped ≠ clean, and a run that cannot
   reach a model repairs nothing and says so.
 
-[Unreleased]: https://github.com/diyanbogdanov/emend/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/diyanbogdanov/emend/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/diyanbogdanov/emend/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/diyanbogdanov/emend/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/diyanbogdanov/emend/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/diyanbogdanov/emend/releases/tag/v0.1.0
