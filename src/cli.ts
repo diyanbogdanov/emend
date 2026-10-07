@@ -46,6 +46,7 @@ import {
 import { resolveSpec, httpFetcher } from './specfetch.ts';
 import { parseSpec } from './specdiff.ts';
 import { behindCurrent } from './pins.ts';
+import { inHeadline } from './freshness.ts';
 import { previousVersion } from './github.ts';
 import { scanPackages, goSymbolRecord } from './osv.ts';
 import { goSymbolSites, symbolTargets } from './goreach.ts';
@@ -62,7 +63,7 @@ import {
   renderSummary,
   type CaseOutcome,
 } from './eval.ts';
-import type { CallSite, Finding, ScanReport } from './types.ts';
+import type { CallSite, Finding, ScanReport, Severity } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -403,6 +404,58 @@ function severityLabel(sev: string): string {
  */
 type CurrentVersions = Map<string, string>;
 
+/**
+ * What a scan summary can report, and where each class gets its count.
+ *
+ * The list says what may be shown and how to word it. **It does not decide which
+ * side of the summary a class lands on** — `inHeadline` does, below, which is the
+ * point of it existing. Until this list had a reader, that rule was named in a
+ * comment in `analyze.ts` and enforced by nothing: the headline spelled
+ * `counts.breaking` and `counts.deprecation` by hand, so the guarantee the
+ * comment claimed was really "nobody edited that line".
+ *
+ * A class added here without a headline severity therefore appears below the
+ * fold by default, and one left out of the list entirely is not shown at all.
+ * Both are the direction a mistake should fail.
+ *
+ * `callSites` and the analyzed/skipped tally are absent on purpose: they are
+ * evidence volume and coverage, not classes of finding, and neither has a
+ * severity for `inHeadline` to judge.
+ */
+const SUMMARY_CLASSES: ReadonlyArray<{
+  severity: Severity;
+  count: (c: ScanReport['counts']) => number;
+  label: string;
+}> = [
+  { severity: 'breaking', count: (c) => c.breaking, label: 'breaking' },
+  { severity: 'deprecation', count: (c) => c.deprecation, label: 'deprecated' },
+  // A drifted pin, counted from the conflicts rather than from findings: the
+  // repair is `emend pins` and the authority is the lockfile, not a diff.
+  { severity: 'drift', count: (c) => c.pinConflicts, label: 'version pin(s) disagree' },
+  // A CVE is not an API change, and a reader who sees two vulnerabilities listed
+  // above a "0 breaking" summary reasonably concludes the summary is broken.
+  {
+    severity: 'vulnerability',
+    count: (c) => c.vulnerabilities,
+    label: 'package(s) with known vulnerabilities',
+  },
+  {
+    severity: 'lint',
+    count: (c) => c.lint,
+    label: 'lint finding(s) in Dockerfiles and shell scripts',
+  },
+  {
+    severity: 'freshness',
+    count: (c) => c.freshness,
+    label: 'package(s) behind latest with nothing that would break',
+  },
+  {
+    severity: 'feature',
+    count: (c) => c.features,
+    label: 'package(s) that gained exports you do not use yet',
+  },
+];
+
 function printScan(report: ScanReport, showAll: boolean, current: CurrentVersions = new Map()): void {
   const { counts } = report;
   console.log('');
@@ -528,32 +581,20 @@ function printScan(report: ScanReport, showAll: boolean, current: CurrentVersion
   }
 
   console.log('');
+  // Partitioned by `inHeadline`, never by which fields this line happens to
+  // name. The headline classes are shown at zero, because "0 breaking" is the
+  // answer somebody came for; the rest appear only when they have something to
+  // say, since a scan that lists every empty class buries the one that is not.
+  const headline = SUMMARY_CLASSES.filter((s) => inHeadline(s.severity));
+  const belowTheFold = SUMMARY_CLASSES.filter((s) => !inHeadline(s.severity));
   console.log(
-    `  ${c.bold('Summary')}  ${counts.breaking} breaking · ${counts.deprecation} deprecated · ${counts.callSites} call site(s)`,
+    `  ${c.bold('Summary')}  ${headline
+      .map((s) => `${s.count(counts)} ${s.label}`)
+      .join(' · ')} · ${counts.callSites} call site(s)`,
   );
-  if (counts.pinConflicts > 0) {
-    console.log(c.dim(`           ${counts.pinConflicts} version pin(s) disagree`));
-  }
-  // Its own line, not folded into the headline. A CVE is not an API change, and
-  // a reader who sees two vulnerabilities listed above a "0 breaking" summary
-  // reasonably concludes the summary is broken.
-  if (counts.vulnerabilities > 0) {
-    console.log(
-      c.dim(`           ${counts.vulnerabilities} package(s) with known vulnerabilities`),
-    );
-  }
-  if (counts.lint > 0) {
-    console.log(c.dim(`           ${counts.lint} lint finding(s) in Dockerfiles and shell scripts`));
-  }
-  if (counts.freshness > 0) {
-    console.log(
-      c.dim(`           ${counts.freshness} package(s) behind latest with nothing that would break`),
-    );
-  }
-  if (counts.features > 0) {
-    console.log(
-      c.dim(`           ${counts.features} package(s) that gained exports you do not use yet`),
-    );
+  for (const s of belowTheFold) {
+    const n = s.count(counts);
+    if (n > 0) console.log(c.dim(`           ${n} ${s.label}`));
   }
   console.log(
     c.dim(
