@@ -11,7 +11,7 @@ pass — or refuses to call it fixed.
 [![npm](https://img.shields.io/npm/v/emend-cli?color=2ea44f&label=npm)](https://www.npmjs.com/package/emend-cli)
 [![CI](https://github.com/diyanbogdanov/emend/actions/workflows/ci.yml/badge.svg)](https://github.com/diyanbogdanov/emend/actions/workflows/ci.yml)
 [![node](https://img.shields.io/badge/node-%E2%89%A522.6-informational)](https://nodejs.org)
-[![licence](https://img.shields.io/badge/licence-AGPL--3.0-blue)](./LICENSE)
+[![licence](https://img.shields.io/badge/licence-MIT-blue)](./LICENSE)
 
 </div>
 
@@ -242,27 +242,9 @@ Prompt changes are cheap to make and hard to judge, so there's a scored corpus:
 
 ## Can I use this at work?
 
-**Yes — running Emend on your own code triggers no obligations at all.**
-
-Emend is AGPL-3.0. The clause people are usually worried about is **§13, Remote Network
-Interaction**, and it is narrower than its reputation:
-
-| What you're doing | What you owe |
-| --- | --- |
-| Running `emend scan` / `fix` on your own repositories | **Nothing.** |
-| Running it in your own CI, on private code | **Nothing.** |
-| Modifying it for internal use | **Nothing**, as long as it stays internal. |
-| Running a **modified** Emend as a service *for other people* | Offer those users your modified source. |
-| Embedding it in a product you ship without AGPL terms | Get a commercial licence. |
-
-AGPL is a copyleft on *distribution and network service*, not on the code it reads. Emend
-analysing your repository no more licences your repository than `tsc` does.
-
-A separate **commercial licence** is available for embedding Emend without AGPL
-obligations — reach out via [issues](https://github.com/diyanbogdanov/emend/issues). That
-option only exists because contributions are collected under a [CLA](./CLA.md); see
-[CONTRIBUTING.md](./CONTRIBUTING.md) for why it's collected before the first merge rather
-than after.
+**Yes.** Emend is MIT-licensed: run it on private code, in your CI, as a service for other
+people, or embedded in a product you ship — modified or not, commercial or not. The one
+condition is keeping the copyright and licence notice with copies of the code.
 
 ---
 
@@ -335,6 +317,5 @@ A checkout runs its sources directly via native type stripping — no build step
 
 ## Licence
 
-Copyright © 2026 Diyan Bogdanov. **AGPL-3.0-only** — see [LICENSE](./LICENSE) and
-[Can I use this at work?](#can-i-use-this-at-work) above. Third-party material is listed
-in [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
+Copyright © 2026 Diyan Bogdanov. **MIT** — see [LICENSE](./LICENSE). Third-party
+material is listed in [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
