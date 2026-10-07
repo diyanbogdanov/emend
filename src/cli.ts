@@ -618,11 +618,10 @@ async function cmdScan(args: Args): Promise<number> {
   if (args.flags.get('json') === true) {
     console.log(JSON.stringify(report, null, 2));
   } else {
-    // npm, because readRepo reads package.json and nothing else until an
-    // inventory adapter replaces it (inventory.ts) — the same reason
-    // analyze.ts passes a literal 'npm'.
+    // Every dependency readRepo returns belongs to the one ecosystem it
+    // analysed, so the first names it.
     const ecosystems = coverageEcosystems(
-      'npm',
+      repo.dependencies[0]?.ecosystem,
       (await inventoriesFor(repoDir)).map((i) => i.osvEcosystem),
     );
     printScan(
