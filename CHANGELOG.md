@@ -28,6 +28,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - A vulnerable package that nothing imports cited `package-lock.json` as its
   site even in a pnpm, yarn or bun repository that has none — line 1 of a file
   that does not exist. It now cites the lockfile that was actually read.
+- A finding in a pnpm, yarn or bun repository cited line 1 of its lockfile,
+  with text that appears nowhere in it. It now cites the line the lockfile
+  names the package on.
+- An unreadable lockfile — a merge-conflict marker in `package-lock.json`, or a
+  `bun.lockb` alone — made a repository look as though it had no lockfile, so
+  `--vulns` screened nothing and said nothing. It now says the lockfile could
+  not be read.
 
 ## [0.1.1] — 2026-08-14
 
