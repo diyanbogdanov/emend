@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolverFor } from '../src/callsites.ts';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { locateCallSites, resolverFor } from '../src/callsites.ts';
+import type { ApiSurface } from '../src/types.ts';
 
 test('TypeScript claims the extensions it can type-check', () => {
   assert.equal(resolverFor('src/index.ts')?.id, 'typescript');
@@ -13,4 +17,67 @@ test('a file no resolver claims is undefined, not zero call sites', () => {
   // For a file nobody parsed, that sentence is false.
   assert.equal(resolverFor('app/main.py'), undefined);
   assert.equal(resolverFor('src/lib.rs'), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// locateCallSites — the actual scan-pipeline entry point into the seam above.
+//
+// Registering a resolver in `RESOLVERS` is not enough on its own: something
+// has to dispatch through `resolverForEcosystem` and await `find`. Before
+// these tests, `analyze.ts` called the TypeScript resolver's `findCallSites`
+// directly, so the seam had a registry nothing consulted, and a second
+// language's resolver would have been registered and never run. These prove
+// the dispatch itself, against real files on disk, not just that a resolver
+// is registered.
+// ---------------------------------------------------------------------------
+
+function minimalSurface(pkg: string): ApiSurface {
+  return { pkg, version: '1.0.0', symbols: {}, byTypeMember: {}, aliases: {}, entry: null };
+}
+
+function tempRepo(files: Record<string, string>): { dir: string; cleanup: () => void } {
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-locatecallsites-'));
+  for (const [name, body] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+    writeFileSync(path.join(dir, name), body);
+  }
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test('an npm package is routed through the seam to the TypeScript resolver, and its call site is found', async () => {
+  const repo = tempRepo({
+    'src/index.ts': "import { widget } from 'acme-sdk';\n\nwidget();\n",
+  });
+  try {
+    const surfaces = new Map([['acme-sdk', minimalSurface('acme-sdk')]]);
+    const wanted = new Map([['acme-sdk', new Set(['widget'])]]);
+    const ecosystemOf = new Map([['acme-sdk', 'npm']]);
+
+    const index = await locateCallSites(repo.dir, surfaces, wanted, ecosystemOf);
+
+    const sites = index.byPackage.get('acme-sdk')?.get('widget');
+    assert.equal(sites?.length, 1);
+    assert.equal(sites?.[0]?.line, 3);
+    assert.equal(index.filesAnalyzed, 1);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('a package whose ecosystem no resolver claims is named in a warning, not silently dropped', async () => {
+  const repo = tempRepo({ 'app.py': 'x = 1\n' });
+  try {
+    const surfaces = new Map([['some-crate', minimalSurface('some-crate')]]);
+    const wanted = new Map([['some-crate', new Set(['run'])]]);
+    const ecosystemOf = new Map([['some-crate', 'crates.io']]);
+
+    const index = await locateCallSites(repo.dir, surfaces, wanted, ecosystemOf);
+
+    // Not absent from `byPackage`: an empty bucket, so a caller counting
+    // impacting changes against it gets "unlocated", never a false "clean".
+    assert.deepEqual(index.byPackage.get('some-crate'), new Map());
+    assert.ok(index.warnings.some((w) => w.includes('crates.io') && w.includes('some-crate')));
+  } finally {
+    repo.cleanup();
+  }
 });
