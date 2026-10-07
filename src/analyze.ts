@@ -23,7 +23,6 @@ import {
 } from './detectors.ts';
 import { walkDir } from './callsites.ts';
 import {
-  fetchPackageDir,
   resolveTargetVersion,
   clientFor,
 } from './registry.ts';
@@ -233,12 +232,7 @@ export async function scanRepo(
     }
 
     try {
-      // 'npm' is transitional, not an unnoticed assumption: every dependency
-      // reaching this point was read from package.json, so it is genuinely the
-      // only correct ecosystem today. This will read the dependency's actual
-      // ecosystem once dependency inventory is driven per-ecosystem here,
-      // rather than assumed npm.
-      const client = clientFor('npm');
+      const client = clientFor(dep.ecosystem);
       if (!client) {
         return {
           report: {
@@ -248,7 +242,7 @@ export async function scanRepo(
             toVersion: null,
             findings: [],
             unlocatedBreaking: 0,
-            note: `no registry client claims ecosystem 'npm'`,
+            note: `no registry client claims ecosystem '${dep.ecosystem}'`,
           },
         };
       }
@@ -301,12 +295,7 @@ export async function scanRepo(
 
       progress(`  ${dep.name}: ${from} -> ${to}`);
 
-      // 'npm' is transitional, not an unnoticed assumption: every dependency
-      // reaching this point was read from package.json, so it is genuinely the
-      // only correct ecosystem today. This will read the dependency's actual
-      // ecosystem once dependency inventory is driven per-ecosystem here,
-      // rather than assumed npm.
-      const extractor = extractorFor('npm');
+      const extractor = extractorFor(dep.ecosystem);
       if (!extractor) {
         // No registered extractor is not "nothing changed" — an empty surface
         // would diff that way. It is "nobody looked", which is what
@@ -324,9 +313,13 @@ export async function scanRepo(
         };
       }
 
+      // client.fetch, not the npm-only fetchPackageDir free function: this
+      // must download through the same client whose .versions() just answered
+      // for dep.ecosystem, or a PyPI package would ask npm's registry for a
+      // tarball that was never published there.
       const [fromDir, toDir] = await Promise.all([
-        fetchPackageDir(dep.name, from),
-        fetchPackageDir(dep.name, to),
+        client.fetch(dep.name, from),
+        client.fetch(dep.name, to),
       ]);
       const [fromSurface, toSurface] = await Promise.all([
         extractor.extract(fromDir, dep.name, from),

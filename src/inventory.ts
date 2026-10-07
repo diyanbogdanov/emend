@@ -164,6 +164,9 @@ export async function readRepo(repoDir: string): Promise<RepoInfo> {
 
         byName.set(name, {
           name,
+          // npm, because this reads package.json and nothing else until an
+          // inventory adapter replaces it.
+          ecosystem: 'npm',
           declared,
           dev,
           installed,
