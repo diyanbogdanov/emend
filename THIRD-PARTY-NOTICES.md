@@ -1,6 +1,6 @@
 # Third-party notices
 
-Emend is licensed under AGPL-3.0-only (see [LICENSE](./LICENSE)). The material
+Emend is licensed under MIT (see [LICENSE](./LICENSE)). The material
 below is redistributed within this repository under its own licence, reproduced
 here as that licence requires.
 

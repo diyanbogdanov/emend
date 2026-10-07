@@ -7,6 +7,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- Relicensed from AGPL-3.0-only to MIT. The contributor licence agreement and the
+  commercial-licence offer are removed with it: both existed only to support dual
+  licensing, and MIT already permits everything the commercial licence sold.
+
 ## [0.1.1] — 2026-08-14
 
 ### Fixed
