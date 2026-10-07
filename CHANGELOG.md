@@ -7,11 +7,27 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- `emend scan` ends its summary with a coverage line per ecosystem, saying what
+  this scan actually examined — `npm: examined 4 package(s) — …` — or
+  `npm: no dependencies were analysed.` when it examined nothing.
+- When no verification runner recognises a repository, its skipped phases are
+  labelled `typecheck` and `test`, with the reason, where they were labelled
+  `npm test`. That label is what a pull request's verification table prints.
+  The outcome is unchanged: `unverified`.
+
 ### Removed
 
 - Go vulnerability scanning and symbol-level reachability. Go was Emend's second
   OSV ecosystem; it is removed ahead of Python and Rust support, which are built
   on a language seam rather than on branches in the detector.
+
+### Fixed
+
+- A vulnerable package that nothing imports cited `package-lock.json` as its
+  site even in a pnpm, yarn or bun repository that has none — line 1 of a file
+  that does not exist. It now cites the lockfile that was actually read.
 
 ## [0.1.1] — 2026-08-14
 

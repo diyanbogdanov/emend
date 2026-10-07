@@ -394,7 +394,7 @@ src/
   specfetch.ts    fetch and cache it
   github.ts       find the description in the vendor's OWN GitHub organisation
   specdiff.ts     description x description -> route changes
-  versions.ts     how an ecosystem orders its versions (semver; PEP 440 for PyPI)
+  versions.ts     how an ecosystem orders its versions (semver; other schemes register here)
   osv.ts          known vulnerabilities
   advisory.ts     advisory metadata and reachability
   pins.ts         version literals a repo writes down twice
