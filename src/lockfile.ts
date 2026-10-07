@@ -264,7 +264,10 @@ export async function readLockfile(repoDir: string): Promise<LockfileResult> {
   try {
     lock = JSON.parse(raw) as NpmLockV3;
   } catch {
-    return empty;
+    // Unreadable, which is not absent — the same report an unparseable pnpm,
+    // yarn or bun lockfile gets below. Returned as `empty`, a merge-conflict
+    // marker in package-lock.json read as a repository with no lockfile.
+    return { ...empty, unsupported: 'package-lock.json' };
   }
 
   const versions = new Map<string, string>();

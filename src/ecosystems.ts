@@ -12,7 +12,7 @@
  */
 
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { readLockfile } from './lockfile.ts';
 import type { InstalledPackage } from './osv.ts';
 import type { CallSite } from './types.ts';
@@ -79,13 +79,35 @@ function lockfileSite(file: string, lockfile: string, installPath: string): Call
   };
 }
 
+/** Every lockfile `readLockfile` looks at, parseable or not. */
+const LOCKFILE_NAMES = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb'];
+
+async function exists(file: string): Promise<boolean> {
+  try {
+    await access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function npmInventory(): EcosystemInventory {
   return {
     id: 'npm',
     osvEcosystem: 'npm',
 
+    // Whether there is a lockfile to read, not whether it parses. Parsing here
+    // cost a full parse every time anything asked which ecosystems claim a
+    // repository — once more per scan for the coverage line, and again inside
+    // the vulnerability screen, whose read() parses it anyway. And claiming
+    // only what parsed disowned a repository whose lockfile is unreadable: the
+    // screen did not run and said nothing, where read() reports it as
+    // `unsupported` and the screen says so.
     async applies(repoDir) {
-      return (await readLockfile(repoDir)).tree.size > 0;
+      for (const name of LOCKFILE_NAMES) {
+        if (await exists(path.join(repoDir, name))) return true;
+      }
+      return false;
     },
 
     async read(repoDir) {

@@ -104,3 +104,18 @@ test('a pnpm-only repository is cited by its own lockfile, not a fabricated pack
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an unreadable lockfile still claims the repository, so its packages are said to be unread', async () => {
+  // Claiming only when the lockfile parsed meant an unreadable one disowned the
+  // repository: the vulnerability screen then did not run and said nothing,
+  // which renders as a clean scan.
+  const dir = mkdtempSync(path.join(tmpdir(), 'emend-eco-broken-'));
+  try {
+    writeFileSync(path.join(dir, 'package-lock.json'), '{ "lockfileVersion": 3, <<<<<<< HEAD');
+    const [npm] = await inventoriesFor(dir);
+    assert.equal(npm?.id, 'npm');
+    assert.equal((await npm?.read(dir))?.unsupported, 'package-lock.json');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
