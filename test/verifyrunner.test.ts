@@ -51,14 +51,15 @@ test('the claiming runner wins over one that declines', async () => {
   }
 });
 
-test("a runner names its own skip labels rather than npm's", async () => {
+test("runPhase reports the claiming runner's own commands rather than npm's", async () => {
   // `skipped('npm test', …)` used to be hardcoded inside `runPhase`, so a Rust
   // repository would have reported skipping a command it has no concept of.
+  // Through runPhase itself, not the runner's own `run`: calling the fake
+  // directly asserted the fake's label and passed whatever runPhase did.
   const dir = mkdtempSync(path.join(tmpdir(), 'emend-verifyrunner-labels-'));
   try {
-    const runner = await runnerFor(dir, [fakeRunner('cargo', true)]);
-    assert.ok(runner);
-    const phase = await runner.run(dir, {});
+    const phase = await runPhase(dir, {}, [fakeRunner('cargo', true)]);
+    assert.equal(phase.typecheck.command, 'cargo check');
     assert.equal(phase.test.command, 'cargo test');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -77,6 +78,12 @@ test('an unclaimed repository is skipped, never silently passed', async () => {
     assert.equal(phase.test.skipped, true);
     assert.equal(phase.typecheck.ok, false);
     assert.equal(phase.test.ok, false);
+    // Named for what was not run, not for npm: a repository npm does not
+    // claim never had an `npm test` to skip. This label is what the pull
+    // request's verification table prints (pr.ts).
+    assert.equal(phase.typecheck.command, 'typecheck');
+    assert.equal(phase.test.command, 'test');
+    assert.match(phase.test.skipReason ?? '', /no verification runner recognises this repository/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

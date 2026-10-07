@@ -203,8 +203,12 @@ export async function runnerFor(
 export async function runPhase(
   dir: string,
   options: PhaseOptions = {},
+  // The runners to choose from — the real registry everywhere but the tests,
+  // for the same reason `runnerFor` takes one: a label hardcoded here is only
+  // caught by running a runner whose labels are not npm's.
+  registry: VerifyRunner[] = RUNNERS,
 ): Promise<VerifyPhase> {
-  const runner = await runnerFor(dir);
+  const runner = await runnerFor(dir, registry);
   if (!runner) {
     // Not a failure: nothing here understands this repository, and saying so is
     // the difference between `unverified` and a false pass.
