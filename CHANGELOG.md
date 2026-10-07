@@ -72,6 +72,22 @@ npm with this release.
   `bun.lockb` alone — made a repository look as though it had no lockfile, so
   `--vulns` screened nothing and said nothing. It now says the lockfile could
   not be read.
+- A pinned self-hosted model in the harness — `--harness=local/<model>` — was
+  sent with no provider block declared, so opencode rejected it with
+  `Model not found`. It now declares a provider for any self-hosted base URL
+  Emend's own client resolves.
+
+### Security
+
+- Repository files are no longer read through a link that leads outside the
+  repository. A scanned repository could commit `requirements.txt ->
+  /etc/passwd`: the file was parsed as requirements and its lines printed back
+  as package names, a linked `package.json` had its first bytes quoted in a
+  parse error, and the file walk followed links into the pins scanner,
+  detectors, lint tools and call-site resolvers. A file whose real path is
+  outside the repository is now refused and named in a warning; a link that
+  stays inside it is still read. This matters most for the hosted GitHub App,
+  which scans repositories it does not control.
 
 ## [0.1.1] — 2026-08-14
 
