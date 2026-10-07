@@ -56,6 +56,34 @@ test('a method name matches only in a file that imports the module', async () =>
   );
 });
 
+test('a call through an imported module is not also a method of some class', async () => {
+  // `requests.get(...)` is the module's own function. The receiver is the
+  // import binding itself, so it cannot be an instance of LookupDict, and
+  // reporting it as `LookupDict.get` too put a second, false finding on every
+  // `requests.get` call in a scan of the published 0.2.0.
+  assert.deepEqual(
+    await pythonSites('app.py', 'import requests\n\nr = requests.get("https://x")\n', 'requests', ['LookupDict.get']),
+    [],
+  );
+  // Any module, not only this package's: `helpers.close()` is a function in
+  // the repository's own module, whatever else the file imports.
+  assert.deepEqual(
+    await pythonSites('app.py', 'import requests\nimport helpers\n\nhelpers.close()\n', 'requests', ['Session.close']),
+    [],
+  );
+});
+
+test('a method called on an attribute of a module is still a method lead', async () => {
+  // `requests.codes` is a LookupDict instance, not a submodule, so this is a
+  // real LookupDict.get call. Only a receiver proven to be a module stops the
+  // name match; one that merely starts with a module's name does not.
+  const sites = await pythonSites(
+    'app.py', 'import requests\n\nok = requests.codes.get("ok")\n', 'requests', ['LookupDict.get'],
+  );
+  assert.equal(sites.length, 1);
+  assert.equal(sites[0]?.line, 3);
+});
+
 // The five tests above all import the flat, top-level name (`from werkzeug
 // import Headers`, `import werkzeug`). Measured against real Flask, that is
 // not how a real repository imports: Flask's own source imports `werkzeug`
