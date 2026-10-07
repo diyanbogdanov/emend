@@ -56,25 +56,27 @@ export interface EcosystemInventory {
  * disk at all. `file` is now a parameter so this only ever cites a lockfile
  * that is actually there; the caller is responsible for that guarantee.
  *
- * The search is for the install path *in quotes*, which is how npm writes it
- * (`"node_modules/qs": {`). pnpm, yarn and bun install paths are synthesized
- * by `readLockfile` rather than read off the page, so for those the search
- * will usually miss and fall through to line 1 — that fallback is honest, not
- * an artifact: the package genuinely is named somewhere in `file`, this just
- * did not pinpoint the line. `column` is likewise never computed. `via:
+ * pnpm, yarn and bun are read a line at a time, so `readLockfile` records the
+ * line each package was read from (`line`) and that is the one cited. npm's
+ * package-lock.json is parsed as JSON, so for it the install path is searched
+ * for *in quotes*, as npm writes it (`"node_modules/qs": {`). Searching for
+ * that path in the other three used to miss every time and cite line 1 —
+ * pnpm's `lockfileVersion` — with a synthesized path that appeared nowhere in
+ * the file. The text cited is the line as written. `column` is never
+ * computed. `via:
  * 'import'` is a stretch for a manifest reference — `CallSite.via` is only
  * `'import' | 'type'` — but widening that union changes what every renderer
  * prints, which a behaviour-neutral refactor must not do. Worth revisiting
  * when something other than npm has a manifest to point at.
  */
-function lockfileSite(file: string, lockfile: string, installPath: string): CallSite {
+function lockfileSite(file: string, lockfile: string, installPath: string, line?: number): CallSite {
   const lines = lockfile.split('\n');
-  const index = lines.findIndex((l) => l.includes(`"${installPath}"`));
+  const index = line !== undefined ? line - 1 : lines.findIndex((l) => l.includes(`"${installPath}"`));
   return {
     file,
     line: index === -1 ? 1 : index + 1,
     column: 1,
-    text: installPath,
+    text: index === -1 ? installPath : (lines[index] ?? '').trim().slice(0, 120),
     via: 'import',
   };
 }
@@ -148,17 +150,17 @@ function npmInventory(): EcosystemInventory {
       // One pass over the tree builds every install path this call could
       // need, rather than re-scanning it once per package as manifestSite
       // used to — the parse and the read above already happened only once.
-      const installPaths = new Map<string, string>();
+      const entries = new Map<string, { installPath: string; line?: number }>();
       for (const entry of lock.tree.values()) {
         const key = `${entry.name}@${entry.version}`;
-        if (!installPaths.has(key)) installPaths.set(key, entry.installPath);
+        if (!entries.has(key)) entries.set(key, entry);
       }
 
       const sites = new Map<string, CallSite>();
       for (const pkg of packages) {
         const key = `${pkg.name}@${pkg.version}`;
-        const installPath = installPaths.get(key) ?? pkg.name;
-        sites.set(key, lockfileSite(kind, raw, installPath));
+        const entry = entries.get(key);
+        sites.set(key, lockfileSite(kind, raw, entry?.installPath ?? pkg.name, entry?.line));
       }
       return sites;
     },
