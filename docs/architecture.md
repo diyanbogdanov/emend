@@ -385,7 +385,8 @@ src/
   lockfile.ts     package-lock.json -> resolved versions + install tree
   vendor.ts       reconstruct node_modules from the lockfile, no install
   inventory.ts    repo -> installed dependency versions
-  ecosystems.ts   per-ecosystem dependency inventory (npm today; where Python/Rust register)
+  ecosystems.ts   per-ecosystem dependency inventory (npm here; Python's is python/inventory.ts)
+  python/         the PyPI adapters: manifests, PyPI client, surface, call sites, verification
   workspaces.ts   every manifest directory a monorepo declares
   surface.ts      .d.ts -> public API surface (breadth-first, canonical paths)
   typescript/typedeps.ts materialises an npm package's type dependencies on disk, for TypeScript's own resolver
