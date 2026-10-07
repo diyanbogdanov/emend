@@ -65,3 +65,14 @@ test('an unparseable version is ordered last rather than crashing', () => {
   // lowest keeps it from ever being proposed as an upgrade target.
   assert.ok(pep.compare('not-a-version', '1.0') < 0);
 });
+
+test('a post-release of a pre-release outranks the pre-release it follows', () => {
+  // `1.0a1.post1` is a packaging fix to 1.0a1, so it sorts above it and below
+  // the next pre-release. The parse kept one phase per version and filed this
+  // under `a`, dropping the `.post1` — so it compared equal to 1.0a1, and an
+  // advisory fixed in the post-release read as still open.
+  const ordered = ['1.0a1.dev1', '1.0a1', '1.0a1.post1.dev1', '1.0a1.post1', '1.0a1.post2', '1.0a2', '1.0'];
+  const shuffled = [...ordered].reverse();
+  assert.deepEqual(shuffled.sort((a, b) => pep.compare(a, b)), ordered);
+  assert.ok(pep.isPrerelease('1.0a1.post1'));
+});

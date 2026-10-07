@@ -84,3 +84,25 @@ test('includes that loop back are each read once', async () => {
   });
   assert.deepEqual(read(await pythonInventory().declared(dir)), ['idna@3.7', 'requests@2.31.0']);
 });
+
+test('a requirements finding cites the line and file that require the package', async () => {
+  // The site was looked up with the lockfile needle, `name = "x"`, which no
+  // requirements file contains — so every finding cited line 1 of
+  // requirements.txt, including for a package that lives in an included file.
+  const dir = await repo({
+    'requirements.txt': '# pinned\nrequests==2.31.0 \\\n    --hash=sha256:aaaa\nurllib3==2.0.0\n-r base.txt\n',
+    'base.txt': '\nIdna==3.7\n',
+  });
+  const sites = await pythonInventory().manifestSites(dir, [
+    { name: 'urllib3', ecosystem: 'PyPI', version: '2.0.0' },
+    { name: 'idna', ecosystem: 'PyPI', version: '3.7' },
+  ]);
+  const at = (key: string) => {
+    const site = sites.get(key);
+    return site && `${site.file}:${site.line}`;
+  };
+  // Line 4, after a requirement continued across two lines.
+  assert.equal(at('urllib3@2.0.0'), 'requirements.txt:4');
+  // In the included file, matched under PEP 503 normalisation.
+  assert.equal(at('idna@3.7'), 'base.txt:2');
+});
