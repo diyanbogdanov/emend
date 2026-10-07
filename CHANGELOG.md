@@ -34,6 +34,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- Relicensed from AGPL-3.0-only to MIT. The contributor licence agreement and the
+  commercial-licence offer are removed with it: both existed only to support dual
+  licensing, and MIT already permits everything the commercial licence sold.
 - `emend scan` ends its summary with a coverage line per ecosystem, saying what
   this scan actually examined — `npm: examined 4 package(s) — …` — or
   `npm: no dependencies were analysed.` when it examined nothing.
