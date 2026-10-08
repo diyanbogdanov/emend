@@ -1,0 +1,61 @@
+# Publishes to npm when a `v*` tag is pushed, through npm's trusted publishing:
+# npm accepts this workflow's GitHub OIDC token in place of a stored npm token,
+# so there is no long-lived credential to leak or to expire. An expired one is
+# why 0.2.0's first publish failed, with a 404 that named the package rather
+# than the login. Provenance comes with it: npm records the repository, commit
+# and workflow that built each version, and shows them on the package page.
+#
+# npm trusts this workflow by its file name. Renaming the file stops releases
+# until the trusted publisher on npmjs.com names the new one.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  # Lets the job request the OIDC token that npm exchanges for a short-lived
+  # credential good for this one publish.
+  id-token: write
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The guard below asks whether the tagged commit is on main, which
+          # needs main's history and not only the tag's.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          # Trusted publishing needs npm 11.5.1 or later. The newest Node 24
+          # bundles one; the runner's cached Node 24 may be older.
+          check-latest: true
+          registry-url: https://registry.npmjs.org
+          # No `cache: npm`, unlike ci.yml: what gets published is built from
+          # the registry, not from a cache another workflow run wrote.
+      # Pushing the tag is the release, and nobody approves it afterwards, so
+      # the two mistakes a tag can carry stop here, before anything is built: a
+      # tag that disagrees with the version it would publish, and a tag on a
+      # commit that never reached main, which would ship code no pull request
+      # reviewed.
+      - name: the tag matches package.json and is on main
+        run: |
+          version="v$(node -p 'require("./package.json").version')"
+          if [ "$GITHUB_REF_NAME" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME would publish package.json's $version"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::tag $GITHUB_REF_NAME is on a commit that is not on main"
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # No `--provenance`: trusted publishing generates provenance by itself.
+      - run: npm publish
