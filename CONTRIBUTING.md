@@ -54,3 +54,23 @@ loosens one needs to say why in its commit message.
 **Comments explain why, not what.** The interesting content in this codebase is
 the reasoning behind a decision — usually a specific failure that motivated it.
 Prefer recording what went wrong over describing what the code does.
+
+## Releasing
+
+For maintainers. A release is a pull request, then a tag:
+
+1. On a branch, run `npm version X.Y.Z --no-git-tag-version`, move the
+   changelog's `[Unreleased]` entries under `[X.Y.Z] — <date>` with a compare
+   link, and open a pull request.
+2. Once it is merged, tag the merge commit and push the tag:
+
+   ```bash
+   git checkout main && git pull
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+
+3. [`release.yml`](./.github/workflows/release.yml) publishes that tag to npm,
+   with provenance and without an npm login or token. It refuses a tag that does
+   not match `package.json`'s version or is not on `main`, and runs the
+   typecheck and tests first.
+4. Create the GitHub release from the changelog's `[X.Y.Z]` section.
